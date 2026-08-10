@@ -27,9 +27,26 @@
 
 ## 快速开始
 
+### 1) 安装依赖
+
 ```bash
 cd /home/jojo/projects/solar-feasibility-vic
 python -m pip install -r requirements.txt
+```
+
+### 2) 运行网页版本（推荐）
+
+```bash
+cd /home/jojo/projects/solar-feasibility-vic
+python web_app.py
+```
+
+打开浏览器访问：`http://localhost:8000`
+
+### 3) 运行 Streamlit 版（保留）
+
+```bash
+cd /home/jojo/projects/solar-feasibility-vic
 streamlit run app.py
 ```
 
