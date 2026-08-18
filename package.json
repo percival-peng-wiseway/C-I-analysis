@@ -1,0 +1,11 @@
+{
+  "name": "e3-ci-analyzer-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "frontend:dev": "pnpm --filter @e3-ci-analyzer/web dev",
+    "frontend:build": "pnpm --filter @e3-ci-analyzer/web build",
+    "frontend:typecheck": "pnpm --filter @e3-ci-analyzer/web typecheck",
+    "frontend:test": "pnpm --filter @e3-ci-analyzer/web test"
+  }
+}
