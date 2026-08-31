@@ -1,5 +1,4 @@
 import { Container } from "@cloudflare/containers";
-import { env as workerEnv } from "cloudflare:workers";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 interface Env {
@@ -16,28 +15,29 @@ interface Env {
   LOCAL_ACTOR_DISPLAY_NAME: string;
 }
 
-const containerEnv = workerEnv as unknown as Env;
-
 const accessJwks = new Map<
   string,
   ReturnType<typeof createRemoteJWKSet>
 >();
 
 export class E3ApiContainer extends Container<Env> {
-  defaultPort = 8080;
-  sleepAfter = "10m";
-
-  envVars: Record<string, string> = {
-    DATABASE_URL: containerEnv.DATABASE_URL,
-    OBJECT_STORE_BACKEND: "http",
-    OBJECT_STORE_HTTP_BASE_URL: "http://e3-r2.internal",
-    DURABLE_API_AUTH_MODE: "restricted",
-    DURABLE_API_BEARER_TOKEN: containerEnv.DURABLE_API_BEARER_TOKEN,
-    LOCAL_WORKSPACE_ID: containerEnv.LOCAL_WORKSPACE_ID,
-    LOCAL_OWNER_ID: containerEnv.LOCAL_OWNER_ID,
-    LOCAL_ACTOR_ID: containerEnv.LOCAL_ACTOR_ID,
-    LOCAL_ACTOR_DISPLAY_NAME: containerEnv.LOCAL_ACTOR_DISPLAY_NAME,
-  };
+  constructor(ctx: DurableObjectState<{}>, env: Env) {
+    super(ctx, env, {
+      defaultPort: 8080,
+      sleepAfter: "10m",
+      envVars: {
+        DATABASE_URL: env.DATABASE_URL,
+        OBJECT_STORE_BACKEND: "http",
+        OBJECT_STORE_HTTP_BASE_URL: "http://e3-r2.internal",
+        DURABLE_API_AUTH_MODE: "restricted",
+        DURABLE_API_BEARER_TOKEN: env.DURABLE_API_BEARER_TOKEN,
+        LOCAL_WORKSPACE_ID: env.LOCAL_WORKSPACE_ID,
+        LOCAL_OWNER_ID: env.LOCAL_OWNER_ID,
+        LOCAL_ACTOR_ID: env.LOCAL_ACTOR_ID,
+        LOCAL_ACTOR_DISPLAY_NAME: env.LOCAL_ACTOR_DISPLAY_NAME,
+      },
+    });
+  }
 }
 
 E3ApiContainer.outboundByHost = {
@@ -136,7 +136,22 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
   headers.delete("Cf-Access-Jwt-Assertion");
   const upstreamRequest = new Request(request, { headers });
   const containerId = env.E3_API.idFromName("primary");
-  return env.E3_API.get(containerId).fetch(upstreamRequest);
+  try {
+    const response = await env.E3_API.get(containerId).fetch(upstreamRequest);
+    if (!response.ok) {
+      console.error("E3 container upstream failed", {
+        status: response.status,
+        body: await response.clone().text(),
+      });
+    }
+    return response;
+  } catch (error) {
+    console.error(
+      "E3 Durable Object proxy failed",
+      error instanceof Error ? error.message : String(error),
+    );
+    return new Response("Backend container unavailable", { status: 503 });
+  }
 }
 
 export default {
