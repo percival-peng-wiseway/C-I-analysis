@@ -1,109 +1,106 @@
-# VIC 光伏+电池可行性分析（工商业）
+# E3 C&I Analyzer
 
-这是一个可本地运行的 MVP：基于客户详细用电曲线（建议 15min/30min/1h）和电费输入，
-快速做工商业客户的 **HOMER/Orkestra 类似 feasibility 分析**。
+Standalone local workspace for commercial and industrial solar, battery and
+inverter feasibility analysis.
 
-当前版本聚焦：
-- 光伏（PV）与储能（Battery）规模组合
-- VIC 工商业场景下的账单与现金流
-- 月峰值需量、能量电费、固定费、可选反送电计价
-- 简洁仪表盘（streamlit）和图表
+The project contains only the C&I product surface and its calculation
+dependencies. It does not include the Residential cockpit, Residential
+migrations, Docker services, customer source files or data copied from the
+original repository.
 
-> ⚠️ 注意：默认电价参数是“演示值/示例参数”，请用客户真实合同/电费协议替换。
+## Included workflow
 
-## 功能
+- Project overview and project-scoped persistence
+- Electricity-bill PDF and NEM12/interval-data intake
+- Input checks, bill breakdown and annual demand heatmaps
+- Solar PV, inverter and battery design ranges
+- Physical feasibility and interval-activity visualisation
+- Saved feasibility results that survive navigation and restart
+- Annual financial scenario workspace, pricing catalog and internal reports
 
-- 上传：
-  - `CSV/XLSX` 负荷曲线（时间戳 + 用电量 kWh）
-  - 可选：账单摘要文件（用于自动估计基准电价）
-- 自动预处理：时间解析、时区/频率处理、按小时聚合
-- 情景分析：网格搜索 PV（kWp）与电池（kWh / kW）组合
-- 输出：
-  - 年化基准电费与系统后电费
-  - 能源费/需量费分解
-  - 简单 NPV/回收期/IRR 近似指标
-  - 节省率、负荷自发自用率
-  - 月度柱状节约、年化现金流、示例场景的逐时仿真曲线
+Customer-facing recommendations and claims remain disabled. Tariff analysis
+continues to fail closed when its required local evidence profile is absent or
+does not match the uploaded evidence.
 
-## 快速开始
+## Local requirements
 
-### 1) 安装依赖
+- macOS or Linux
+- Python 3.12 or newer
+- Node.js with `pnpm` or `corepack`
 
-```bash
-cd /home/jojo/projects/solar-feasibility-vic
-python -m pip install -r requirements.txt
-```
+Docker and PostgreSQL are not required for local use. The default database is
+SQLite and all runtime data is stored under the ignored `.local/` directory.
 
-### 2) 运行网页版本（推荐）
+## First start
 
 ```bash
-cd /home/jojo/projects/solar-feasibility-vic
-python web_app.py
+cd "/Users/pperciva1/Desktop/E3_files/C&I_analysis/E3_C&I_analyzer"
+./scripts/setup_local.sh
+./scripts/dev.sh
 ```
 
-打开浏览器访问：`http://localhost:8000`
+Then open [http://127.0.0.1:15173](http://127.0.0.1:15173).
 
-### 3) 运行 Streamlit 版（保留）
+The API is available at [http://127.0.0.1:18080](http://127.0.0.1:18080), and
+its health check is `/api/health`.
+
+`./scripts/dev.sh` performs pending database migrations before starting the
+API and frontend. Press `Ctrl+C` once to stop both processes.
+
+## Local data
+
+The default local files are:
+
+```text
+.local/e3_ci_analyzer.sqlite3   project records and saved results
+.local/object_store/            uploaded bills, interval files and reports
+.local/ci/active-tariff-profile.json  optional evidence-bound tariff profile
+```
+
+The complete `.local/` directory is ignored by Git. Do not move customer PDFs,
+NEM12 files, tariff evidence or generated customer artifacts into source or
+test directories.
+
+To reset only a disposable local development instance, stop the application
+and move `.local/` to a backup location. Do not delete it when it contains
+project evidence that has not been backed up.
+
+## Tests
 
 ```bash
-cd /home/jojo/projects/solar-feasibility-vic
-streamlit run app.py
+./scripts/test.sh
+pnpm frontend:build
 ```
 
-## 输入文件格式（示例）
+The Python tests and migrations use synthetic, private-data-free fixtures.
 
-### 负荷曲线（必需）
+## Configuration
 
-文件需包含时间戳与每个计量间隔的能量列。例如:
+Copy `.env.example` for a list of supported variables. The local scripts set
+safe loopback defaults without reading a `.env` file. Export an environment
+variable before starting to override a default.
 
-```csv
-# sample_data/sample_load_hourly.csv
-timestamp,energy_kwh
-2026-01-01 00:00:00,85.2
-2026-01-01 01:00:00,72.4
-...
-```
+The default ports are `E3_API_PORT=18080` and `E3_WEB_PORT=15173`. Override
+either variable when another local application already uses a port.
 
-程序会自动识别常见字段名：
-- 时间列：`timestamp`,`time`,`datetime`,`date`
-- 用电量列：`kwh`,`energy_kwh`,`consumption_kwh`,`value`
-
-### 账单文件（可选）
-
-支持 `bill_amount`, `annual_kwh`, `peak_kw`, `demand_charge`, `energy_charge` 等关键字段，缺省会尝试做文本匹配提取。
-
-## 示例运行（无UI）
-
-在 shell 下生成一个样例场景并输出前 5 行结果:
+For PostgreSQL later, install the optional driver and set `DATABASE_URL`:
 
 ```bash
-cd /home/jojo/projects/solar-feasibility-vic
-python - <<'PY'
-from pathlib import Path
-from vic_feasibility.engine import run_feasibility
-import pandas as pd
-
-load_csv = Path('sample_data/sample_load_hourly.csv')
-res = run_feasibility(
-    load_path=load_csv,
-    pv_kw_choices=[0,100,200],
-    batt_kw_choices=[0,50,100],
-    batt_kwh_choices=[0,150,300],
-)
-print(res['best_scenarios'][['pv_kw','battery_kwh','npv_20y','payback_years','annual_savings']].head())
-print('baseline annual cost:', res['baseline_summary']['total_cost'])
-PY
+.venv/bin/pip install -e '.[postgres]'
+export DATABASE_URL='postgresql+psycopg://...'
+./scripts/dev.sh
 ```
 
-## 文件结构
+## Cloud deployment boundary
 
-- `app.py`：Streamlit UI
-- `src/vic_feasibility/`：核心计算引擎
-- `sample_data/`：示例文件
+The React frontend and Python API remain separate build targets. The frontend
+can later be built as static assets, while the Python/HiGHS calculation API,
+database and private object storage must retain a server-side runtime and
+authentication boundary. See `docs/ARCHITECTURE.md` before deployment.
 
-## 后续可扩展
+## Provenance
 
-- 接入真实天气站点（Swin) API 形成更准确太阳资源（按纬度/经度）
-- 支持更多 VIC 电费结构（阶梯、分时段需量、季节分段）
-- 加入项目层级多场址、导出 PDF 报告（含图表）
-- 加入报价模板和客户参数（OPEX、融资成本、税前税后等）
+The internal Python namespace remains `solar_battery` so the migrated C&I
+calculation contracts and historical test provenance stay traceable. The
+standalone product and package are named `E3 C&I Analyzer`; no Residential UI
+or database tables are present.
