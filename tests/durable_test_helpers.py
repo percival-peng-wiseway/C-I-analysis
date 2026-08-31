@@ -82,6 +82,8 @@ def durable_settings(
     return DurableCockpitSettings(
         database_url=database_url,
         object_store_root=object_store_root,
+        object_store_backend="filesystem",
+        object_store_http_base_url="",
         local_workspace_id="local-workspace",
         local_owner_id="local-analyst",
         local_actor_id="local-analyst",

@@ -12,6 +12,8 @@ LOOPBACK_DEVELOPMENT_AUTH_MODE = "loopback_development"
 class DurableCockpitSettings:
     database_url: str
     object_store_root: str
+    object_store_backend: str
+    object_store_http_base_url: str
     local_workspace_id: str
     local_owner_id: str
     local_actor_id: str
@@ -46,6 +48,14 @@ class DurableCockpitSettings:
             object_store_root=os.getenv(
                 "OBJECT_STORE_ROOT",
                 ".local/object_store",
+            ),
+            object_store_backend=os.getenv(
+                "OBJECT_STORE_BACKEND",
+                "filesystem",
+            ),
+            object_store_http_base_url=os.getenv(
+                "OBJECT_STORE_HTTP_BASE_URL",
+                "",
             ),
             local_workspace_id=os.getenv(
                 "LOCAL_WORKSPACE_ID",

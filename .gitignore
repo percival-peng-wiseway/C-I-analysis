@@ -9,12 +9,16 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 node_modules/
+.pnpm-store/
 apps/web/dist/
 apps/web/coverage/
 apps/web/test-results/
 apps/web/playwright-report/
+worker-configuration.d.ts
 
 # Customer evidence belongs in the ignored local object store, never Git.
 private/
 uploads/
+chef_q/
+.server.*.log
 *.sqlite3

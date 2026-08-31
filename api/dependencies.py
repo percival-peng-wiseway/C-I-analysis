@@ -7,9 +7,7 @@ from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from solar_battery.durable_cockpit.db import build_session_factory
-from solar_battery.durable_cockpit.filesystem_object_store import (
-    FilesystemObjectStore,
-)
+from solar_battery.durable_cockpit.object_store_factory import build_object_store
 from solar_battery.durable_cockpit.identity import (
     InvalidLocalCredentialError,
     LocalIdentityProvider,
@@ -68,7 +66,7 @@ def get_durable_session_factory():
 
 @lru_cache
 def _cached_object_store(settings: DurableCockpitSettings):
-    return FilesystemObjectStore(settings.object_store_root)
+    return build_object_store(settings)
 
 
 def get_object_store():

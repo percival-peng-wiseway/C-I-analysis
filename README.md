@@ -91,12 +91,18 @@ export DATABASE_URL='postgresql+psycopg://...'
 ./scripts/dev.sh
 ```
 
-## Cloud deployment boundary
+## Cloudflare deployment
 
-The React frontend and Python API remain separate build targets. The frontend
-can later be built as static assets, while the Python/HiGHS calculation API,
-database and private object storage must retain a server-side runtime and
-authentication boundary. See `docs/ARCHITECTURE.md` before deployment.
+The production Worker serves the built React assets and routes `/api/*` to a
+single Cloudflare Container running the Python/FastAPI/HiGHS API. Customer
+artifacts use a private R2 binding; no R2 credential is exposed to the browser
+or container. PostgreSQL remains mandatory because Cloudflare Container disks
+are ephemeral and therefore cannot safely hold the application database.
+
+The Worker must be protected by Cloudflare Access before customer evidence is
+uploaded. Backend credentials and Access configuration are Worker secrets and
+must never be committed. See `docs/CLOUDFLARE_DEPLOYMENT.md` for the required
+resources, secrets, build command and verification steps.
 
 ## Provenance
 

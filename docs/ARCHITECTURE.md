@@ -46,28 +46,29 @@ The neutral `solar_profile.py` module contains the migrated deterministic PV
 shape used by C&I calculations. Residential calculation, UI, database and
 migration modules are not included.
 
-## Future hosted runtime
+## Hosted Cloudflare runtime
 
 Keep the same logical separation:
 
 ```text
-Static frontend hosting
+Cloudflare Worker static assets
     |
-    | authenticated HTTPS API
+    | Cloudflare Access + /api routing
     v
-Python API / calculation service
-    |-- managed PostgreSQL
-    `-- private object storage
+Cloudflare Container: Python API / calculation service
+    |-- durable PostgreSQL
+    `-- private R2 object storage through a Worker binding
 ```
 
-Do not embed the local bearer token in a public frontend bundle. A hosted
-version needs real user identity, server-side authorization and private file
-access controls before customer evidence is uploaded.
+The Worker validates Cloudflare Access JWTs and adds the private API bearer
+credential only to the internal Container request. The frontend bundle never
+contains that credential. The Container reaches R2 through an outbound Worker
+handler, so R2 keys are not present in the image or runtime environment.
 
-The frontend `pnpm frontend:build` output is static. The Python API uses
-packages such as HiGHS and PDF rendering that must be validated against the
-selected hosted runtime separately. Cloud deployment is intentionally not
-enabled by this local migration.
+Container disk is deliberately excluded from persisted-result meaning. The
+startup command rejects SQLite database URLs, applies Alembic migrations to
+PostgreSQL, then starts FastAPI. A single container instance matches the
+current one-analyst concurrency model; scale-out remains a later decision.
 
 ## Scale triggers
 
