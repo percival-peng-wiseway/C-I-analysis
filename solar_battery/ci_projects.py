@@ -100,12 +100,14 @@ def record_ci_design_candidates(
     project_id: UUID,
     candidate_count: int,
     candidates: list[dict[str, object]],
+    design_context: dict[str, object],
     actor: LocalActorContext,
 ) -> dict[str, object]:
     row = require_ci_project(session, project_id=project_id, actor=actor)
     row.current_stage = "system_design"
     row.design_candidate_count = candidate_count
     row.design_candidates_json = candidates
+    row.design_context_json = design_context
     row.updated_by_actor_id = actor.actor_id
     row.updated_at = datetime.now(timezone.utc)
     session.flush()
@@ -119,6 +121,15 @@ def saved_ci_design_candidates(
     if row.design_candidates_json is None:
         return None
     return [dict(candidate) for candidate in row.design_candidates_json]
+
+
+def saved_ci_design_context(
+    session, *, project_id: UUID, actor: LocalActorContext
+) -> dict[str, object] | None:
+    row = require_ci_project(session, project_id=project_id, actor=actor)
+    if row.design_context_json is None:
+        return None
+    return dict(row.design_context_json)
 
 
 def mark_ci_financial_simulation_ready(

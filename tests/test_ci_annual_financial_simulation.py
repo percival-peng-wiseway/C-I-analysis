@@ -65,15 +65,22 @@ def _catalog() -> dict[str, object]:
     }
 
 
+def _device_profile() -> dict[str, object]:
+    from solar_battery.ci_device_profile import suggested_ci_device_profile
+
+    return suggested_ci_device_profile()
+
+
 def _physical_result(_upload, *, profile, scenarios):
     results = []
-    for scenario in scenarios:
+    for index, scenario in enumerate(scenarios, start=1):
         battery = float(scenario["nominal_capacity_kwh"]) > 0
         cost_ex = 60000.0 if battery else 70000.0
         results.append(
             {
                 "scenario_id": scenario["scenario_id"],
                 "label": scenario["label"],
+                "physical_review_rank": index,
                 "authored_inputs": {
                     key: value
                     for key, value in scenario.items()
@@ -97,9 +104,43 @@ def _physical_result(_upload, *, profile, scenarios):
             }
         )
     return {
+        "contract_version": "ci_physical_scenario_review_v6",
+        "analysis_status": "ready",
+        "analysis_mode": "evidence_limited_internal_review",
+        "customer_facing_permission": False,
+        "recommendation_permitted": False,
+        "currency_values_permitted": True,
         "profile": {"profile_id": "test", "display_label": "Test profile", "source_version": "v1"},
         "baseline": {"raw_rolling_demand_kva": 300.0},
         "scenarios": results,
+        "report_preview": {"download_available": False},
+    }
+
+
+def _feasibility_result(scenarios: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "contract_version": "ci_design_feasibility_v4",
+        "status": "ready",
+        "analysis_mode": "pre_tariff_physical_feasibility",
+        "customer_facing_permission": False,
+        "recommendation_permitted": False,
+        "tariff_evaluated": False,
+        "currency_values_permitted": False,
+        "physical_review_order": {
+            "algorithm_id": "ci_pre_tariff_physical_review_order_v2",
+            "shortlist_count": min(10, len(scenarios)),
+            "basis": "Test physical review order only.",
+            "recommendation_permitted": False,
+        },
+        "scenarios": [
+            {
+                "scenario_id": item["scenario_id"],
+                "label": item["label"],
+                "physical_review_rank": index,
+                "recommendation_permitted": False,
+            }
+            for index, item in enumerate(scenarios, start=1)
+        ],
     }
 
 
@@ -182,3 +223,171 @@ def test_project_annual_finance_compares_pv_only_with_battery_and_projects_cashf
         refreshed = client.get("/api/commercial-industrial/projects").json()["projects"][0]
         assert refreshed["current_stage"] == "financial_simulation"
         assert refreshed["design_status"] == "ready"
+
+
+def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_npv(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("api.ci_routes.load_ci_tariff_profile", lambda: {})
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda _bill, _nem12, **_kwargs: {
+            "contract_version": "ci_evidence_intake_v7",
+            "intake_status": "ready_for_profile_review",
+            "bill": {
+                "review_status": "analyst_confirmed",
+                "network_tariff_code": "TEST",
+            },
+            "nem12": {"full_tariff_analysis_ready": True},
+        },
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.analyze_ci_physical_scenarios",
+        _physical_result,
+    )
+    scenarios = [
+        _scenario(),
+        {
+            **_scenario(),
+            "scenario_id": "pv-002__battery-001",
+            "label": "120 kWp + 200 kWh",
+            "pv_system_id": "pv-002",
+            "pv_capacity_kwp_dc": 120.0,
+            "pv_inverter_capacity_kw_ac": 90.0,
+        },
+        {
+            **_scenario(),
+            "scenario_id": "pv-003__battery-001",
+            "label": "140 kWp + 200 kWh",
+            "pv_system_id": "pv-003",
+            "pv_capacity_kwp_dc": 140.0,
+            "pv_inverter_capacity_kw_ac": 150.0,
+        },
+    ]
+    monkeypatch.setattr(
+        "api.ci_routes.analyze_ci_design_feasibility",
+        lambda _upload, *, scenarios: _feasibility_result(scenarios),
+    )
+    with create_test_client(sqlite_url_for_path(tmp_path / "annual-compare.sqlite3")) as client:
+        project = client.post(
+            "/api/commercial-industrial/projects", json={"display_name": "Factory"}
+        ).json()
+        client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/evidence-intake/inspect",
+            files={
+                "bill": ("bill.pdf", b"synthetic", "application/pdf"),
+                "nem12": ("nem12.csv", b"synthetic", "text/csv"),
+            },
+        )
+        saved = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/design-candidates",
+            json={"scenarios": scenarios},
+        )
+        assert saved.status_code == 200, saved.json()
+        feasibility = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/design-feasibility"
+        )
+        assert feasibility.status_code == 200, feasibility.json()
+        device_profile = client.put(
+            "/api/commercial-industrial/settings/device-profile",
+            json=_device_profile(),
+        )
+        assert device_profile.status_code == 200, device_profile.json()
+        tariff = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/tariff-replay"
+        )
+        assert tariff.status_code == 200, tariff.json()
+        automatic = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
+        ).json()
+        assert automatic["status"] == "ready"
+        assert automatic["result"]["assumptions"]["price_source"] == "workspace_device_profile"
+        assert automatic["result"]["shortlist_source"]["shortlist_count"] == 3
+        auto_by_id = {
+            item["scenario_id"]: item for item in automatic["result"]["solutions"]
+        }
+        assert auto_by_id[scenarios[0]["scenario_id"]][
+            "upfront_cost_aud_ex_gst"
+        ] == 137992.07
+        assert auto_by_id[scenarios[0]["scenario_id"]][
+            "capex_breakdown_aud_ex_gst"
+        ] == {"pv_aud": 53000.0, "battery_aud": 74992.07, "inverter_aud": 10000.0}
+        assert auto_by_id[scenarios[2]["scenario_id"]][
+            "capex_breakdown_aud_ex_gst"
+        ]["inverter_aud"] == 20000.0
+        changed_profile = client.put(
+            "/api/commercial-industrial/settings/device-profile",
+            json={**_device_profile(), "battery_cost_aud_per_kwh": 500.0},
+        )
+        assert changed_profile.status_code == 200
+        stale = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
+        ).json()
+        assert stale["status"] == "stale"
+        assert "device_profile_changed" in stale["stale_reasons"]
+
+        response = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison",
+            json={
+                "prices": [
+                    {
+                        "scenario_id": scenarios[0]["scenario_id"],
+                        "upfront_cost_aud_ex_gst": 90000.0,
+                    },
+                    {
+                        "scenario_id": scenarios[1]["scenario_id"],
+                        "upfront_cost_aud_ex_gst": 60000.0,
+                    },
+                    {
+                        "scenario_id": scenarios[2]["scenario_id"],
+                        "upfront_cost_aud_ex_gst": 75000.0,
+                    },
+                ]
+            },
+        )
+        assert response.status_code == 200, response.json()
+        result = response.json()
+        assert result["contract_version"] == "ci_annual_financial_comparison_v3"
+        assert result["assumptions"] == {
+            "currency": "AUD",
+            "tax_basis": "gst_exclusive",
+            "price_source": "analyst_entered_total_solution_price",
+            "device_profile_sha256": None,
+            "device_prices": None,
+            "equipment_selection": None,
+            "discount_rate": 0.08,
+            "annual_value_escalation_rate": 0.025,
+            "annual_value_degradation_rate": 0.005,
+            "annual_om_fraction_of_capex": 0.015,
+            "analysis_term_years": 15,
+            "replacement_events_aud": [],
+        }
+        assert result["financial_review_order"]["leader_scenario_id"] == scenarios[1]["scenario_id"]
+        assert [item["financial_review_rank"] for item in result["solutions"]] == [1, 2, 3]
+        assert [item["upfront_cost_aud_ex_gst"] for item in result["solutions"]] == [
+            60000.0,
+            75000.0,
+            90000.0,
+        ]
+        assert all(len(item["metrics"]["annual_cashflows_aud"]) == 15 for item in result["solutions"])
+        assert result["customer_facing_permission"] is False
+        assert result["recommendation_permitted"] is False
+        restored = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
+        ).json()
+        assert restored["status"] == "ready"
+        assert restored["result"] == result
+
+        selected_one = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison",
+            json={
+                "prices": [
+                    {
+                        "scenario_id": scenarios[0]["scenario_id"],
+                        "upfront_cost_aud_ex_gst": 90000.0,
+                    }
+                ]
+            },
+        )
+        assert selected_one.status_code == 200
+        assert selected_one.json()["shortlist_source"]["shortlist_count"] == 1

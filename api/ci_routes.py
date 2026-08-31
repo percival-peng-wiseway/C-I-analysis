@@ -9,9 +9,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, Upl
 from pydantic import ValidationError
 
 from api.ci_schemas import (
+    CiAnnualFinancialComparisonRequest,
     CiAnnualFinancialSimulationRequest,
     CiBillReviewRequest,
     CiDesignCandidatesRequest,
+    CiDeviceProfileRequest,
     CiFinancialSolutionRequest,
     CiFinancialSolutionStarRequest,
     CiInternalReportRequest,
@@ -26,6 +28,12 @@ from api.dependencies import (
     get_object_store,
 )
 from solar_battery.ci_component_cost_library import ci_component_cost_library
+from solar_battery.ci_annual_financial_demo import (
+    analyze_ci_annual_financial_demo,
+)
+from solar_battery.ci_annual_financial_comparison import (
+    compare_ci_annual_financial_scenarios,
+)
 from solar_battery.ci_annual_financial_simulation import (
     simulate_ci_annual_financial_scenario,
 )
@@ -37,6 +45,14 @@ from solar_battery.ci_evidence_intake import (
 from solar_battery.ci_design_feasibility import (
     analyze_ci_design_feasibility,
     analyze_ci_interval_activity,
+)
+from solar_battery.ci_design_context import (
+    legacy_ci_design_context,
+    validate_ci_design_context,
+)
+from solar_battery.ci_device_profile import (
+    ci_device_profile_state,
+    save_ci_device_profile,
 )
 from solar_battery.ci_financial_solutions import (
     CiFinancialSolutionError,
@@ -58,10 +74,29 @@ from solar_battery.ci_project_evidence import (
     store_ci_project_evidence_files,
     update_ci_project_evidence_inspection,
 )
+from solar_battery.ci_project_site_material import (
+    CI_PROJECT_SITE_MATERIAL_CONTRACT_VERSION,
+    MAX_CI_SITE_PHOTO_BYTES,
+    CiSitePhotoSource,
+    add_ci_project_site_photo,
+    list_ci_project_site_photos,
+    load_ci_project_site_photo,
+    remove_ci_project_site_photo,
+)
 from solar_battery.ci_project_feasibility import (
+    canonical_sha256,
     ci_design_feasibility_state,
     design_candidates_sha256,
     record_ci_design_feasibility_result,
+)
+from solar_battery.ci_project_annual_financial import (
+    ci_annual_financial_state,
+    record_ci_annual_financial_result,
+)
+from solar_battery.ci_project_tariff_replay import (
+    ci_tariff_replay_state,
+    record_ci_tariff_replay_result,
+    tariff_profile_sha256,
 )
 from solar_battery.ci_pricing_catalog import (
     CiPricingCatalogError,
@@ -80,6 +115,7 @@ from solar_battery.ci_projects import (
     record_ci_design_candidates,
     require_ci_project,
     saved_ci_design_candidates,
+    saved_ci_design_context,
 )
 from solar_battery.ci_scenario_analysis import (
     CiScenarioAnalysisError,
@@ -105,6 +141,36 @@ router = APIRouter(tags=["commercial-industrial"])
 @router.get("/commercial-industrial/workspace-readiness")
 def get_ci_workspace_readiness() -> dict[str, object]:
     return ci_workspace_readiness_contract()
+
+
+@router.get("/commercial-industrial/settings/device-profile")
+def get_ci_device_profile(
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            return ci_device_profile_state(session, actor=actor)
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.put("/commercial-industrial/settings/device-profile")
+def put_ci_device_profile(
+    payload: CiDeviceProfileRequest,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            with session.begin():
+                return save_ci_device_profile(
+                    session, actor=actor, profile=payload.model_dump()
+                )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
 
 
 @router.get("/commercial-industrial/projects")
@@ -246,6 +312,124 @@ def get_ci_project_evidence(
         raise _project_http_error(exc) from exc
 
 
+@router.get("/commercial-industrial/projects/{project_id}/site-material")
+def get_ci_project_site_material(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            photos = list_ci_project_site_photos(
+                session, project_id=project_id, actor=actor
+            )
+        return {
+            "contract_version": CI_PROJECT_SITE_MATERIAL_CONTRACT_VERSION,
+            "photos": photos,
+        }
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.post(
+    "/commercial-industrial/projects/{project_id}/site-material",
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_ci_project_site_material(
+    project_id: UUID,
+    photo: Annotated[UploadFile, File(...)],
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    photo_bytes = await photo.read(MAX_CI_SITE_PHOTO_BYTES + 1)
+    storage_key: str | None = None
+    try:
+        with session_factory() as session:
+            with session.begin():
+                saved_photo, storage_key = add_ci_project_site_photo(
+                    session,
+                    object_store,
+                    project_id=project_id,
+                    actor=actor,
+                    source=CiSitePhotoSource(
+                        filename=photo.filename or "site-photo",
+                        content_type=photo.content_type or "application/octet-stream",
+                        data=photo_bytes,
+                    ),
+                )
+        return {
+            "contract_version": CI_PROJECT_SITE_MATERIAL_CONTRACT_VERSION,
+            "photo": saved_photo,
+        }
+    except CiProjectError as exc:
+        if storage_key is not None:
+            object_store.delete(storage_key)
+        raise _project_http_error(exc) from exc
+    except Exception:
+        if storage_key is not None:
+            object_store.delete(storage_key)
+        raise
+
+
+@router.get(
+    "/commercial-industrial/projects/{project_id}/site-material/{photo_id}/content"
+)
+def get_ci_project_site_material_content(
+    project_id: UUID,
+    photo_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> Response:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            data, content_type = load_ci_project_site_photo(
+                session,
+                object_store,
+                project_id=project_id,
+                photo_id=photo_id,
+                actor=actor,
+            )
+        return Response(
+            content=data,
+            media_type=content_type,
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.delete(
+    "/commercial-industrial/projects/{project_id}/site-material/{photo_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_ci_project_site_material(
+    project_id: UUID,
+    photo_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> Response:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            with session.begin():
+                storage_key = remove_ci_project_site_photo(
+                    session,
+                    project_id=project_id,
+                    photo_id=photo_id,
+                    actor=actor,
+                )
+        object_store.delete(storage_key)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
 @router.post(
     "/commercial-industrial/projects/{project_id}/evidence-intake/review"
 )
@@ -313,7 +497,16 @@ def post_ci_design_candidates(
                     "ci_project_setup_required",
                     "Complete Setup & catalog before validating system designs.",
                 )
-        result = validate_ci_design_candidates(payload.scenarios)
+        validated = validate_ci_design_candidates(payload.scenarios)
+        design_context = validate_ci_design_context(
+            payload.design_context
+            if payload.design_context is not None
+            else legacy_ci_design_context(list(validated["candidates"]))
+        )
+        result = {
+            **validated,
+            "design_context": design_context,
+        }
         with session_factory() as session:
             with session.begin():
                 record_ci_design_candidates(
@@ -321,6 +514,7 @@ def post_ci_design_candidates(
                     project_id=project_id,
                     candidate_count=int(result["candidate_count"]),
                     candidates=list(result["candidates"]),
+                    design_context=design_context,
                     actor=actor,
                 )
         return result
@@ -344,6 +538,9 @@ def get_ci_design_candidates(
             candidates = saved_ci_design_candidates(
                 session, project_id=project_id, actor=actor
             )
+            design_context = saved_ci_design_context(
+                session, project_id=project_id, actor=actor
+            )
         if candidates is None:
             return {
                 "contract_version": "ci_saved_design_state_v1",
@@ -353,7 +550,14 @@ def get_ci_design_candidates(
         return {
             "contract_version": "ci_saved_design_state_v1",
             "status": "ready",
-            "design": validate_ci_design_candidates(candidates),
+            "design": {
+                **validate_ci_design_candidates(candidates),
+                "design_context": (
+                    validate_ci_design_context(design_context)
+                    if design_context is not None
+                    else None
+                ),
+            },
         }
     except (CiProjectError, CiScenarioAnalysisError) as exc:
         if isinstance(exc, CiProjectError):
@@ -489,6 +693,151 @@ def post_ci_interval_activity(
         raise _analysis_http_error(exc) from exc
 
 
+@router.get(
+    "/commercial-industrial/projects/{project_id}/tariff-replay"
+)
+def get_ci_project_tariff_replay(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    """Restore the latest tariff replay when its evidence is still current."""
+    actor = identity_provider.current()
+    try:
+        try:
+            active_profile = load_ci_tariff_profile()
+        except CiTariffAnalysisError:
+            active_profile = None
+        with session_factory() as session:
+            return ci_tariff_replay_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_profile=active_profile,
+            )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.post(
+    "/commercial-industrial/projects/{project_id}/tariff-replay"
+)
+def post_ci_project_tariff_replay(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> dict[str, object]:
+    """Replay every saved design against the approved evidence-bound tariff."""
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            project = require_ci_project(session, project_id=project_id, actor=actor)
+            if project.setup_status != "ready":
+                raise CiProjectError(
+                    "ci_project_setup_required",
+                    "Complete Evidence before running tariff replay.",
+                )
+            candidates = saved_ci_design_candidates(
+                session, project_id=project_id, actor=actor
+            )
+            feasibility = ci_design_feasibility_state(
+                session, project_id=project_id, actor=actor
+            )
+            evidence = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+            if candidates is None:
+                raise CiProjectError(
+                    "ci_project_design_required",
+                    "Generate the solution space before running tariff replay.",
+                )
+            if feasibility["status"] != "ready":
+                raise CiProjectError(
+                    "ci_project_dispatch_required",
+                    "Run Dispatch for the current solution space before tariff replay.",
+                )
+            saved_evidence = evidence.get("evidence")
+            inspection = (
+                saved_evidence.get("inspection")
+                if isinstance(saved_evidence, dict)
+                else None
+            )
+            bill = inspection.get("bill") if isinstance(inspection, dict) else None
+            nem12 = inspection.get("nem12") if isinstance(inspection, dict) else None
+            bill_approved = isinstance(bill, dict) and bill.get(
+                "review_status"
+            ) in {"not_required", "analyst_confirmed"}
+            tariff_identified = isinstance(bill, dict) and bool(
+                bill.get("network_tariff_code")
+            )
+            interval_ready = isinstance(nem12, dict) and (
+                nem12.get("full_tariff_analysis_ready") is True
+            )
+            if not (bill_approved and tariff_identified and interval_ready):
+                raise CiProjectError(
+                    "ci_project_tariff_evidence_required",
+                    "Tariff replay requires an approved bill with a network tariff code and aligned E1, B1, Q1 and K1 NEM12 streams.",
+                )
+            _, interval = load_ci_project_evidence_sources(
+                session,
+                object_store,
+                project_id=project_id,
+                actor=actor,
+            )
+            expected_interval_sha256 = hashlib.sha256(interval.data).hexdigest()
+            expected_design_sha256 = design_candidates_sha256(candidates)
+        profile = load_ci_tariff_profile()
+        expected_profile_sha256 = tariff_profile_sha256(profile)
+        result = analyze_ci_physical_scenarios(
+            interval.data,
+            profile=profile,
+            scenarios=candidates,
+        )
+        with session_factory() as session:
+            with session.begin():
+                record_ci_tariff_replay_result(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    expected_interval_sha256=expected_interval_sha256,
+                    expected_design_candidates_sha256=expected_design_sha256,
+                    expected_tariff_profile_sha256=expected_profile_sha256,
+                    active_tariff_profile=profile,
+                    result=result,
+                )
+        with session_factory() as session:
+            device_profile_state = ci_device_profile_state(session, actor=actor)
+        if device_profile_state["status"] == "ready":
+            device_profile = device_profile_state["profile"]
+            finance_result = compare_ci_annual_financial_scenarios(
+                tariff_replay_result=result,
+                request={"pricing_mode": "device_profile", "prices": []},
+                device_profile=device_profile,
+            )
+            finance_result["project_id"] = str(project_id)
+            with session_factory() as session:
+                with session.begin():
+                    record_ci_annual_financial_result(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        expected_tariff_replay_result_sha256=canonical_sha256(result),
+                        active_tariff_replay_result=result,
+                        result=finance_result,
+                    )
+        return result
+    except (CiEvidenceIntakeError, CiProjectError) as exc:
+        if isinstance(exc, CiProjectError):
+            raise _project_http_error(exc) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except (CiTariffAnalysisError, CiScenarioAnalysisError) as exc:
+        raise _analysis_http_error(exc) from exc
+
+
 @router.post(
     "/commercial-industrial/projects/{project_id}/annual-financial-simulation"
 )
@@ -532,6 +881,188 @@ async def post_ci_annual_financial_simulation(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "ci_annual_financial_simulation_invalid",
+                "message": str(exc),
+            },
+        ) from exc
+
+
+@router.get(
+    "/commercial-industrial/projects/{project_id}/annual-financial-comparison"
+)
+def get_ci_annual_financial_comparison(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        try:
+            profile = load_ci_tariff_profile()
+        except CiTariffAnalysisError:
+            profile = None
+        with session_factory() as session:
+            device_state = ci_device_profile_state(session, actor=actor)
+            tariff_state = ci_tariff_replay_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_profile=profile,
+            )
+            active_tariff_result = (
+                tariff_state["result"]
+                if tariff_state["status"] == "ready"
+                else None
+            )
+            return ci_annual_financial_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_replay_result=active_tariff_result,
+                active_device_profile=(
+                    device_state["profile"]
+                    if device_state["status"] == "ready"
+                    else None
+                ),
+            )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.post(
+    "/commercial-industrial/projects/{project_id}/annual-financial-comparison"
+)
+def post_ci_annual_financial_comparison(
+    project_id: UUID,
+    payload: CiAnnualFinancialComparisonRequest,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        profile = load_ci_tariff_profile()
+        with session_factory() as session:
+            project = require_ci_project(session, project_id=project_id, actor=actor)
+            if project.setup_status != "ready":
+                raise CiProjectError(
+                    "ci_project_setup_required",
+                    "Complete Setup & catalog before running annual finance.",
+                )
+            tariff_state = ci_tariff_replay_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_profile=profile,
+            )
+            if tariff_state["status"] != "ready":
+                raise CiProjectError(
+                    "ci_project_tariff_replay_required",
+                    "Run Tariff replay before starting Annual finance.",
+                )
+            tariff_result = tariff_state["result"]
+            expected_tariff_result_sha256 = canonical_sha256(tariff_result)
+            device_state = ci_device_profile_state(session, actor=actor)
+            device_profile = (
+                device_state["profile"]
+                if device_state["status"] == "ready"
+                else None
+            )
+            if payload.pricing_mode == "device_profile" and device_profile is None:
+                raise CiProjectError(
+                    "ci_device_profile_required",
+                    "Save the workspace Device profile in Settings before calculating all solutions.",
+                )
+        result = compare_ci_annual_financial_scenarios(
+            tariff_replay_result=tariff_result,
+            request=payload.model_dump(),
+            device_profile=device_profile,
+        )
+        result["project_id"] = str(project_id)
+        with session_factory() as session:
+            with session.begin():
+                record_ci_annual_financial_result(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    expected_tariff_replay_result_sha256=(
+                        expected_tariff_result_sha256
+                    ),
+                    active_tariff_replay_result=tariff_result,
+                    result=result,
+                )
+        return result
+    except (CiEvidenceIntakeError, CiProjectError) as exc:
+        if isinstance(exc, CiProjectError):
+            raise _project_http_error(exc) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except (
+        CiFinancialSolutionError,
+        CiScenarioAnalysisError,
+        CiTariffAnalysisError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "ci_annual_financial_comparison_invalid",
+                "message": str(exc),
+            },
+        ) from exc
+
+
+@router.get(
+    "/commercial-industrial/projects/{project_id}/annual-financial-demo"
+)
+def get_ci_annual_financial_demo(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            project = require_ci_project(session, project_id=project_id, actor=actor)
+            if project.setup_status != "ready":
+                raise CiProjectError(
+                    "ci_project_setup_required",
+                    "Complete Setup & catalog before opening the annual finance demo.",
+                )
+            evidence = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+            _, interval = load_ci_project_evidence_sources(
+                session,
+                object_store,
+                project_id=project_id,
+                actor=actor,
+            )
+        saved = evidence.get("evidence")
+        inspection = saved.get("inspection") if isinstance(saved, dict) else None
+        if not isinstance(inspection, dict):
+            raise CiProjectError(
+                "ci_annual_financial_demo_bill_required",
+                "A verified electricity bill is required for the finance demo.",
+            )
+        result = analyze_ci_annual_financial_demo(
+            upload_bytes=interval.data,
+            inspection_result=inspection,
+        )
+        result["project_id"] = str(project_id)
+        return result
+    except (CiEvidenceIntakeError, CiProjectError) as exc:
+        if isinstance(exc, CiProjectError):
+            raise _project_http_error(exc) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except CiFinancialSolutionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "ci_annual_financial_demo_invalid",
                 "message": str(exc),
             },
         ) from exc
@@ -949,7 +1480,10 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
     return HTTPException(
         status_code=(
             status.HTTP_404_NOT_FOUND
-            if exc.code == "ci_project_not_found"
+            if exc.code in {
+                "ci_project_not_found",
+                "ci_project_site_material_not_found",
+            }
             else status.HTTP_409_CONFLICT
             if exc.code == "ci_project_setup_required"
             else status.HTTP_422_UNPROCESSABLE_ENTITY

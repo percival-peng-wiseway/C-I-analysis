@@ -191,6 +191,23 @@ def test_python_finance_applies_catalog_om_and_replacement_cashflows() -> None:
     assert metrics["net_present_value_aud"] == 47430.29
 
 
+def test_python_finance_applies_value_escalation_before_om() -> None:
+    metrics = calculate_metrics(
+        {
+            "upfront_cost_aud": 100000.0,
+            "first_year_net_value_aud": 25000.0,
+            "annual_om_cost_aud": 1000.0,
+            "replacement_events_aud": [],
+            "discount_rate": 0.08,
+            "annual_value_degradation_rate": 0.0,
+            "annual_value_escalation_rate": 0.025,
+            "analysis_term_years": 3,
+        }
+    )
+
+    assert metrics["annual_cashflows_aud"] == [24000.0, 24625.0, 25265.62]
+
+
 def test_financial_solution_save_list_and_star_are_workspace_persistent(tmp_path) -> None:
     with create_test_client(sqlite_url_for_path(tmp_path / "ci-finance.sqlite3")) as client:
         version_id = _publish_catalog(client)

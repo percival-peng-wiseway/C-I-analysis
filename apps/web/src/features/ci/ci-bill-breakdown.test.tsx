@@ -37,13 +37,15 @@ const categoryBill: CiEvidenceIntakeResult["bill"] = {
   total_inc_gst_aud: 990,
 };
 
-it("charts verified bill categories and derived usage facts", () => {
+it("charts verified bill categories and invoice averages", () => {
   render(<CiBillBreakdown bill={categoryBill} />);
 
-  expect(screen.getByRole("heading", { name: "Bill & usage breakdown" })).toBeTruthy();
-  expect(screen.getByRole("img", { name: /Invoice charge breakdown:.*Network charges \$500\.00/ })).toBeTruthy();
-  expect(screen.getByRole("img", { name: /Invoice composition including GST/ })).toBeTruthy();
-  expect(screen.getByText("32.26 kWh/day")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Detected bill breakdown" })).toBeTruthy();
+  expect(screen.getByRole("table", { name: "Detected invoice charge categories" })).toBeTruthy();
+  expect(screen.getByRole("rowheader", { name: "Network charges" })).toBeTruthy();
+  expect(screen.getByText("55.6%")).toBeTruthy();
+  expect(screen.getByText("Total inc GST")).toBeTruthy();
+  expect(screen.queryByRole("img", { name: /Invoice composition including GST/ })).toBeNull();
   expect(screen.getByText("90 c/kWh")).toBeTruthy();
   expect(screen.getByText("99 c/kWh")).toBeTruthy();
   expect(screen.getByRole("img", { name: "Power factor at maximum demand 0.820" })).toBeTruthy();
@@ -59,7 +61,8 @@ it("shows confirmed totals without inventing charge categories", () => {
   }} />);
 
   expect(screen.getByText("Category detail unavailable")).toBeTruthy();
-  expect(screen.getByText("Confirmed totals only")).toBeTruthy();
-  expect(screen.queryByRole("img", { name: /Invoice charge breakdown/ })).toBeNull();
-  expect(screen.getByRole("img", { name: /Subtotal ex GST \$900\.00, GST \$90\.00/ })).toBeTruthy();
+  expect(screen.queryByRole("table", { name: "Detected invoice charge categories" })).toBeNull();
+  expect(screen.getByText("Subtotal ex GST")).toBeTruthy();
+  expect(screen.getByText("GST")).toBeTruthy();
+  expect(screen.getByText("Total inc GST")).toBeTruthy();
 });

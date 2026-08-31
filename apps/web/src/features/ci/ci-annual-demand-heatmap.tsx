@@ -46,10 +46,10 @@ export function CiAnnualDemandHeatmap({ heatmap }: { heatmap: Heatmap }) {
           </div>
           <CardDescription className="mt-1">
             {heatmap.source_streams.join(",") === "E1,Q1"
-              ? "Aligned E1 and Q1 are combined into 15-minute apparent demand."
+              ? "E1 + Q1 apparent demand."
               : heatmap.source_streams[0] === "E1"
-                ? "E1 active import is aggregated into 15-minute active demand because aligned Q1 reactive data is unavailable."
-                : `The source export's reported ${heatmap.unit} values are shown at their original ${heatmap.interval_minutes}-minute resolution.`} Green shows lower demand, yellow shows the middle range and red shows the highest demand.
+                ? "E1 active demand; Q1 unavailable."
+                : `${heatmap.unit} at ${heatmap.interval_minutes}-minute resolution.`}
           </CardDescription>
         </div>
         <label className="grid min-w-36 gap-1 text-xs font-medium text-muted-foreground">
@@ -67,13 +67,6 @@ export function CiAnnualDemandHeatmap({ heatmap }: { heatmap: Heatmap }) {
         </label>
       </CardHeader>
       <CardContent>
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
-          {heatmap.time_basis === "source_local_time_unverified"
-            ? "Source-resolution view only — 30-minute readings are not upsampled into 15-minute billing demand, and the source timezone has not been independently verified."
-            : heatmap.metric === "measured_apparent_demand"
-            ? "Measured demand only — tariff billing windows and chargeable-demand rules are not applied before profile approval."
-            : "Active-demand view only — kVA and power factor are not inferred without aligned Q1. Tariff billing windows and chargeable-demand rules are not applied."}
-        </div>
         <div className="mb-4 grid gap-3 text-sm sm:grid-cols-3">
           <HeatmapFact label="Coverage" value={`${year.coverage_start} to ${year.coverage_end}`} />
           <HeatmapFact label={`Maximum ${heatmap.interval_minutes}-minute demand`} value={`${formatNumber(year.maximum_interval_demand)} ${heatmap.unit}`} />
@@ -81,9 +74,7 @@ export function CiAnnualDemandHeatmap({ heatmap }: { heatmap: Heatmap }) {
         </div>
         <AnnualHeatmapSvg heatmap={heatmap} maximum={heatmap.shared_scale_maximum_demand} unit={heatmap.unit} year={year} />
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
-          <p>
-            {year.complete_calendar_year ? "Complete calendar year" : `Partial calendar year · ${year.day_count} days`} · {heatmap.interval_minutes}-minute intervals · {heatmap.time_basis === "fixed_aest_meter_time" ? "fixed AEST meter time" : "source local time (unverified)"}{year.missing_interval_count ? ` · ${year.missing_interval_count} missing readings` : ""}
-          </p>
+          {!year.complete_calendar_year || year.missing_interval_count ? <p>{year.complete_calendar_year ? "" : `Partial year · ${year.day_count} days`}{!year.complete_calendar_year && year.missing_interval_count ? " · " : ""}{year.missing_interval_count ? `${year.missing_interval_count} missing readings` : ""}</p> : <span />}
           <HeatLegend maximum={heatmap.shared_scale_maximum_demand} unit={heatmap.unit} />
         </div>
       </CardContent>

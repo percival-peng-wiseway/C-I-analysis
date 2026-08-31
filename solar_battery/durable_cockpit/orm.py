@@ -60,6 +60,7 @@ class CiProjectModel(Base):
     design_candidates_json: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON
     )
+    design_context_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
     created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
     updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -111,6 +112,37 @@ class CiProjectEvidenceModel(Base):
     )
 
 
+class CiProjectSiteMaterialModel(Base):
+    __tablename__ = "ci_project_site_material"
+    __table_args__ = (
+        Index(
+            "ix_ci_project_site_material_scope_project_created",
+            "workspace_id",
+            "owner_id",
+            "project_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ci_projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    object_store_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
 class CiProjectFeasibilityResultModel(Base):
     __tablename__ = "ci_project_feasibility_results"
     __table_args__ = (
@@ -134,6 +166,101 @@ class CiProjectFeasibilityResultModel(Base):
     design_candidates_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     result_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     result_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class CiProjectTariffReplayResultModel(Base):
+    __tablename__ = "ci_project_tariff_replay_results"
+    __table_args__ = (
+        Index(
+            "ix_ci_project_tariff_replay_scope_updated",
+            "workspace_id",
+            "owner_id",
+            "updated_at",
+        ),
+    )
+
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ci_projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    result_contract_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    interval_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    design_candidates_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    tariff_profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class CiProjectAnnualFinancialResultModel(Base):
+    __tablename__ = "ci_project_annual_financial_results"
+    __table_args__ = (
+        Index(
+            "ix_ci_project_annual_financial_scope_updated",
+            "workspace_id",
+            "owner_id",
+            "updated_at",
+        ),
+    )
+
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ci_projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    result_contract_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    tariff_replay_result_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    result_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class CiDeviceProfileModel(Base):
+    __tablename__ = "ci_device_profiles"
+    __table_args__ = (
+        Index(
+            "uq_ci_device_profiles_scope",
+            "workspace_id",
+            "owner_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    profile_contract_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
     updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

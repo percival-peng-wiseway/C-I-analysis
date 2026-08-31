@@ -26,10 +26,11 @@ from solar_battery.models import BatteryPreset, CleanedInterval
 from solar_battery.solar_profile import solar_shape
 
 
-CI_DESIGN_FEASIBILITY_CONTRACT_VERSION = "ci_design_feasibility_v2"
+CI_DESIGN_FEASIBILITY_CONTRACT_VERSION = "ci_design_feasibility_v4"
 CI_INTERVAL_ACTIVITY_CONTRACT_VERSION = "ci_interval_activity_v1"
 CI_ENERGY_DISPATCH_ID = "ci_pre_tariff_pv_self_consumption_v1"
 CI_PEAK_DAY_ENVELOPE_ID = "ci_pre_tariff_peak_day_envelope_v1"
+CI_PHYSICAL_REVIEW_ORDER_ID = "ci_pre_tariff_physical_review_order_v2"
 PEAK_THRESHOLD_COUNT = 51
 
 
@@ -98,6 +99,21 @@ def analyze_ci_design_feasibility(
         )
         for scenario in authored
     ]
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            -item["coverage_energy"]["grid_import_reduction_kwh"],
+            -item["coverage_performance"]["grid_import_peak_reduction_kw"],
+            -item["coverage_performance"]["top_10_event_coverage_percent"],
+            item["coverage_performance"]["grid_import_peak_kw"],
+            item["authored_inputs"]["pv_capacity_kwp_dc"],
+            item["authored_inputs"]["nominal_capacity_kwh"],
+            item["authored_inputs"]["pv_inverter_capacity_kw_ac"],
+            item["scenario_id"],
+        ),
+    )
+    for rank, item in enumerate(ranked, start=1):
+        item["physical_review_rank"] = rank
     return {
         "contract_version": CI_DESIGN_FEASIBILITY_CONTRACT_VERSION,
         "status": "ready",
@@ -129,7 +145,19 @@ def analyze_ci_design_feasibility(
             "peak_timestamp": intervals[baseline_peak_index].timestamp.isoformat(),
             "daily_profile_cloud": _daily_profile_cloud(intervals, peak_date),
         },
-        "scenarios": results,
+        "physical_review_order": {
+            "algorithm_id": CI_PHYSICAL_REVIEW_ORDER_ID,
+            "shortlist_count": min(10, len(ranked)),
+            "basis": (
+                "Highest measured-coverage grid-import energy reduction, then "
+                "greater active-power peak reduction and top-10 event coverage. "
+                "Exact performance ties prefer the smaller authored PV, battery "
+                "and inverter capacity. This is a physical review order, not a "
+                "recommendation."
+            ),
+            "recommendation_permitted": False,
+        },
+        "scenarios": ranked,
         "assumptions": [
             "Measured active import is the physical load basis; it is not reconstructed gross site load.",
             "Standard NEM12 E1 is aggregated to 15 minutes; reported wide-export kW remains at 30 minutes and is never upsampled.",
@@ -672,6 +700,10 @@ def _energy_totals(
         if energy.battery_charge[index] > 1e-7
         or energy.battery_discharge[index] > 1e-7
     }
+    emissions_factor = scenario.grid_emissions_factor_kg_co2e_per_kwh
+    baseline_emissions = site * emissions_factor / 1000
+    post_system_emissions = imported * emissions_factor / 1000
+    avoided_emissions = max(0.0, baseline_emissions - post_system_emissions)
     return {
         "site_import_before_kwh": round(site, 6),
         "grid_import_after_pv_only_kwh": round(pv_only_imported, 6),
@@ -713,6 +745,18 @@ def _energy_totals(
         "battery_active_days": len(active_days),
         "battery_active_day_percent": round(
             100 * len(active_days) / len(measured_days) if measured_days else 0.0,
+            6,
+        ),
+        "grid_emissions_factor_kg_co2e_per_kwh": round(emissions_factor, 6),
+        "baseline_scope_2_emissions_t_co2e": round(baseline_emissions, 6),
+        "post_system_scope_2_emissions_t_co2e": round(
+            post_system_emissions, 6
+        ),
+        "avoided_scope_2_emissions_t_co2e": round(avoided_emissions, 6),
+        "scope_2_emissions_reduction_percent": round(
+            100 * avoided_emissions / baseline_emissions
+            if baseline_emissions > 0
+            else 0.0,
             6,
         ),
     }

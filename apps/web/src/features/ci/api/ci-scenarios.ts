@@ -26,6 +26,7 @@ export interface CiScenarioInput {
   max_soc_fraction: number;
   initial_soc_fraction: number;
   allow_grid_charging: boolean;
+  grid_emissions_factor_kg_co2e_per_kwh?: number;
 }
 
 export interface CiPhysicalScenarioResult {
@@ -77,6 +78,8 @@ export interface CiPhysicalScenarioResult {
       baseline_cost_inc_gst_aud: number;
       scenario_cost_inc_gst_aud: number;
       first_year_value_inc_gst_aud: number;
+      baseline_categories_ex_gst_aud?: Record<string, number>;
+      scenario_categories_ex_gst_aud?: Record<string, number>;
       category_savings_ex_gst_aud: Record<string, number>;
       customer_facing_permission: false;
     };
@@ -146,6 +149,23 @@ export interface CiDispatchReviewProjection {
   recommendation_permitted: false;
   points: CiDispatchReviewPoint[];
   projection_sha256: string;
+}
+
+export const ciProjectTariffReplayQueryKey = (projectId: string) =>
+  ["ci-project-tariff-replay", projectId] as const;
+
+export interface CiSavedTariffReplayState {
+  contract_version: "ci_project_tariff_replay_state_v1";
+  status: "not_saved" | "ready" | "stale";
+  saved_at: string | null;
+  stale_reasons: Array<
+    | "design_changed"
+    | "interval_evidence_changed"
+    | "tariff_profile_changed"
+    | "result_contract_unsupported"
+    | "result_integrity_failed"
+  >;
+  result: CiPhysicalScenarioResult | null;
 }
 
 export type CiThreeCaseId = "no_system" | "pv_only" | "pv_battery";
@@ -235,7 +255,60 @@ export async function analyzeCiPhysicalScenarios(
         `C&I physical scenario request failed with status ${response.status}.`,
     );
   }
-  const payload = (await response.json()) as CiPhysicalScenarioResult;
+  return assertCiPhysicalScenarioResult(await response.json());
+}
+
+export async function runCiProjectTariffReplay(
+  projectId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<CiPhysicalScenarioResult> {
+  const response = await fetcher(
+    `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-replay`,
+    { method: "POST", headers: { Accept: "application/json" } },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { detail?: { message?: string } }
+      | null;
+    throw new Error(
+      payload?.detail?.message ??
+        `C&I tariff replay failed with status ${response.status}.`,
+    );
+  }
+  return assertCiPhysicalScenarioResult(await response.json());
+}
+
+export async function fetchCiSavedTariffReplay(
+  projectId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<CiSavedTariffReplayState> {
+  const response = await fetcher(
+    `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-replay`,
+    { headers: { Accept: "application/json" } },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Saved C&I tariff replay request failed with status ${response.status}.`,
+    );
+  }
+  const payload = (await response.json()) as CiSavedTariffReplayState;
+  if (
+    payload.contract_version !== "ci_project_tariff_replay_state_v1" ||
+    !["not_saved", "ready", "stale"].includes(payload.status) ||
+    !Array.isArray(payload.stale_reasons) ||
+    (payload.status === "ready" && payload.result === null) ||
+    (payload.status !== "ready" && payload.result !== null)
+  ) {
+    throw new Error("Saved C&I tariff replay returned an unsafe state contract.");
+  }
+  if (payload.result !== null) {
+    payload.result = assertCiPhysicalScenarioResult(payload.result);
+  }
+  return payload;
+}
+
+export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenarioResult {
+  const payload = value as CiPhysicalScenarioResult;
   if (
     payload.contract_version !== "ci_physical_scenario_review_v6" ||
     payload.analysis_status !== "ready" ||
@@ -255,12 +328,36 @@ export async function analyzeCiPhysicalScenarios(
       item.annual_tariff_value?.calculation_method !== "representative_year_repeat_v1" ||
       item.annual_tariff_value.customer_facing_permission !== false ||
       !Number.isFinite(item.annual_tariff_value.first_year_value_ex_gst_aud) ||
-      !Number.isFinite(item.annual_tariff_value.first_year_value_inc_gst_aud)
+      !Number.isFinite(item.annual_tariff_value.first_year_value_inc_gst_aud) ||
+      !hasSafeOptionalCategoryComparison(item.annual_tariff_value)
     )
   ) {
     throw new Error("C&I physical scenarios returned an unsafe result contract.");
   }
   return payload;
+}
+
+function isFiniteMoneyMap(value: unknown): value is Record<string, number> {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.entries(value as Record<string, unknown>).every(
+      ([key, item]) => key.length > 0 && typeof item === "number" && Number.isFinite(item),
+    ),
+  );
+}
+
+function hasSafeOptionalCategoryComparison(
+  value: CiPhysicalScenarioResult["scenarios"][number]["annual_tariff_value"],
+): boolean {
+  const baseline = value.baseline_categories_ex_gst_aud;
+  const scenario = value.scenario_categories_ex_gst_aud;
+  if (baseline === undefined && scenario === undefined) return true;
+  if (!isFiniteMoneyMap(baseline) || !isFiniteMoneyMap(scenario)) return false;
+  const baselineKeys = Object.keys(baseline).sort();
+  const scenarioKeys = Object.keys(scenario).sort();
+  return baselineKeys.length === scenarioKeys.length && baselineKeys.every((key, index) => key === scenarioKeys[index]);
 }
 
 export async function analyzeCiThreeCaseComparison(

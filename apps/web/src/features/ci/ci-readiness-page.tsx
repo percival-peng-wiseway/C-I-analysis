@@ -1,14 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, CalendarDays, CheckCircle2, FolderKanban, Grid3X3, Plus, ShieldCheck, Sparkles } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Activity, ArrowLeft, ArrowRight, Layers3, Play, RefreshCw } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ciProjectsQueryKey,
   ciSavedDesignQueryKey,
-  createCiProject,
   fetchCiSavedDesign,
   listCiProjects,
   validateCiDesignCandidates,
@@ -25,253 +22,202 @@ import {
   ciWorkspaceReadinessQueryKey,
   fetchCiWorkspaceReadiness,
 } from "@/features/ci/api/ci-workspace-readiness";
-import { CiEvidenceIntake } from "@/features/ci/ci-evidence-intake";
-import { CiAnnualFinancialWorkspace } from "@/features/ci/ci-annual-financial-workspace";
-import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
 import { CiDesignFeasibility } from "@/features/ci/ci-design-feasibility";
-import { useCiWorkspace } from "@/features/ci/ci-workspace-context";
+import { CiEvidenceIntake } from "@/features/ci/ci-evidence-intake";
+import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
+import { CiTariffReplay } from "@/features/ci/ci-tariff-replay";
+import { useCiWorkspace, type CiWorkspaceStage } from "@/features/ci/ci-workspace-context";
+import { ModulePrerequisite } from "@/features/ci/ci-workflow-template";
 
 export function CiReadinessPage() {
   const queryClient = useQueryClient();
   const workspace = useCiWorkspace();
-  const bootstrapped = useRef(false);
   const readiness = useQuery({ queryKey: ciWorkspaceReadinessQueryKey, queryFn: () => fetchCiWorkspaceReadiness() });
   const projects = useQuery({ queryKey: ciProjectsQueryKey, queryFn: () => listCiProjects() });
-  const createProject = useMutation({
-    mutationFn: ({ name }: { name: string; openAfterCreate: boolean }) => createCiProject(name),
-    onSuccess: (project, variables) => {
-      queryClient.setQueryData<CiProject[]>(ciProjectsQueryKey, (current = []) => [project, ...current]);
-      if (variables.openAfterCreate) workspace.openProjectStage(toActiveProject(project), "setup");
-    },
-  });
 
-  useEffect(() => {
-    if (projects.data?.length === 0 && !bootstrapped.current && !createProject.isPending) {
-      bootstrapped.current = true;
-      createProject.mutate({ name: "Commercial feasibility", openAfterCreate: false });
-    }
-  }, [createProject, projects.data]);
-
-  if (readiness.isPending || projects.isPending || (projects.data?.length === 0 && createProject.isPending)) {
-    return <PageState title="Preparing project workspace" description="Loading project records and calculation guardrails." />;
+  if (readiness.isPending || projects.isPending) {
+    return <PageState title="Preparing project workflow" description="Loading project records and the four-module workspace." />;
   }
   if (readiness.isError || projects.isError) {
-    return <PageState title="Workspace unavailable" description="The project workspace could not be loaded. Check that the C&I API and database are running." />;
+    return <PageState title="Workspace unavailable" description="The project workflow could not be loaded. Check that the C&I API and database are running." />;
   }
 
   const activeProject = projects.data.find((project) => project.project_id === workspace.activeProject?.projectId) ?? null;
-  if (workspace.stage !== "overview" && !activeProject) {
-    return <PageState title="Select a project" description="Return to Project overview and open a project before continuing." />;
+  if (!activeProject) {
+    return <PageState title="Select a project" description="Choose a project from the left or create a new project to open the four-module workflow." />;
   }
+  const profileReady = readiness.data.availability === "evidence_limited";
 
   return (
-    <main className="premium-page ci-workbench-page min-h-screen bg-background p-4 sm:p-8">
-      <div className="premium-content mx-auto flex w-full max-w-[1380px] flex-col gap-6">
-        {workspace.stage === "overview" ? (
-          <ProjectOverview
-            createError={createProject.error instanceof Error ? createProject.error.message : null}
-            creating={createProject.isPending}
-            onCreate={(name) => createProject.mutate({ name, openAfterCreate: true })}
-            onOpen={(project) => workspace.openProjectStage(toActiveProject(project), "setup")}
-            projects={projects.data}
-          />
-        ) : activeProject && workspace.stage === "setup" ? (
-          <SetupWorkspace
-            onContinue={() => workspace.setStage("system_design")}
+    <main className="premium-page ci-workbench-page min-h-screen bg-background p-4 sm:p-6 xl:p-8">
+      <div className="premium-content mx-auto flex w-full max-w-[1460px] flex-col gap-6">
+        {workspace.stage === "evidence" ? (
+          <EvidenceWorkspace
             onReady={() => {
               queryClient.setQueryData<CiProject[]>(ciProjectsQueryKey, (current = []) => current.map((item) => item.project_id === activeProject.project_id ? { ...item, setup_status: "ready", current_stage: "system_design", updated_at: new Date().toISOString() } : item));
               void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
-              workspace.openProjectStage(
-                { ...toActiveProject(activeProject), setupReady: true },
-                "system_design",
-              );
+              workspace.openProjectStage({ ...toActiveProject(activeProject), setupReady: true }, "evidence");
             }}
-            profileReady={readiness.data.availability === "evidence_limited"}
             project={activeProject}
           />
-        ) : activeProject && workspace.stage === "system_design" ? (
-          <SystemDesignWorkspace
-            onBack={() => workspace.setStage("setup")}
+        ) : workspace.stage === "physical_feasibility" ? (
+          <PhysicalFeasibilityWorkspace
+            onBack={() => workspace.setStage("evidence")}
             onValidated={(candidateCount) => {
               queryClient.setQueryData<CiProject[]>(ciProjectsQueryKey, (current = []) => current.map((item) => item.project_id === activeProject.project_id ? { ...item, current_stage: "system_design", design_status: "ready", design_candidate_count: candidateCount, updated_at: new Date().toISOString() } : item));
-              workspace.openProjectStage({ ...toActiveProject(activeProject), designReady: true }, "system_design");
+              workspace.openProjectStage({ ...toActiveProject(activeProject), designReady: true }, "physical_feasibility");
               void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
             }}
             project={activeProject}
           />
-        ) : activeProject && workspace.stage === "financial_simulation" ? (
-          <>
-            <StageHeader eyebrow="04 · Annual finance" project={activeProject} title="Compare annual energy and financial scenarios" description="Select a saved design, compare no-system, PV-only and PV+battery operation, then project NPV, payback, IRR and annual cashflow from the evidence-bound tariff and published price catalog." />
-            <CiAnnualFinancialWorkspace profileReady={readiness.data.availability === "evidence_limited"} onComplete={() => {
-              queryClient.setQueryData<CiProject[]>(ciProjectsQueryKey, (current = []) => current.map((item) => item.project_id === activeProject.project_id ? { ...item, current_stage: "financial_simulation", updated_at: new Date().toISOString() } : item));
-              void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
-            }} project={activeProject} />
-          </>
-        ) : null}
+        ) : workspace.stage === "dispatch" ? (
+          <DispatchWorkspace project={activeProject} />
+        ) : (
+          <CiTariffReplay
+            profileLabel={readiness.data.active_profile_label}
+            profileReady={profileReady}
+            project={activeProject}
+          />
+        )}
+        <ModulePager onNavigate={workspace.setStage} stage={workspace.stage} />
       </div>
     </main>
   );
 }
 
-function ProjectOverview({ createError, creating, onCreate, onOpen, projects }: {
-  createError: string | null;
-  creating: boolean;
-  onCreate: (name: string) => void;
-  onOpen: (project: CiProject) => void;
-  projects: CiProject[];
-}) {
-  const [showCreate, setShowCreate] = useState(false);
-  const [name, setName] = useState("");
-  return (
-    <>
-      <section className="ci-dashboard-hero">
-        <div><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-200">C&amp;I workspace</p><h1 className="mt-3 text-3xl font-semibold text-white sm:text-4xl">Project overview</h1><p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">Each project keeps its own private Setup evidence, inspection results and Python-validated system design count in the local workspace.</p></div>
-        <div className="ci-overview-stat"><FolderKanban className="size-5 text-cyan-200" /><span><strong>{projects.length}</strong><small>active {projects.length === 1 ? "project" : "projects"}</small></span></div>
-      </section>
-      <section aria-labelledby="project-cards-title">
-        <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-700">01 · Project overview</p><h2 className="mt-1 text-2xl font-semibold" id="project-cards-title">Your projects</h2></div><p className="text-sm text-muted-foreground">Open a project or start a new one.</p></div>
-        <div className="ci-project-grid">
-          {projects.map((project) => <ProjectCard key={project.project_id} onOpen={() => onOpen(project)} project={project} />)}
-          <Card className="ci-new-project-card">
-            {showCreate ? (
-              <form className="flex h-full min-h-64 flex-col justify-center p-6" onSubmit={(event) => { event.preventDefault(); if (name.trim()) onCreate(name); }}>
-                <span className="grid size-11 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Sparkles className="size-5" /></span>
-                <label className="mt-5 grid gap-2 text-sm font-medium">Project name<input autoFocus className="rounded-md border border-border bg-white px-3 py-2" maxLength={255} onChange={(event) => setName(event.target.value)} placeholder="e.g. Warehouse solar + battery" value={name} /></label>
-                <div className="mt-4 flex gap-2"><Button disabled={!name.trim() || creating} type="submit">{creating ? "Creating" : "Create & continue"}<ArrowRight className="size-4" /></Button><Button onClick={() => setShowCreate(false)} type="button" variant="ghost">Cancel</Button></div>
-                {createError ? <p className="mt-3 text-sm text-destructive">{createError}</p> : null}
-              </form>
-            ) : (
-              <button className="flex min-h-64 w-full flex-col items-center justify-center gap-4 p-6 text-center" onClick={() => setShowCreate(true)} type="button"><span className="grid size-14 place-items-center rounded-full border border-cyan-200 bg-cyan-50 text-cyan-800"><Plus className="size-6" /></span><span><strong className="block text-base">New project</strong><small className="mt-1 block text-sm text-muted-foreground">Create a project and continue to Setup &amp; catalog</small></span></button>
-            )}
-          </Card>
-        </div>
-      </section>
-    </>
-  );
+function EvidenceWorkspace({ onReady, project }: { onReady: () => void; project: CiProject }) {
+  return <CiEvidenceIntake onReady={onReady} projectId={project.project_id} setupReady={project.setup_status === "ready"} />;
 }
 
-function ProjectCard({ onOpen, project }: { onOpen: () => void; project: CiProject }) {
-  const setupReady = project.setup_status === "ready";
-  return (
-    <Card className="ci-project-card overflow-hidden">
-      <div className="h-2 bg-gradient-to-r from-cyan-400 via-teal-400 to-emerald-400" />
-      <CardHeader className="p-6"><div className="flex items-start justify-between gap-3"><span className="grid size-11 place-items-center rounded-xl bg-slate-900 text-cyan-200"><FolderKanban className="size-5" /></span><Badge variant={setupReady ? "secondary" : "outline"}>{setupReady ? "Setup ready" : "Input required"}</Badge></div><CardTitle as="h3" className="mt-5 text-xl">{project.display_name}</CardTitle><CardDescription className="flex items-center gap-2"><CalendarDays className="size-3.5" />Updated {formatDate(project.updated_at)}</CardDescription></CardHeader>
-      <CardContent className="px-6 pb-6"><div className="grid grid-cols-2 gap-3"><ProjectFact label="Current stage" value={stageLabel(project)} /><ProjectFact label="Design candidates" value={String(project.design_candidate_count)} /></div><Button className="mt-6 w-full justify-between" onClick={onOpen} type="button">Open project<ArrowRight className="size-4" /></Button></CardContent>
-    </Card>
-  );
-}
-
-function SetupWorkspace({ onContinue, onReady, profileReady, project }: { onContinue: () => void; onReady: () => void; profileReady: boolean; project: CiProject }) {
-  return (
-    <>
-      <StageHeader eyebrow="02 · Setup & catalog" project={project} title="Verify the project inputs" description="Upload the bill and matching interval file once for this project. Pair checks and the annual source-resolution demand heatmap stay together in this stage." />
-      {project.setup_status === "ready" ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950"><div><strong>Setup is complete for this project.</strong><p className="mt-1 text-emerald-900/75">Saved evidence is restored below when available. A project completed before local evidence saving was added needs one final re-upload; later visits restore it automatically.</p></div><Button onClick={onContinue} type="button">Open System design<ArrowRight className="size-4" /></Button></div> : null}
-      <CiEvidenceIntake onReady={onReady} profileReady={profileReady} projectId={project.project_id} />
-    </>
-  );
-}
-
-function SystemDesignWorkspace({ onBack, onValidated, project }: { onBack: () => void; onValidated: (candidateCount: number) => void; project: CiProject }) {
+function PhysicalFeasibilityWorkspace({ onBack, onValidated, project }: { onBack: () => void; onValidated: (candidateCount: number) => void; project: CiProject }) {
   const queryClient = useQueryClient();
-  const savedDesign = useQuery({
-    queryKey: ciSavedDesignQueryKey(project.project_id),
-    queryFn: () => fetchCiSavedDesign(project.project_id),
-  });
-  const savedFeasibility = useQuery({
-    queryKey: ciSavedFeasibilityQueryKey(project.project_id),
-    queryFn: () => fetchCiSavedFeasibility(project.project_id),
-  });
-  const feasibility = useMutation({
-    mutationFn: () => runCiDesignFeasibility(project.project_id),
-    onSuccess: (analysis) => {
-      queryClient.setQueryData<CiSavedFeasibilityState>(
-        ciSavedFeasibilityQueryKey(project.project_id),
-        {
-          contract_version: "ci_project_feasibility_state_v1",
-          status: "ready",
-          saved_at: new Date().toISOString(),
-          stale_reasons: [],
-          result: analysis,
-        },
-      );
+  const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
+  const run = useMutation({
+    mutationFn: ({ designContext, scenarios }: { designContext: Parameters<typeof validateCiDesignCandidates>[2]; scenarios: Parameters<typeof validateCiDesignCandidates>[1] }) => validateCiDesignCandidates(project.project_id, scenarios, designContext),
+    onSuccess: (design) => {
+      queryClient.setQueryData(ciSavedDesignQueryKey(project.project_id), design);
+      onValidated(design.candidate_count);
       void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
-    },
-  });
-  const validation = useMutation({
-    mutationFn: (scenarios: Parameters<typeof validateCiDesignCandidates>[1]) => validateCiDesignCandidates(project.project_id, scenarios),
-    onSuccess: (result) => {
-      feasibility.reset();
-      queryClient.setQueryData(ciSavedDesignQueryKey(project.project_id), result);
       void queryClient.invalidateQueries({ queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
-      onValidated(result.candidate_count);
     },
   });
   if (project.setup_status !== "ready") {
-    return <Card><CardHeader><CardTitle as="h1" className="text-xl">Setup is required</CardTitle><CardDescription>Complete the PDF and NEM12 pair check before defining system designs.</CardDescription></CardHeader><CardContent><Button onClick={onBack} type="button">Go to Setup &amp; catalog</Button></CardContent></Card>;
+    return <ModulePrerequisite description="Record existing equipment, then define added PV and battery ranges plus the technical options after Evidence is complete." project={project} stage="02" title="Physical feasibility" />;
   }
-  if (savedDesign.isPending) {
-    return <PageState title="Loading system design" description="Restoring the technical parameters saved to this project." />;
-  }
-  if (savedDesign.isError) {
-    return <Card><CardHeader><CardTitle as="h1" className="text-xl">System design unavailable</CardTitle><CardDescription>The saved technical design could not be loaded safely.</CardDescription></CardHeader><CardContent><Button onClick={onBack} type="button">Return to Setup &amp; catalog</Button></CardContent></Card>;
-  }
-  const result = validation.data ?? savedDesign.data;
-  const restoredAnalysis = feasibility.data ?? (
-    savedFeasibility.data?.status === "ready" ? savedFeasibility.data.result : null
-  );
+  if (savedDesign.isPending) return <PageState title="Loading physical configurations" description="Restoring existing assets, added-capacity ranges and technical options saved to this project." />;
+  if (savedDesign.isError) return <Card><CardHeader><CardTitle as="h2" className="text-xl">Physical feasibility unavailable</CardTitle><CardDescription>The saved technical design could not be loaded safely.</CardDescription></CardHeader><CardContent><Button onClick={onBack} type="button">Return to Evidence</Button></CardContent></Card>;
+  const generatedDesign = run.data ?? savedDesign.data;
   return (
     <>
-      <StageHeader eyebrow="03 · System design" project={project} title="Build and test the feasible design search space" description="Set PV, inverter and battery ranges, save every Cartesian combination, then compare measured-period grid import and selected peak-day physical behavior." />
-      <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-4 text-sm text-cyan-950"><div className="flex gap-3"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><p><strong>Scope:</strong> Python validates the technical inputs, then runs a pre-tariff kW/kWh feasibility review from this project’s saved interval data. The result does not infer billing windows, kVA/PF treatment, demand charges, savings, ranking or recommendation.</p></div></div>
-      {!result && project.design_candidate_count > 0 ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"><strong>Previous validation count retained.</strong><span className="ml-2">This project was validated before complete design saving was available. Enter the technical fields once and use Save &amp; validate to make them reopenable.</span></div> : null}
-      {result ? <CandidateResults hasSavedAnalysis={Boolean(restoredAnalysis)} isPending={feasibility.isPending} isRestoring={savedFeasibility.isPending} onRun={() => feasibility.mutate()} result={result} savedNow={Boolean(validation.data)} /> : null}
-      {result ? <details className="group rounded-xl border border-border bg-white"><summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-4 text-sm font-semibold text-slate-900"><span>Edit design inputs</span><span className="text-xs font-normal text-slate-500 group-open:hidden">Open PV, inverter and battery ranges</span><span className="hidden text-xs font-normal text-slate-500 group-open:inline">Close editor</span></summary><div className="border-t border-border p-4"><CiScenarioBuilder error={validation.error instanceof Error ? validation.error.message : null} initialSolutions={savedDesign.data?.candidates} isPending={validation.isPending} onSubmit={(scenarios) => validation.mutate(scenarios)} /></div></details> : <CiScenarioBuilder error={validation.error instanceof Error ? validation.error.message : null} initialSolutions={savedDesign.data?.candidates} isPending={validation.isPending} onSubmit={(scenarios) => validation.mutate(scenarios)} />}
-      {savedFeasibility.isError ? <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-950"><strong>Saved feasibility could not be restored.</strong><span className="ml-2">You can safely run the analysis again.</span></div> : null}
-      {savedFeasibility.data?.status === "stale" ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"><strong>Saved feasibility is out of date.</strong><span className="ml-2">Setup evidence or design inputs changed after the last run. Run the analysis again to replace it.</span></div> : null}
-      {feasibility.error instanceof Error ? <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-950"><strong>Feasibility analysis needs attention.</strong><span className="ml-2">{feasibility.error.message}</span></div> : null}
-      {savedFeasibility.data?.status === "ready" && !feasibility.data ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950"><strong>Saved feasibility restored.</strong><span className="ml-2">This is the project’s last completed analysis. Re-run only when you want to replace it.</span></div> : null}
-      {restoredAnalysis ? <CiDesignFeasibility projectId={project.project_id} result={restoredAnalysis} /> : null}
+      <CiScenarioBuilder error={run.error instanceof Error ? run.error.message : null} initialContext={run.data?.design_context ?? savedDesign.data?.design_context ?? undefined} initialSolutions={run.data?.candidates ?? savedDesign.data?.candidates} isPending={run.isPending} onSubmit={(scenarios, designContext) => run.mutate({ scenarios, designContext })} />
+      {generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}
     </>
   );
 }
 
-export function CandidateResults({ hasSavedAnalysis = false, isPending, isRestoring = false, onRun, result, savedNow = false }: { hasSavedAnalysis?: boolean; isPending: boolean; isRestoring?: boolean; onRun: () => void; result: CiDesignCandidateResult; savedNow?: boolean }) {
-  const pvConfigurations = uniqueBy(result.candidates, (candidate) => candidate.pv_system_id).sort((a, b) => a.pv_capacity_kwp_dc - b.pv_capacity_kwp_dc);
-  const batteryConfigurations = uniqueBy(result.candidates, (candidate) => candidate.battery_system_id).sort((a, b) => a.nominal_capacity_kwh - b.nominal_capacity_kwh);
-  const durations = batteryConfigurations.filter((candidate) => candidate.max_discharge_kw > 0).map((candidate) => candidate.nominal_capacity_kwh / candidate.max_discharge_kw);
+function GeneratedDesignSummary({ design }: { design: CiDesignCandidateResult }) {
+  const pv = design.candidates.map((item) => item.pv_capacity_kwp_dc);
+  const battery = design.candidates.map((item) => item.nominal_capacity_kwh);
+  const inverter = design.candidates.map((item) => item.pv_inverter_capacity_kw_ac);
   return (
-    <Card className="overflow-hidden border-emerald-200">
-      <CardHeader className="border-b border-emerald-100 bg-emerald-50"><div className="flex flex-wrap items-center justify-between gap-4"><div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-emerald-600 text-white"><CheckCircle2 className="size-5" /></span><div><CardTitle as="h2" className="text-xl text-emerald-950">Design space ready</CardTitle><CardDescription className="mt-1 text-emerald-900/70">{savedNow ? "System design saved." : "Saved system design loaded."} Input guardrails passed; interval dispatch is the next step.</CardDescription></div></div><Button disabled={isPending || isRestoring} onClick={onRun} type="button">{isRestoring ? "Restoring saved analysis…" : isPending ? `Analysing ${candidateLabel(result.candidate_count)}…` : hasSavedAnalysis ? "Re-run analysis" : `Analyse ${candidateLabel(result.candidate_count)}`}<Sparkles className="size-4" /></Button></div></CardHeader>
-      <CardContent className="space-y-5 p-5">
-        <div className="grid items-stretch gap-3 lg:grid-cols-[1fr_auto_1fr_auto_.8fr]">
-          <SearchFactor count={pvConfigurations.length} detail={`${rangeLabel(pvConfigurations.map((candidate) => candidate.pv_capacity_kwp_dc))} kWp · ${rangeLabel(pvConfigurations.map((candidate) => candidate.pv_inverter_capacity_kw_ac))} kW AC`} label="PV configurations" tone="amber" />
-          <span className="hidden self-center text-2xl text-slate-300 lg:block">×</span>
-          <SearchFactor count={batteryConfigurations.length} detail={`${rangeLabel(batteryConfigurations.map((candidate) => candidate.nominal_capacity_kwh))} kWh · ${rangeLabel(batteryConfigurations.map((candidate) => candidate.max_discharge_kw))} kW`} label="Battery configurations" tone="cyan" />
-          <span className="hidden self-center text-2xl text-slate-300 lg:block">=</span>
-          <div className="flex items-center gap-3 rounded-xl bg-slate-950 p-4 text-white"><span className="grid size-10 place-items-center rounded-lg bg-white/10 text-cyan-200"><Grid3X3 className="size-5" /></span><span><strong className="block text-2xl tabular-nums">{result.candidate_count}</strong><small className="text-slate-300">{result.candidate_count === 1 ? "case" : "cases"} ready to analyse</small></span></div>
+    <section aria-label="Generated solution summary" className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="grid size-10 place-items-center rounded-xl bg-emerald-600 text-white"><Layers3 className="size-5" /></span>
+          <h2 className="font-semibold text-emerald-950">{design.candidate_count} solutions generated</h2>
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4 text-xs text-slate-500"><span>{durationLabel(durations)} battery duration · all {candidateLabel(result.candidate_count)} are input-valid</span><span>Not yet dispatch-tested or tariff-evaluated</span></div>
-      </CardContent>
-    </Card>
+        <span className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800">Ready for Dispatch</span>
+      </div>
+      <dl className="mt-4 grid gap-3 sm:grid-cols-3">
+        <RangeSummary label="Added PV" unit="kWp" values={pv} />
+        <RangeSummary label="Added battery" unit="kWh" values={battery} />
+        <RangeSummary label="Hybrid inverter / PCS" unit="kW AC" values={inverter} />
+      </dl>
+    </section>
   );
 }
 
-function SearchFactor({ count, detail, label, tone }: { count: number; detail: string; label: string; tone: "amber" | "cyan" }) {
-  const color = tone === "amber" ? "bg-amber-400" : "bg-cyan-500";
-  return <div className="rounded-xl border border-border bg-slate-50 p-4"><div className="flex items-start justify-between gap-3"><span><strong className="block text-xl tabular-nums text-slate-950">{count}</strong><small className="text-slate-500">{label}</small></span><div aria-label={`${count} ${label}`} className="flex max-w-28 flex-wrap justify-end gap-1" role="img">{Array.from({ length: Math.min(count, 20) }, (_, index) => <span className={`size-2 rounded-[2px] ${color}`} key={index} />)}</div></div><p className="mt-3 text-xs font-medium tabular-nums text-slate-700">{detail}</p></div>;
+function RangeSummary({ label, unit, values }: { label: string; unit: string; values: number[] }) {
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  return <div className="rounded-lg bg-white px-4 py-3"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 font-semibold tabular-nums text-slate-950">{numberLabel(minimum)}–{numberLabel(maximum)} {unit}</dd></div>;
 }
 
-function StageHeader({ description, eyebrow, project, title }: { description: string; eyebrow: string; project: CiProject; title: string }) {
-  return <section className="ci-stage-header"><div><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-200">{eyebrow}</p><h1 className="mt-3 text-3xl font-semibold text-white">{title}</h1><p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">{description}</p></div><div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3"><small className="block text-[10px] uppercase tracking-[0.16em] text-slate-400">Project</small><strong className="mt-1 block text-sm text-white">{project.display_name}</strong></div></section>;
+function DispatchWorkspace({ project }: { project: CiProject }) {
+  const queryClient = useQueryClient();
+  const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
+  const savedFeasibility = useQuery({ queryKey: ciSavedFeasibilityQueryKey(project.project_id), queryFn: () => fetchCiSavedFeasibility(project.project_id) });
+  const run = useMutation({
+    mutationFn: () => runCiDesignFeasibility(project.project_id),
+    onSuccess: (analysis) => queryClient.setQueryData<CiSavedFeasibilityState>(ciSavedFeasibilityQueryKey(project.project_id), { contract_version: "ci_project_feasibility_state_v1", status: "ready", saved_at: new Date().toISOString(), stale_reasons: [], result: analysis }),
+  });
+  if (project.design_status !== "ready") {
+    return <ModulePrerequisite description="Generate and save the PV and battery solution space in Physical feasibility before running interval dispatch." project={project} stage="03" title="Dispatch" />;
+  }
+  if (savedDesign.isPending || savedFeasibility.isPending) return <PageState title="Loading dispatch workspace" description="Restoring the generated scenarios and any saved simulation results." />;
+  if (savedDesign.isError || !savedDesign.data) return <ModulePrerequisite description="The generated solution space could not be restored. Return to Physical feasibility and generate it again." project={project} stage="03" title="Dispatch" />;
+  const analysis = run.data ?? (savedFeasibility.data?.status === "ready" ? savedFeasibility.data.result : null);
+  const needsRun = !analysis;
+  return (
+    <section aria-labelledby="dispatch-workspace-title" className="space-y-5">
+      <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
+        <div className="flex items-start gap-3">
+          <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Activity className="size-5" /></span>
+          <h1 className="text-xl font-semibold text-slate-950" id="dispatch-workspace-title">Scenario dispatch analysis</h1>
+        </div>
+        <Button disabled={run.isPending} onClick={() => run.mutate()} type="button">
+          {run.isPending ? <RefreshCw className="size-4 animate-spin" /> : analysis ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
+          {run.isPending ? `Analysing ${savedDesign.data.candidate_count} solutions…` : analysis ? "Re-run all solutions" : `Run ${savedDesign.data.candidate_count} solutions`}
+        </Button>
+      </header>
+      {run.error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{run.error instanceof Error ? run.error.message : "Dispatch analysis failed."}</p> : null}
+      {savedFeasibility.data?.status === "stale" && !run.data ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved dispatch result is out of date because the design or interval evidence changed. Run all solutions again.</p> : null}
+      {needsRun ? <DispatchReadyState design={savedDesign.data} /> : <CiDesignFeasibility projectId={project.project_id} result={analysis} />}
+    </section>
+  );
 }
 
-function ProjectFact({ label, value }: { label: string; value: string }) { return <div className="rounded-lg bg-slate-50 p-3"><small className="block text-xs text-muted-foreground">{label}</small><strong className="mt-1 block text-sm">{value}</strong></div>; }
-function PageState({ description, title }: { description: string; title: string }) { return <main className="p-8"><Card className="mx-auto max-w-xl"><CardHeader><CardTitle as="h1" className="text-xl">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader></Card></main>; }
-function toActiveProject(project: CiProject) { return { projectId: project.project_id, displayName: project.display_name, setupReady: project.setup_status === "ready", designReady: project.design_status === "ready" }; }
-function stageLabel(project: CiProject) { return project.current_stage === "financial_simulation" ? "Annual finance" : project.setup_status === "ready" ? "System design" : "Setup & catalog"; }
-function formatDate(value: string) { return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(new Date(value)); }
-function formatNumber(value: number) { return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 2 }).format(value); }
-function rangeLabel(values: number[]) { const minimum = Math.min(...values); const maximum = Math.max(...values); return minimum === maximum ? formatNumber(minimum) : `${formatNumber(minimum)}–${formatNumber(maximum)}`; }
-function durationLabel(values: number[]) { if (!values.length) return "No battery"; const range = rangeLabel(values); return `${range} h`; }
-function candidateLabel(count: number) { return `${count} candidate${count === 1 ? "" : "s"}`; }
-function uniqueBy<T>(values: T[], key: (value: T) => string) { return [...new Map(values.map((value) => [key(value), value])).values()]; }
+function DispatchReadyState({ design }: { design: CiDesignCandidateResult }) {
+  return (
+    <section className="grid overflow-hidden rounded-xl border border-slate-200 bg-white xl:grid-cols-[300px_minmax(0,1fr)]">
+      <aside className="border-b border-slate-200 bg-slate-50/70 p-4 xl:border-b-0 xl:border-r">
+        <p className="text-xs font-semibold uppercase tracking-[.14em] text-slate-500">Generated solutions</p>
+        <div className="mt-3 max-h-[540px] space-y-2 overflow-y-auto pr-1">
+          {design.candidates.map((scenario, index) => <div className="rounded-lg border border-slate-200 bg-white p-3" key={scenario.scenario_id}><div className="flex items-center justify-between gap-2"><strong className="text-xs text-slate-900">Solution {index + 1}</strong><span className="text-[11px] text-slate-400">Not run</span></div><p className="mt-1 text-xs tabular-nums text-slate-600">{numberLabel(scenario.pv_capacity_kwp_dc)} kWp PV · {numberLabel(scenario.nominal_capacity_kwh)} kWh battery</p><p className="mt-0.5 text-[11px] text-slate-500">{numberLabel(scenario.pv_inverter_capacity_kw_ac)} kW hybrid inverter / PCS</p></div>)}
+        </div>
+      </aside>
+      <div className="grid min-h-[540px] place-items-center p-8 text-center"><div className="max-w-md"><span className="mx-auto grid size-14 place-items-center rounded-2xl bg-cyan-50 text-cyan-800"><Play className="size-6" /></span><h2 className="mt-5 text-xl font-semibold text-slate-950">Ready to simulate every solution</h2><p className="mt-2 text-sm leading-6 text-slate-500">The run creates peak-shaving, interval activity, solar flow, battery SOC and peak-event results for each generated scenario. Tariff and financial calculations remain in later modules.</p></div></div>
+    </section>
+  );
+}
+
+function PageState({ description, title }: { description: string; title: string }) {
+  return <main className="p-8"><Card className="mx-auto max-w-xl"><CardHeader><CardTitle as="h2" className="text-xl">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader></Card></main>;
+}
+
+const moduleStages: Array<{ label: string; stage: CiWorkspaceStage }> = [
+  { label: "Evidence", stage: "evidence" },
+  { label: "Solution Generator", stage: "physical_feasibility" },
+  { label: "Scenario Analysis", stage: "dispatch" },
+  { label: "Finance Analysis", stage: "tariff_replay" },
+];
+
+function ModulePager({ onNavigate, stage }: { onNavigate: (stage: CiWorkspaceStage) => void; stage: CiWorkspaceStage }) {
+  const currentIndex = moduleStages.findIndex((item) => item.stage === stage);
+  const previous = currentIndex > 0 ? moduleStages[currentIndex - 1] : null;
+  const next = currentIndex < moduleStages.length - 1 ? moduleStages[currentIndex + 1] : null;
+  return (
+    <nav aria-label="Adjacent analysis modules" className="mt-2 flex items-center justify-between border-t border-slate-200 pt-5">
+      <div>{previous ? <Button aria-label={`Previous: ${previous.label}`} onClick={() => onNavigate(previous.stage)} type="button" variant="outline"><ArrowLeft className="size-4" />{previous.label}</Button> : null}</div>
+      <div>{next ? <Button aria-label={`Next: ${next.label}`} onClick={() => onNavigate(next.stage)} type="button">{next.label}<ArrowRight className="size-4" /></Button> : null}</div>
+    </nav>
+  );
+}
+
+function toActiveProject(project: CiProject) {
+  return { projectId: project.project_id, displayName: project.display_name, setupReady: project.setup_status === "ready", designReady: project.design_status === "ready" };
+}
+
+function numberLabel(value: number) {
+  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 1 }).format(value);
+}

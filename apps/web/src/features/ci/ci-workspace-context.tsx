@@ -1,14 +1,17 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 
-export type CiWorkspaceStage = "overview" | "setup" | "system_design" | "financial_simulation";
+export type CiWorkspaceStage =
+  | "evidence"
+  | "physical_feasibility"
+  | "dispatch"
+  | "tariff_replay";
 
 type ActiveProject = { projectId: string; displayName: string; setupReady: boolean; designReady: boolean } | null;
 
 interface CiWorkspaceState {
   activeProject: ActiveProject;
   stage: CiWorkspaceStage;
-  openOverview: () => void;
-  openProjectStage: (project: NonNullable<ActiveProject>, stage: Exclude<CiWorkspaceStage, "overview">) => void;
+  openProjectStage: (project: NonNullable<ActiveProject>, stage?: CiWorkspaceStage) => void;
   setStage: (stage: CiWorkspaceStage) => void;
 }
 
@@ -16,12 +19,11 @@ const CiWorkspaceContext = createContext<CiWorkspaceState | null>(null);
 
 export function CiWorkspaceProvider({ children }: { children: ReactNode }) {
   const [activeProject, setActiveProject] = useState<ActiveProject>(null);
-  const [stage, setStage] = useState<CiWorkspaceStage>("overview");
+  const [stage, setStage] = useState<CiWorkspaceStage>("evidence");
   const value = useMemo<CiWorkspaceState>(() => ({
     activeProject,
     stage,
-    openOverview: () => setStage("overview"),
-    openProjectStage: (project, nextStage) => {
+    openProjectStage: (project, nextStage = "evidence") => {
       setActiveProject(project);
       setStage(nextStage);
     },

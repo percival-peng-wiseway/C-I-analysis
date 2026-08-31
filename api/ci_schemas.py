@@ -46,8 +46,26 @@ class CiProjectCreateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=255)
 
 
+class CiDeviceProfileRequest(BaseModel):
+    contract_version: Literal["ci_device_profile_v2"] = "ci_device_profile_v2"
+    profile_id: Literal["workspace_device_profile"] = "workspace_device_profile"
+    currency: Literal["AUD"] = "AUD"
+    tax_basis: Literal["gst_exclusive"] = "gst_exclusive"
+    pv_cost_aud_per_kwp_dc: float = Field(gt=0, le=1_000_000)
+    battery_cost_aud_per_kwh: float = Field(gt=0, le=1_000_000)
+    inverter_cost_aud_per_kw_ac: float = Field(gt=0, le=1_000_000)
+    equipment_catalog: dict[str, object]
+    default_equipment_selection: dict[str, str]
+    discount_rate: float = Field(default=0.08, ge=0, lt=1)
+    annual_value_escalation_rate: float = Field(default=0.025, ge=0, lt=1)
+    annual_value_degradation_rate: float = Field(default=0.005, ge=0, lt=1)
+    annual_om_fraction_of_capex: float = Field(default=0.015, ge=0, le=0.2)
+    analysis_term_years: int = Field(default=15, ge=1, le=50)
+
+
 class CiDesignCandidatesRequest(BaseModel):
     scenarios: list[dict[str, object]] = Field(min_length=1, max_length=200)
+    design_context: dict[str, object] | None = None
 
 
 class CiIntervalActivityRequest(BaseModel):
@@ -81,3 +99,19 @@ class CiAnnualFinancialSimulationRequest(BaseModel):
     discount_rate: float = Field(ge=0, lt=1)
     annual_value_degradation_rate: float = Field(ge=0, lt=1)
     analysis_term_years: int = Field(ge=1, le=50)
+
+
+class CiAnnualFinancialPriceInput(BaseModel):
+    scenario_id: str = Field(min_length=1, max_length=120)
+    upfront_cost_aud_ex_gst: float = Field(gt=0, le=10_000_000_000)
+
+
+class CiAnnualFinancialComparisonRequest(BaseModel):
+    pricing_mode: Literal["manual_quotes", "device_profile"] = "manual_quotes"
+    prices: list[CiAnnualFinancialPriceInput] = Field(default_factory=list, max_length=200)
+    equipment_selection: dict[str, str] | None = None
+    discount_rate: float | None = Field(default=None, ge=0, lt=1)
+    annual_value_escalation_rate: float | None = Field(default=None, ge=0, lt=1)
+    annual_value_degradation_rate: float | None = Field(default=None, ge=0, lt=1)
+    annual_om_fraction_of_capex: float | None = Field(default=None, ge=0, le=0.2)
+    analysis_term_years: int | None = Field(default=None, ge=1, le=50)

@@ -29,13 +29,14 @@ const performance = {
 function payload() {
   const point = { timestamp: "2026-01-01T00:00:00+10:00", time_label: "00:00", baseline_kw: 100, pv_only_import_kw: 90, pv_battery_import_kw: 70, pv_generation_kw: 10, battery_charge_kw: 0, battery_discharge_kw: 20, soc_kwh: 100 };
   return {
-    contract_version: "ci_design_feasibility_v2", status: "ready",
+    contract_version: "ci_design_feasibility_v4", status: "ready",
     analysis_mode: "pre_tariff_physical_feasibility",
     customer_facing_permission: false, recommendation_permitted: false,
     tariff_evaluated: false, currency_values_permitted: false,
     coverage: { input_format: "wide_interval_30_minute", interval_minutes: 30, interval_count: 96, start_timestamp: point.timestamp, end_timestamp: "2026-01-02T23:30:00+10:00", time_basis: "source", years: [{ year: 2026, interval_count: 96, complete_calendar_year: false }], primary_year: 2026 },
     baseline: { peak_date: "2026-01-01", peak_kw: 100, peak_timestamp: point.timestamp, daily_profile_cloud: { sampled_daily_profiles: [], average_day_kw: Array(48).fill(50), selected_peak_day_kw: Array(48).fill(100), time_labels: Array.from({ length: 48 }, (_, index) => `${String(Math.floor(index / 2)).padStart(2, "0")}:${index % 2 ? "30" : "00"}`) } },
-    scenarios: [{ scenario_id: "one", label: "One", authored_inputs: {}, energy_dispatch_algorithm_id: "ci_pre_tariff_pv_self_consumption_v1", yearly_energy: [{ year: 2026, ...totals, performance: { ...performance, top_peak_events: performance.top_peak_events.map((event) => ({ ...event })) } }], coverage_energy: { ...totals }, coverage_performance: { ...performance, top_peak_events: performance.top_peak_events.map((event) => ({ ...event })) }, initial_soc_kwh: 100, final_soc_kwh: 50, peak_day: { algorithm_id: "ci_pre_tariff_peak_day_envelope_v1", date: "2026-01-01", baseline_peak_kw: 100, pv_only_peak_kw: 90, achieved_peak_kw: 70, sampled_target_kw: 70, peak_reduction_kw: 30, peak_reduction_percent: 30, points: Array.from({ length: 48 }, () => ({ ...point })), billing_demand_interpretation_permitted: false }, customer_facing_permission: false, recommendation_permitted: false }],
+    physical_review_order: { algorithm_id: "ci_pre_tariff_physical_review_order_v2", shortlist_count: 1, basis: "Physical review only.", recommendation_permitted: false },
+    scenarios: [{ scenario_id: "one", label: "One", physical_review_rank: 1, authored_inputs: {}, energy_dispatch_algorithm_id: "ci_pre_tariff_pv_self_consumption_v1", yearly_energy: [{ year: 2026, ...totals, performance: { ...performance, top_peak_events: performance.top_peak_events.map((event) => ({ ...event })) } }], coverage_energy: { ...totals }, coverage_performance: { ...performance, top_peak_events: performance.top_peak_events.map((event) => ({ ...event })) }, initial_soc_kwh: 100, final_soc_kwh: 50, peak_day: { algorithm_id: "ci_pre_tariff_peak_day_envelope_v1", date: "2026-01-01", baseline_peak_kw: 100, pv_only_peak_kw: 90, achieved_peak_kw: 70, sampled_target_kw: 70, peak_reduction_kw: 30, peak_reduction_percent: 30, points: Array.from({ length: 48 }, () => ({ ...point })), billing_demand_interpretation_permitted: false }, customer_facing_permission: false, recommendation_permitted: false }],
     assumptions: [],
   };
 }

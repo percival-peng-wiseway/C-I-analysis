@@ -239,6 +239,20 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
         row["annual_tariff_value"]["first_year_value_ex_gst_aud"] > 0
         for row in result["scenarios"]
     )
+    for row in result["scenarios"]:
+        annual = row["annual_tariff_value"]
+        assert sum(annual["baseline_categories_ex_gst_aud"].values()) == pytest.approx(
+            annual["baseline_cost_ex_gst_aud"], abs=0.05
+        )
+        assert sum(annual["scenario_categories_ex_gst_aud"].values()) == pytest.approx(
+            annual["scenario_cost_ex_gst_aud"], abs=0.05
+        )
+        for key, saving in annual["category_savings_ex_gst_aud"].items():
+            assert saving == pytest.approx(
+                annual["baseline_categories_ex_gst_aud"][key]
+                - annual["scenario_categories_ex_gst_aud"][key],
+                abs=0.01,
+            )
     assert all(
         row["post_dispatch"]["authority_source"]
         == CI_PEAK_SHAVING_ROLLING_REPLAY_ID
@@ -573,6 +587,18 @@ def test_physical_scenario_review_rejects_soc_outside_optimizer_v1_contract() ->
     with pytest.raises(CiScenarioAnalysisError) as error:
         _validated_scenarios([scenario])
     assert error.value.code == "scenario_contract_invalid"
+
+
+def test_physical_scenario_review_accepts_ten_to_ninety_percent_soc_window() -> None:
+    scenario = _scenario("supported-soc", 10.0, 5.0)
+    scenario["max_soc_fraction"] = 0.9
+    scenario["initial_soc_fraction"] = 0.9
+
+    validated = _validated_scenarios([scenario])
+
+    assert validated[0].min_soc_fraction == 0.1
+    assert validated[0].max_soc_fraction == 0.9
+    assert validated[0].initial_soc_fraction == 0.9
 
 
 def test_physical_scenario_periods_use_explicit_analysis_period() -> None:

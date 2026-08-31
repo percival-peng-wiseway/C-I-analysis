@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { analyzeCiPhysicalScenarios, analyzeCiThreeCaseComparison, type CiScenarioInput } from "./ci-scenarios";
+import { analyzeCiPhysicalScenarios, analyzeCiThreeCaseComparison, fetchCiSavedTariffReplay, runCiProjectTariffReplay, type CiScenarioInput } from "./ci-scenarios";
 
 const scenarios: CiScenarioInput[] = ["a", "b"].map((id) => ({
   scenario_id: id,
@@ -51,6 +51,30 @@ const reviewProjection = (battery: boolean, index = 0) => ({
 });
 
 describe("analyzeCiPhysicalScenarios", () => {
+  it("keeps project tariff replay fail-closed when the API rejects the evidence", async () => {
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input).toBe("/api/commercial-industrial/projects/project-1/tariff-replay");
+      expect(init?.method).toBe("POST");
+      return new Response(JSON.stringify({ detail: { message: "Approved tariff evidence is required." } }), { status: 409 });
+    };
+    await expect(runCiProjectTariffReplay("project-1", fetcher as typeof fetch)).rejects.toThrow("Approved tariff evidence is required.");
+  });
+
+  it("restores the project tariff replay state without starting a new run", async () => {
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input).toBe("/api/commercial-industrial/projects/project-1/tariff-replay");
+      expect(init?.method).toBeUndefined();
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "not_saved",
+        saved_at: null,
+        stale_reasons: [],
+        result: null,
+      }), { status: 200 });
+    };
+    await expect(fetchCiSavedTariffReplay("project-1", fetcher as typeof fetch)).resolves.toMatchObject({ status: "not_saved" });
+  });
+
   it("posts explicit scenarios and accepts only the fail-closed contract", async () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBe("/api/commercial-industrial/powercor-llvt2-physical-scenarios");

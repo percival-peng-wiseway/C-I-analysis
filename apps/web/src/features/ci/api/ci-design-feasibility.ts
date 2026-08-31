@@ -17,6 +17,11 @@ export interface CiFeasibilityEnergyTotals {
   battery_equivalent_full_cycles: number;
   battery_active_days: number;
   battery_active_day_percent: number;
+  grid_emissions_factor_kg_co2e_per_kwh?: number;
+  baseline_scope_2_emissions_t_co2e?: number;
+  post_system_scope_2_emissions_t_co2e?: number;
+  avoided_scope_2_emissions_t_co2e?: number;
+  scope_2_emissions_reduction_percent?: number;
 }
 
 export interface CiFeasibilityPeakEvent {
@@ -99,6 +104,7 @@ export interface CiIntervalActivityResult {
 export interface CiFeasibilityScenario {
   scenario_id: string;
   label: string;
+  physical_review_rank: number;
   authored_inputs: CiScenarioInput;
   energy_dispatch_algorithm_id: "ci_pre_tariff_pv_self_consumption_v1";
   yearly_energy: Array<CiFeasibilityEnergyTotals & { year: number; performance: CiFeasibilityPerformance }>;
@@ -123,7 +129,7 @@ export interface CiFeasibilityScenario {
 }
 
 export interface CiDesignFeasibilityResult {
-  contract_version: "ci_design_feasibility_v2";
+  contract_version: "ci_design_feasibility_v4";
   status: "ready";
   analysis_mode: "pre_tariff_physical_feasibility";
   customer_facing_permission: false;
@@ -150,6 +156,12 @@ export interface CiDesignFeasibilityResult {
       selected_peak_day_kw: number[];
       time_labels: string[];
     };
+  };
+  physical_review_order: {
+    algorithm_id: "ci_pre_tariff_physical_review_order_v2";
+    shortlist_count: number;
+    basis: string;
+    recommendation_permitted: false;
   };
   scenarios: CiFeasibilityScenario[];
   assumptions: string[];
@@ -223,7 +235,7 @@ export async function fetchCiIntervalActivity(
 export function assertCiDesignFeasibility(value: unknown): CiDesignFeasibilityResult {
   const payload = value as CiDesignFeasibilityResult;
   if (
-    payload.contract_version !== "ci_design_feasibility_v2" ||
+    payload.contract_version !== "ci_design_feasibility_v4" ||
     payload.status !== "ready" ||
     payload.analysis_mode !== "pre_tariff_physical_feasibility" ||
     payload.customer_facing_permission !== false ||
@@ -240,14 +252,24 @@ export function assertCiDesignFeasibility(value: unknown): CiDesignFeasibilityRe
     !safeSeries(payload.baseline?.daily_profile_cloud?.selected_peak_day_kw) ||
     payload.baseline.daily_profile_cloud.average_day_kw.length !== 1440 / payload.coverage.interval_minutes ||
     payload.baseline.daily_profile_cloud.selected_peak_day_kw.length !== 1440 / payload.coverage.interval_minutes ||
+    payload.physical_review_order?.algorithm_id !== "ci_pre_tariff_physical_review_order_v2" ||
+    payload.physical_review_order.recommendation_permitted !== false ||
+    !Number.isInteger(payload.physical_review_order.shortlist_count) ||
+    payload.physical_review_order.shortlist_count < 1 ||
+    payload.physical_review_order.shortlist_count > 10 ||
+    typeof payload.physical_review_order.basis !== "string" ||
+    !payload.physical_review_order.basis ||
     !Array.isArray(payload.scenarios) ||
     payload.scenarios.length < 1 ||
     payload.scenarios.length > 200 ||
-    payload.scenarios.some((scenario) =>
+    payload.physical_review_order.shortlist_count !== Math.min(10, payload.scenarios.length) ||
+    payload.scenarios.some((scenario, index) =>
+      scenario.physical_review_rank !== index + 1 ||
       scenario.customer_facing_permission !== false ||
       scenario.recommendation_permitted !== false ||
       scenario.energy_dispatch_algorithm_id !== "ci_pre_tariff_pv_self_consumption_v1" ||
       scenario.peak_day?.algorithm_id !== "ci_pre_tariff_peak_day_envelope_v1" ||
+      scenario.peak_day.date !== payload.baseline.peak_date ||
       scenario.peak_day.billing_demand_interpretation_permitted !== false ||
       ![
         scenario.peak_day.baseline_peak_kw,
@@ -364,10 +386,19 @@ function safeTotals(value: CiFeasibilityEnergyTotals): boolean {
     value?.battery_active_days,
     value?.battery_active_day_percent,
   ].every((item) => Number.isFinite(item) && item >= 0);
-  return nonnegative &&
+  const carbonValues = [
+    value.grid_emissions_factor_kg_co2e_per_kwh,
+    value.baseline_scope_2_emissions_t_co2e,
+    value.post_system_scope_2_emissions_t_co2e,
+    value.avoided_scope_2_emissions_t_co2e,
+    value.scope_2_emissions_reduction_percent,
+  ];
+  const carbonSafe = carbonValues.every((item) => item === undefined) || carbonValues.every((item) => Number.isFinite(item) && Number(item) >= 0);
+  return nonnegative && carbonSafe &&
     value.grid_import_reduction_percent <= 100 &&
     value.pv_self_consumption_percent <= 100 &&
     value.battery_active_day_percent <= 100 &&
+    (value.scope_2_emissions_reduction_percent === undefined || value.scope_2_emissions_reduction_percent <= 100) &&
     Number.isInteger(value.battery_active_days);
 }
 

@@ -32,6 +32,14 @@ def calculate_metrics(assumptions: dict[str, Any]) -> dict[str, object]:
     annual_om = _non_negative(assumptions, "annual_om_cost_aud", default=0.0)
     discount_rate = _rate(assumptions, "discount_rate")
     degradation_rate = _rate(assumptions, "annual_value_degradation_rate")
+    escalation_rate = _rate(
+        {
+            "annual_value_escalation_rate": assumptions.get(
+                "annual_value_escalation_rate", 0.0
+            )
+        },
+        "annual_value_escalation_rate",
+    )
     term_years = assumptions.get("analysis_term_years")
     if isinstance(term_years, bool) or not isinstance(term_years, int) or not 1 <= term_years <= 50:
         raise CiFinancialSolutionError("analysis_term_years must be an integer from 1 to 50")
@@ -42,7 +50,9 @@ def calculate_metrics(assumptions: dict[str, Any]) -> dict[str, object]:
     cashflows = [-capex]
     for year in range(1, term_years + 1):
         cashflows.append(
-            annual_value * ((1 - degradation_rate) ** (year - 1))
+            annual_value
+            * ((1 + escalation_rate) ** (year - 1))
+            * ((1 - degradation_rate) ** (year - 1))
             - annual_om
             - replacement_by_year.get(year, 0.0)
         )

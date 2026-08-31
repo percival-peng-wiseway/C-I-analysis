@@ -13,11 +13,19 @@ def test_standalone_migration_creates_only_ci_tables(tmp_path, monkeypatch) -> N
     assert tables == {
         "alembic_version",
         "ci_financial_solutions",
+        "ci_device_profiles",
         "ci_internal_report_artifacts",
         "ci_pricing_catalog_versions",
         "ci_project_evidence",
+        "ci_project_annual_financial_results",
         "ci_project_feasibility_results",
+        "ci_project_site_material",
+        "ci_project_tariff_replay_results",
         "ci_projects",
     }
+    project_columns = {
+        column["name"] for column in inspect(engine).get_columns("ci_projects")
+    }
+    assert "design_context_json" in project_columns
     assert not any(table.startswith("residential_") for table in tables)
     engine.dispose()

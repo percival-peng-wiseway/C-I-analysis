@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BadgeCheck, CircleAlert, Database, FileSearch, FileText, RefreshCw, ShieldCheck, TableProperties } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { ChevronDown, CircleAlert, FileSearch, FileText, ImagePlus, ReceiptText, RefreshCw, TableProperties, Trash2, UploadCloud, type LucideIcon } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,31 +14,47 @@ import {
   type CiEvidenceIntakeResult,
   type CiProjectEvidenceState,
 } from "@/features/ci/api/ci-evidence-intake";
+import {
+  ciProjectSiteMaterialQueryKey,
+  deleteCiProjectSitePhoto,
+  fetchCiProjectSiteMaterial,
+  uploadCiProjectSitePhoto,
+} from "@/features/ci/api/ci-site-material";
 import { CiAnnualDemandHeatmap } from "@/features/ci/ci-annual-demand-heatmap";
 import { CiBillBreakdown } from "@/features/ci/ci-bill-breakdown";
+import { CiNem12LoadProfile } from "@/features/ci/ci-nem12-load-profile";
 
 export function CiEvidenceIntake({
   onReady,
   projectId,
-  profileReady,
+  setupReady = false,
 }: {
   onReady: () => void;
   projectId: string;
-  profileReady: boolean;
+  setupReady?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [bill, setBill] = useState<File | null>(null);
   const [nem12, setNem12] = useState<File | null>(null);
+  const [manualTariffCode, setManualTariffCode] = useState("");
   const [replacing, setReplacing] = useState(false);
+  const [billBreakdownOpen, setBillBreakdownOpen] = useState(false);
   const savedEvidence = useQuery({
     queryKey: ciProjectEvidenceQueryKey(projectId),
     queryFn: () => fetchCiProjectEvidence(projectId),
   });
+  const siteMaterial = useQuery({
+    queryKey: ciProjectSiteMaterialQueryKey(projectId),
+    queryFn: () => fetchCiProjectSiteMaterial(projectId),
+  });
   const inspection = useMutation({
     mutationFn: ({ billFile, billReview, nem12File }: { billFile: File; billReview?: CiBillReviewInput; nem12File: File }) => inspectCiEvidencePair(projectId, billFile, nem12File, undefined, billReview),
-    onSuccess: () => {
+    onSuccess: async (result) => {
       setReplacing(false);
-      void queryClient.invalidateQueries({ queryKey: ciProjectEvidenceQueryKey(projectId) });
+      await queryClient.invalidateQueries({ queryKey: ciProjectEvidenceQueryKey(projectId) });
+      setBill(null);
+      setNem12(null);
+      if (result.intake_status === "ready_for_profile_review") onReady();
     },
   });
   const savedReview = useMutation({
@@ -49,83 +65,103 @@ export function CiEvidenceIntake({
         ...current,
         evidence: { ...current.evidence, saved_at: new Date().toISOString(), inspection: result },
       } : current);
+      if (result.intake_status === "ready_for_profile_review") onReady();
+    },
+  });
+  const siteUpload = useMutation({
+    mutationFn: async (files: File[]) => {
+      for (const file of files) await uploadCiProjectSitePhoto(projectId, file);
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ciProjectSiteMaterialQueryKey(projectId) });
+    },
+  });
+  const siteDelete = useMutation({
+    mutationFn: (photoId: string) => deleteCiProjectSitePhoto(projectId, photoId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ciProjectSiteMaterialQueryKey(projectId) });
     },
   });
   const resetResult = () => inspection.reset();
   const saved = savedEvidence.data?.status === "saved" ? savedEvidence.data.evidence : null;
-  const showUploader = replacing || savedEvidence.isError || (!savedEvidence.isPending && !saved);
   const result = savedReview.data ?? inspection.data ?? (!replacing ? saved?.inspection : undefined);
-  const pairReady = result?.intake_status === "ready_for_profile_review";
   const fullTariffReady = result?.nem12.full_tariff_analysis_ready ?? false;
   const activeError = inspection.error ?? savedReview.error;
+  const detectedTariffCode = result?.bill.network_tariff_code?.trim() ?? "";
+  const savedBillName = !replacing ? saved?.files.bill.filename ?? (setupReady ? "Saved to project" : null) : null;
+  const savedNem12Name = !replacing ? saved?.files.interval.filename ?? (setupReady ? "Saved to project" : null) : null;
+  const sitePhotos = siteMaterial.data?.photos ?? [];
+  const addSitePhotos = (files: FileList | null) => {
+    const room = Math.max(0, 8 - sitePhotos.length);
+    const additions = Array.from(files ?? [])
+      .filter((file) => ["image/jpeg", "image/png", "image/webp"].includes(file.type))
+      .slice(0, room);
+    if (additions.length) siteUpload.mutate(additions);
+  };
 
   return (
     <section className="scroll-mt-20 space-y-4" id="evidence-intake">
-      <div className="premium-section-heading">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-700">01 · Input check</p>
-        <div className="mt-1 flex flex-wrap items-center gap-2">
-          <h2 className="text-2xl font-semibold">Start with the files you actually receive</h2>
-          <Badge variant="outline">PDF + NEM12</Badge>
-        </div>
-        <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-          Upload the electricity bill and matching interval file together. Python checks their structure, site identity and coverage before any tariff or optimisation calculation is allowed.
-        </p>
+      <section aria-label="Evidence sources" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <EvidenceFileCard
+          accept=".pdf,application/pdf"
+          description="Charges, demand and GST."
+          file={bill}
+          icon={FileText}
+          inputLabel="Electricity bill PDF"
+          label="Electricity bill"
+          onChange={(file) => { setBill(file); if (file) setReplacing(true); resetResult(); }}
+          savedName={savedBillName}
+        />
+        <EvidenceFileCard
+          accept=".csv,.tsv,text/csv,text/tab-separated-values"
+          description="Import, export and reactive intervals."
+          file={nem12}
+          icon={TableProperties}
+          inputLabel="Matching interval CSV / NEM12"
+          label="NEM12"
+          onChange={(file) => { setNem12(file); if (file) setReplacing(true); resetResult(); }}
+          savedName={savedNem12Name}
+        />
+        <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
+          <EvidenceCardHeader icon={ReceiptText} ready={Boolean(detectedTariffCode)} status={detectedTariffCode ? "Detected" : result ? "Manual input" : "From bill"} />
+          <h3 className="mt-4 text-sm font-semibold text-slate-950">Tariff</h3>
+          <div className="mt-auto pt-4">
+            {detectedTariffCode ? (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2"><span className="block text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Network tariff</span><strong className="mt-1 block text-sm text-emerald-950">{detectedTariffCode}</strong></div>
+            ) : result ? (
+              <label className="grid gap-1 text-xs font-medium text-slate-700"><span>Tariff code</span><input aria-label="Manual tariff code" className="rounded-md border border-amber-300 bg-amber-50/40 px-3 py-2 text-sm uppercase" onChange={(event) => setManualTariffCode(event.target.value)} placeholder="Enter if not detected" value={manualTariffCode} /><span className="font-normal text-slate-500">Confirm it in the bill review below.</span></label>
+            ) : (
+              <p className="rounded-lg border border-dashed border-slate-300 px-3 py-3 text-xs leading-5 text-slate-500">Upload and inspect the bill. Manual entry appears only if no tariff is found.</p>
+            )}
+          </div>
+        </article>
+        <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
+          <EvidenceCardHeader icon={ImagePlus} ready={sitePhotos.length > 0} status={siteUpload.isPending ? "Uploading" : sitePhotos.length ? `${sitePhotos.length} saved` : "Optional"} />
+          <h3 className="mt-4 text-sm font-semibold text-slate-950">Site material</h3>
+          <label className={`mt-auto flex items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-300 bg-cyan-50/40 px-3 py-3 text-xs font-semibold text-cyan-800 ${siteUpload.isPending || sitePhotos.length >= 8 ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-cyan-50"}`}>
+            <UploadCloud className="size-4" />{siteUpload.isPending ? "Saving photos…" : sitePhotos.length >= 8 ? "8 photo limit reached" : "Upload roof photos"}
+            <input accept="image/jpeg,image/png,image/webp" aria-label="Roof and site photos" className="sr-only" disabled={siteUpload.isPending || sitePhotos.length >= 8} multiple onChange={(event) => { addSitePhotos(event.target.files); event.target.value = ""; }} type="file" />
+          </label>
+        </article>
+      </section>
+
+      <div className="flex flex-wrap justify-end gap-2">
+          <Button disabled={!bill || !nem12 || inspection.isPending} onClick={() => { if (bill && nem12) inspection.mutate({ billFile: bill, nem12File: nem12 }); }} type="button">
+            <FileSearch className="mr-2 size-4" />{inspection.isPending ? "Inspecting inputs" : saved ? "Inspect & replace" : "Inspect & save"}
+          </Button>
+          {saved && replacing ? <Button onClick={() => { setReplacing(false); setBill(null); setNem12(null); inspection.reset(); }} type="button" variant="ghost">Cancel replacement</Button> : null}
       </div>
 
-      {savedEvidence.isPending ? (
-        <Card><CardContent className="flex items-center gap-3 p-5 text-sm text-muted-foreground"><RefreshCw className="size-4 animate-spin" />Restoring this project&apos;s saved evidence…</CardContent></Card>
-      ) : null}
-
-      {saved && !replacing ? (
-        <Card className="border-emerald-200 bg-emerald-50/40">
-          <CardHeader>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex gap-3"><span className="grid size-10 place-items-center rounded-lg bg-emerald-100 text-emerald-800"><Database className="size-5" /></span><div><CardTitle as="h3">Saved project evidence</CardTitle><CardDescription>Restored from this project · saved {formatSavedAt(saved.saved_at)}</CardDescription></div></div>
-              <Badge variant="secondary">Saved locally</Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
-            <SavedFile icon={<FileText className="size-4" />} label="Electricity bill PDF" filename={saved.files.bill.filename} size={saved.files.bill.size_bytes} />
-            <SavedFile icon={<TableProperties className="size-4" />} label="Interval CSV / NEM12" filename={saved.files.interval.filename} size={saved.files.interval.size_bytes} />
-            <Button onClick={() => { setReplacing(true); inspection.reset(); }} type="button" variant="outline"><RefreshCw className="mr-2 size-4" />Replace files</Button>
-          </CardContent>
-        </Card>
-      ) : null}
-
-      {showUploader ? (
-        <Card>
-          <CardContent className="grid gap-4 p-5 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-            <FileInput
-              accept=".pdf,application/pdf"
-              file={bill}
-              icon={<FileText className="size-4" />}
-              label="Electricity bill PDF"
-              onChange={(file) => { setBill(file); resetResult(); }}
-            />
-            <FileInput
-              accept=".csv,.tsv,text/csv,text/tab-separated-values"
-              file={nem12}
-              icon={<TableProperties className="size-4" />}
-              label="Matching interval CSV / NEM12"
-              onChange={(file) => { setNem12(file); resetResult(); }}
-            />
-            <div className="flex flex-wrap gap-2">
-              <Button
-                className="min-w-40"
-                disabled={!bill || !nem12 || inspection.isPending}
-                onClick={() => { if (bill && nem12) inspection.mutate({ billFile: bill, nem12File: nem12 }); }}
-                type="button"
-              >
-                <FileSearch className="mr-2 size-4" />
-                {inspection.isPending ? "Inspecting inputs" : saved ? "Inspect & replace" : "Inspect both files"}
-              </Button>
-              {saved ? <Button onClick={() => { setReplacing(false); setBill(null); setNem12(null); inspection.reset(); }} type="button" variant="ghost">Cancel</Button> : null}
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
+      {savedEvidence.isPending ? <p className="flex items-center gap-2 px-1 text-xs text-muted-foreground"><RefreshCw className="size-3.5 animate-spin" />Restoring saved evidence…</p> : null}
 
       {savedEvidence.isError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"><strong>Saved evidence could not be restored.</strong><p className="mt-1">You can replace the bill and interval files below.</p></div> : null}
+
+      {siteMaterial.isError || siteUpload.error instanceof Error || siteDelete.error instanceof Error ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+          <strong>Site photos could not be updated.</strong>
+          <p className="mt-1">{siteUpload.error instanceof Error ? siteUpload.error.message : siteDelete.error instanceof Error ? siteDelete.error.message : "Refresh the page and try loading the project photos again."}</p>
+        </div>
+      ) : null}
 
       {activeError instanceof Error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
@@ -135,22 +171,9 @@ export function CiEvidenceIntake({
 
       {result ? (
         <div className="space-y-4">
-          <div className={`rounded-xl border p-4 text-sm ${pairReady && fullTariffReady ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex gap-3">
-                {pairReady && fullTariffReady ? <BadgeCheck className="mt-0.5 size-5 shrink-0" /> : <CircleAlert className="mt-0.5 size-5 shrink-0" />}
-                <div>
-                  <strong>{pairReady ? "The bill and NEM12 form a coherent input pair" : "One or more input checks need attention"}</strong>
-                  <p className="mt-1 opacity-80">{pairReady ? (fullTariffReady ? "The pair can proceed to private tariff-profile review." : "Setup and the active-demand heatmap can continue; later tariff analysis still needs the missing aligned streams.") : "Resolve the failed checks before preparing a tariff profile."}</p>
-                </div>
-              </div>
-              <Badge variant={pairReady && fullTariffReady ? "secondary" : "warning"}>{pairReady ? (fullTariffReady ? "Input pair ready" : "Setup ready · limited streams") : "Action required"}</Badge>
-            </div>
-          </div>
-
           <div className="grid gap-4 xl:grid-cols-2">
             <Card>
-              <CardHeader><div className="flex flex-wrap items-start justify-between gap-2"><div><CardTitle as="h3">Bill detected</CardTitle><CardDescription>{result.bill.retailer} · {result.bill.invoice_kind}</CardDescription></div><Badge variant={result.bill.review_status === "not_required" ? "secondary" : result.bill.review_status === "analyst_confirmed" ? "secondary" : "warning"}>{result.bill.review_status === "not_required" ? "Verified template" : result.bill.review_status === "analyst_confirmed" ? "Analyst confirmed" : "Review required"}</Badge></div></CardHeader>
+              <CardHeader><div className="flex flex-wrap items-start justify-between gap-2"><div><CardTitle as="h3">Bill detected</CardTitle><CardDescription>{result.bill.retailer} · {result.bill.invoice_kind}</CardDescription></div><div className="flex items-center gap-2"><Badge variant={result.bill.review_status === "not_required" ? "secondary" : result.bill.review_status === "analyst_confirmed" ? "secondary" : "warning"}>{result.bill.review_status === "not_required" ? "Verified template" : result.bill.review_status === "analyst_confirmed" ? "Analyst confirmed" : "Review required"}</Badge><button aria-controls="detected-bill-breakdown" aria-expanded={billBreakdownOpen} className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-600 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-800" onClick={() => setBillBreakdownOpen((current) => !current)} type="button">{billBreakdownOpen ? "Hide breakdown" : "Show breakdown"}<ChevronDown className={`size-3.5 transition-transform ${billBreakdownOpen ? "rotate-180" : ""}`} /></button></div></div></CardHeader>
               <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
                 <Fact label="Invoice period" value={result.bill.billing_period_start && result.bill.billing_period_end ? `${result.bill.billing_period_start} to ${result.bill.billing_period_end}` : "Needs confirmation"} />
                 <Fact label="Network tariff" value={result.bill.network_tariff_code ?? "Needs confirmation"} />
@@ -166,18 +189,14 @@ export function CiEvidenceIntake({
                 <Fact label="Coverage" value={`${result.nem12.coverage_start} to ${result.nem12.coverage_end}`} />
                 <Fact label="Interval" value={`${result.nem12.interval_minutes} minutes`} />
                 <Fact label="Streams supplied" value={result.nem12.stream_ids.join(" · ")} />
-                <Fact label="Aligned to E1" value={result.nem12.aligned_stream_ids.join(" · ")} />
-                <Fact label="Missing formal streams" value={result.nem12.missing_stream_ids.length ? result.nem12.missing_stream_ids.join(" · ") : "None"} />
-                <Fact label="Unaligned streams" value={result.nem12.unaligned_stream_ids.length ? result.nem12.unaligned_stream_ids.join(" · ") : "None"} />
                 <Fact label="Available capability" value={capabilityLabel(result.nem12.capability_status)} />
-                <Fact label="Quality methods" value={Object.entries(result.nem12.quality_method_counts).map(([key, value]) => `${key}: ${value}`).join(" · ")} />
-                <Fact label="Quality overrides" value={String(result.nem12.quality_override_count)} />
-                <Fact label="Private fingerprint" value={result.nem12.fingerprint} />
               </CardContent>
             </Card>
           </div>
 
-          <CiBillBreakdown bill={result.bill} />
+          {billBreakdownOpen ? <div id="detected-bill-breakdown"><CiBillBreakdown bill={result.bill} /></div> : null}
+
+          <CiNem12LoadProfile heatmap={result.annual_demand_heatmap} key={`profile-${result.nem12.fingerprint}`} />
 
           {!fullTariffReady ? (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
@@ -189,42 +208,44 @@ export function CiEvidenceIntake({
             <BillReviewForm
               bill={result.bill}
               busy={savedReview.isPending}
+              initialNetworkTariffCode={manualTariffCode}
               onConfirm={(billReview) => savedReview.mutate(billReview)}
             />
           ) : null}
 
-          <Card>
-            <CardHeader><CardTitle as="h3">Pair checks</CardTitle><CardDescription>No customer identifier is returned to the browser.</CardDescription></CardHeader>
-            <CardContent className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {result.pair_checks.map((check) => (
-                <div className={`flex gap-2 rounded-lg border p-3 text-sm ${check.severity === "pass" ? "border-emerald-200 bg-emerald-50" : check.severity === "warning" ? "border-amber-200 bg-amber-50" : "border-red-200 bg-red-50"}`} key={check.code}>
-                  {check.severity === "pass" ? <BadgeCheck className="mt-0.5 size-4 shrink-0 text-emerald-700" /> : <CircleAlert className={`mt-0.5 size-4 shrink-0 ${check.severity === "warning" ? "text-amber-700" : "text-red-700"}`} />}
-                  <span>{check.message}</span>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
           <CiAnnualDemandHeatmap heatmap={result.annual_demand_heatmap} key={result.nem12.fingerprint} />
 
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
-            <div className="flex max-w-3xl gap-3"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-cyan-800" /><p><strong>Next step:</strong> {pairReady ? "The input pair is ready for System design. " : "Confirm the bill fields and resolve every failed pair check. "}{profileReady ? "The private tariff profile is available for a later dispatch run." : "Tariff windows and customer-dollar analysis remain locked until private evidence is configured."}</p></div>
-            {pairReady ? <Button onClick={() => onReady()} type="button">Continue to System design</Button> : null}
-          </div>
         </div>
       ) : null}
+
+      <section aria-labelledby="site-material-title" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <h2 className="text-lg font-semibold text-slate-950" id="site-material-title">Uploaded roof photos</h2>
+          <Badge variant="outline">{sitePhotos.length}/8 photos</Badge>
+        </div>
+        {sitePhotos.length ? (
+          <div className="grid gap-3 p-5 sm:grid-cols-2 lg:grid-cols-4">
+            {sitePhotos.map((photo) => (
+              <figure className="group overflow-hidden rounded-lg border border-slate-200 bg-slate-50" key={photo.photo_id}>
+                <div className="relative aspect-[4/3] overflow-hidden bg-slate-100"><img alt={`Roof photo ${photo.filename}`} className="size-full object-cover" src={photo.content_url} /><button aria-label={`Remove ${photo.filename}`} className="absolute right-2 top-2 grid size-8 place-items-center rounded-full bg-slate-950/75 text-white opacity-90 hover:bg-red-700 disabled:cursor-wait disabled:opacity-50" disabled={siteDelete.isPending} onClick={() => siteDelete.mutate(photo.photo_id)} type="button"><Trash2 className="size-4" /></button></div>
+                <figcaption className="truncate px-3 py-2 text-xs text-slate-600">{photo.filename} · {formatBytes(photo.size_bytes)}</figcaption>
+              </figure>
+            ))}
+          </div>
+        ) : <p className="px-5 py-8 text-sm text-slate-500">No roof photos uploaded yet. Add JPG, PNG or WebP images from the Site material card above.</p>}
+      </section>
     </section>
   );
 }
 
-function BillReviewForm({ bill, busy, onConfirm }: { bill: CiEvidenceIntakeResult["bill"]; busy: boolean; onConfirm: (review: CiBillReviewInput) => void }) {
+function BillReviewForm({ bill, busy, initialNetworkTariffCode, onConfirm }: { bill: CiEvidenceIntakeResult["bill"]; busy: boolean; initialNetworkTariffCode: string; onConfirm: (review: CiBillReviewInput) => void }) {
   const [fields, setFields] = useState({
     retailer: bill.retailer === "Electricity retailer — confirm name" ? "" : bill.retailer,
     invoice_kind: bill.invoice_kind,
     nmi: "",
     billing_period_start: bill.billing_period_start ?? "",
     billing_period_end: bill.billing_period_end ?? "",
-    network_tariff_code: bill.network_tariff_code ?? "",
+    network_tariff_code: bill.network_tariff_code ?? initialNetworkTariffCode,
     consumption_kwh: numberInput(bill.consumption_kwh),
     highest_metered_demand_kva: numberInput(bill.highest_metered_demand_kva),
     power_factor_at_highest_demand: numberInput(bill.power_factor_at_highest_demand),
@@ -232,6 +253,10 @@ function BillReviewForm({ bill, busy, onConfirm }: { bill: CiEvidenceIntakeResul
     gst_aud: numberInput(bill.gst_aud),
     total_inc_gst_aud: numberInput(bill.total_inc_gst_aud),
   });
+  useEffect(() => {
+    if (!initialNetworkTariffCode.trim()) return;
+    setFields((current) => ({ ...current, network_tariff_code: initialNetworkTariffCode }));
+  }, [initialNetworkTariffCode]);
   const update = (key: keyof typeof fields, value: string) => setFields((current) => ({ ...current, [key]: value }));
   const requiresNmi = bill.site_identity_status === "missing";
   const numericKeys: Array<keyof typeof fields> = ["consumption_kwh", "highest_metered_demand_kva", "power_factor_at_highest_demand", "subtotal_ex_gst_aud", "gst_aud", "total_inc_gst_aud"];
@@ -290,18 +315,25 @@ function ReviewField({ label, max, maxLength, min, onChange, step, type = "text"
   return <label className="grid gap-1 text-sm"><span className="font-medium">{label}</span><input className="rounded-md border border-border bg-white px-3 py-2" max={max} maxLength={maxLength} min={min} onChange={(event) => onChange(event.target.value)} step={step} type={type} value={value} /></label>;
 }
 
-function FileInput({ accept, file, icon, label, onChange }: { accept: string; file: File | null; icon: ReactNode; label: string; onChange: (file: File | null) => void }) {
+function EvidenceFileCard({ accept, description, file, icon, inputLabel, label, onChange, savedName }: { accept: string; description: string; file: File | null; icon: LucideIcon; inputLabel: string; label: string; onChange: (file: File | null) => void; savedName: string | null }) {
+  const displayName = file?.name ?? savedName;
   return (
-    <label className="grid min-w-0 gap-1 text-sm">
-      <span className="flex items-center gap-2 font-medium">{icon}{label}</span>
-      <input accept={accept} aria-label={label} className="min-w-0 w-full rounded-md border border-border bg-background px-3 py-2" onChange={(event) => onChange(event.target.files?.item(0) ?? null)} type="file" />
-      <span className="truncate text-xs text-muted-foreground">{file ? `${file.name} · ${formatBytes(file.size)}` : "Select a local file"}</span>
-    </label>
+    <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
+      <EvidenceCardHeader icon={icon} ready={Boolean(savedName)} status={file ? "Selected" : savedName ? "Saved" : "Input required"} />
+      <h3 className="mt-4 text-sm font-semibold text-slate-950">{label}</h3>
+      <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>
+      <label className="mt-auto min-w-0 cursor-pointer pt-4">
+        <span className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-300 bg-cyan-50/40 px-3 py-3 text-xs font-semibold text-cyan-800 hover:bg-cyan-50"><UploadCloud className="size-4" />{displayName ? "Replace file" : "Choose file"}</span>
+        <input accept={accept} aria-label={inputLabel} className="sr-only" onChange={(event) => onChange(event.target.files?.item(0) ?? null)} type="file" />
+        <span className="mt-2 block truncate text-xs text-slate-500">{displayName ? `${displayName}${file ? ` · ${formatBytes(file.size)}` : ""}` : "No file selected"}</span>
+      </label>
+    </article>
   );
 }
 
-function SavedFile({ filename, icon, label, size }: { filename: string; icon: ReactNode; label: string; size: number }) {
-  return <div className="min-w-0 rounded-lg border border-emerald-200 bg-white p-3 text-sm"><span className="flex items-center gap-2 font-medium">{icon}{label}</span><strong className="mt-2 block truncate font-medium">{filename}</strong><span className="text-xs text-muted-foreground">{formatBytes(size)}</span></div>;
+function EvidenceCardHeader({ icon: Icon, ready, status }: { icon: LucideIcon; ready: boolean; status: string }) {
+  const statusClass = ready ? "bg-emerald-50 text-emerald-700" : status === "Selected" || status.includes("selected") ? "bg-cyan-50 text-cyan-700" : "bg-amber-50 text-amber-700";
+  return <div className="flex items-center justify-between gap-3"><span className={`grid size-9 place-items-center rounded-lg ${ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}><Icon className="size-4" /></span><span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${statusClass}`}>{status}</span></div>;
 }
 
 function Fact({ label, value }: { label: string; value: string }) {
@@ -319,10 +351,6 @@ function formatAud(value: number) {
 function formatBytes(value: number) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatSavedAt(value: string) {
-  return new Intl.DateTimeFormat("en-AU", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 function numberInput(value: number | null) {

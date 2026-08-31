@@ -63,7 +63,7 @@ def test_design_feasibility_returns_energy_and_peak_day_physics_without_tariff()
         _wide_bytes(), scenarios=[scenario]
     )
 
-    assert result["contract_version"] == "ci_design_feasibility_v2"
+    assert result["contract_version"] == "ci_design_feasibility_v4"
     assert result["analysis_mode"] == "pre_tariff_physical_feasibility"
     assert result["customer_facing_permission"] is False
     assert result["recommendation_permitted"] is False
@@ -71,23 +71,64 @@ def test_design_feasibility_returns_energy_and_peak_day_physics_without_tariff()
     assert result["currency_values_permitted"] is False
     assert result["coverage"]["interval_minutes"] == 30
     assert result["coverage"]["primary_year"] == 2026
+    assert result["physical_review_order"] == {
+        "algorithm_id": "ci_pre_tariff_physical_review_order_v2",
+        "shortlist_count": 1,
+        "basis": (
+            "Highest measured-coverage grid-import energy reduction, then greater "
+            "active-power peak reduction and top-10 event coverage. Exact performance "
+            "ties prefer the smaller authored PV, battery and inverter capacity. This "
+            "is a physical review order, not a recommendation."
+        ),
+        "recommendation_permitted": False,
+    }
 
     evaluated = result["scenarios"][0]
+    assert evaluated["physical_review_rank"] == 1
     assert evaluated["scenario_id"] == scenario["scenario_id"]
     assert evaluated["coverage_energy"]["grid_import_after_kwh"] < evaluated["coverage_energy"]["site_import_before_kwh"]
     assert evaluated["coverage_energy"]["pv_self_consumption_percent"] >= 0
     assert evaluated["coverage_energy"]["grid_export_kwh"] >= 0
     assert evaluated["coverage_energy"]["pv_clipped_kwh"] >= 0
     assert evaluated["coverage_energy"]["battery_equivalent_full_cycles"] >= 0
+    assert evaluated["coverage_energy"]["grid_emissions_factor_kg_co2e_per_kwh"] == 0.79
+    assert evaluated["coverage_energy"]["baseline_scope_2_emissions_t_co2e"] > evaluated["coverage_energy"]["post_system_scope_2_emissions_t_co2e"]
+    assert evaluated["coverage_energy"]["avoided_scope_2_emissions_t_co2e"] > 0
+    assert evaluated["coverage_energy"]["scope_2_emissions_reduction_percent"] == pytest.approx(evaluated["coverage_energy"]["grid_import_reduction_percent"])
     assert evaluated["coverage_performance"]["dispatch_basis"] == "pv_first_coverage_dispatch"
     assert evaluated["coverage_performance"]["top_10_event_count"] == 10
     assert len(evaluated["coverage_performance"]["top_peak_events"]) <= 20
     assert evaluated["coverage_performance"]["battery_duration_at_max_discharge_hours"] > 0
+    assert evaluated["peak_day"]["date"] == result["baseline"]["peak_date"]
     assert evaluated["peak_day"]["baseline_peak_kw"] == 120.0
     assert evaluated["peak_day"]["achieved_peak_kw"] < 120.0
     assert evaluated["peak_day"]["billing_demand_interpretation_permitted"] is False
     assert len(evaluated["peak_day"]["points"]) == 48
     assert all("aud" not in str(key).lower() for key in evaluated)
+
+
+def test_design_feasibility_shortlists_the_first_ten_physical_results() -> None:
+    scenarios = []
+    for index in range(12):
+        scenario = _scenario()
+        scenario["scenario_id"] = f"candidate-{index:02d}"
+        scenario["pv_system_id"] = f"pv-{index:02d}"
+        scenario["pv_capacity_kwp_dc"] = 20.0 + index * 5
+        scenario["pv_inverter_capacity_kw_ac"] = 20.0 + index * 5
+        scenarios.append(scenario)
+
+    result = analyze_ci_design_feasibility(_wide_bytes(), scenarios=scenarios)
+
+    assert result["physical_review_order"]["shortlist_count"] == 10
+    assert [item["physical_review_rank"] for item in result["scenarios"]] == list(
+        range(1, 13)
+    )
+    reductions = [
+        item["coverage_energy"]["grid_import_reduction_kwh"]
+        for item in result["scenarios"]
+    ]
+    assert reductions == sorted(reductions, reverse=True)
+    assert result["scenarios"][0]["authored_inputs"]["pv_capacity_kwp_dc"] == 75.0
 
 
 def test_design_feasibility_selects_a_complete_peak_day_with_partial_edges() -> None:

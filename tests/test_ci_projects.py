@@ -38,6 +38,59 @@ def _scenario() -> dict[str, object]:
         "max_soc_fraction": 1.0,
         "initial_soc_fraction": 1.0,
         "allow_grid_charging": False,
+        "grid_emissions_factor_kg_co2e_per_kwh": 0.79,
+    }
+
+
+def _design_context() -> dict[str, object]:
+    return {
+        "contract_version": "ci_design_context_v1",
+        "existing_solar": {
+            "installed": True,
+            "brand": "Trina",
+            "model": "Vertex S+",
+            "panel_count": 100,
+            "panel_rating_w": 500,
+            "installed_capacity_kwp_dc": 50,
+            "inverter_brand": "Sungrow",
+            "inverter_model": "SG50CX",
+            "inverter_capacity_kw_ac": 50,
+            "installation_year": 2022,
+            "operating_status": "operational",
+            "included_in_interval_baseline": True,
+        },
+        "existing_battery": {
+            "installed": False,
+            "brand": "",
+            "model": "",
+            "nominal_capacity_kwh": 0,
+            "usable_capacity_kwh": 0,
+            "power_kw": 0,
+            "installation_year": None,
+            "operating_status": "unknown",
+            "included_in_interval_baseline": False,
+        },
+        "technical_options": {
+            "annual_specific_yield_kwh_per_kw": 1500,
+            "shading_loss_percent": 3,
+            "soiling_loss_percent": 2,
+            "temperature_loss_percent": 5,
+            "wiring_mismatch_loss_percent": 2,
+            "other_system_loss_percent": 0,
+            "system_availability_percent": 99,
+            "target_dc_ac_ratio": 1.15,
+            "inverter_block_size_kw": 5,
+            "site_ac_headroom_kw": 250,
+            "battery_duration_hours": 2,
+            "charge_efficiency_percent": 95,
+            "discharge_efficiency_percent": 95,
+            "minimum_soc_percent": 10,
+            "maximum_soc_percent": 100,
+            "allow_grid_charging": False,
+            "reactive_support_enabled": False,
+            "reactive_support_max_kvar": 0,
+            "grid_emissions_factor_kg_co2e_per_kwh": 0.79,
+        },
     }
 
 
@@ -49,6 +102,11 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         lambda _bill, _nem12, **kwargs: {
             "contract_version": "ci_evidence_intake_v7",
             "intake_status": "ready_for_profile_review",
+            "bill": {
+                "review_status": "analyst_confirmed",
+                "network_tariff_code": "TEST-TARIFF",
+            },
+            "nem12": {"full_tariff_analysis_ready": True},
             "privacy": {
                 "files_persisted": kwargs.get("files_persisted", False),
                 "customer_identifiers_returned": False,
@@ -62,13 +120,25 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         captured_feasibility["interval_bytes"] = interval_bytes
         captured_feasibility["scenarios"] = scenarios
         return {
-            "contract_version": "ci_design_feasibility_v2",
+            "contract_version": "ci_design_feasibility_v4",
             "status": "ready",
             "analysis_mode": "pre_tariff_physical_feasibility",
             "customer_facing_permission": False,
             "recommendation_permitted": False,
             "tariff_evaluated": False,
             "currency_values_permitted": False,
+            "physical_review_order": {
+                "algorithm_id": "ci_pre_tariff_physical_review_order_v2",
+                "shortlist_count": 1,
+                "basis": "Physical review only.",
+                "recommendation_permitted": False,
+            },
+            "scenarios": [
+                {
+                    "physical_review_rank": 1,
+                    "recommendation_permitted": False,
+                }
+            ],
         }
 
     monkeypatch.setattr(
@@ -94,6 +164,36 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
 
     monkeypatch.setattr(
         "api.ci_routes.analyze_ci_interval_activity", interval_activity
+    )
+    captured_tariff: dict[str, object] = {}
+
+    def tariff_replay(interval_bytes, *, profile, scenarios):
+        captured_tariff.update(
+            interval_bytes=interval_bytes,
+            profile=profile,
+            scenarios=scenarios,
+        )
+        return {
+            "contract_version": "ci_physical_scenario_review_v6",
+            "analysis_status": "ready",
+            "analysis_mode": "evidence_limited_internal_review",
+            "customer_facing_permission": False,
+            "recommendation_permitted": False,
+            "currency_values_permitted": True,
+            "scenarios": [
+                {
+                    "scenario_id": scenarios[0]["scenario_id"],
+                    "annual_tariff_value": {
+                        "customer_facing_permission": False,
+                    },
+                }
+            ],
+            "report_preview": {"download_available": False},
+        }
+
+    monkeypatch.setattr("api.ci_routes.load_ci_tariff_profile", lambda: {"profile_id": "test"})
+    monkeypatch.setattr(
+        "api.ci_routes.analyze_ci_physical_scenarios", tariff_replay
     )
     object_store_root = tmp_path / "objects"
     with create_test_client(
@@ -166,7 +266,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
 
         validated = client.post(
             f"/api/commercial-industrial/projects/{project['project_id']}/design-candidates",
-            json={"scenarios": [_scenario()]},
+            json={"scenarios": [_scenario()], "design_context": _design_context()},
         )
         assert validated.status_code == 200
         result = validated.json()
@@ -175,6 +275,15 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         assert result["dispatch_evaluated"] is False
         assert result["tariff_evaluated"] is False
         assert result["recommendation_permitted"] is False
+        assert result["design_context"]["existing_solar"] == {
+            **_design_context()["existing_solar"],
+            "panel_rating_w": 500.0,
+            "installed_capacity_kwp_dc": 50.0,
+            "inverter_capacity_kw_ac": 50.0,
+        }
+        assert result["design_context"]["technical_options"][
+            "effective_derating_percent"
+        ] == 87.6158514
 
         reopened = client.get(
             f"/api/commercial-industrial/projects/{project['project_id']}/design-candidates"
@@ -189,7 +298,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
             f"/api/commercial-industrial/projects/{project['project_id']}/design-feasibility"
         )
         assert feasibility_result.status_code == 200
-        assert feasibility_result.json()["contract_version"] == "ci_design_feasibility_v2"
+        assert feasibility_result.json()["contract_version"] == "ci_design_feasibility_v4"
         assert captured_feasibility == {
             "interval_bytes": b"synthetic",
             "scenarios": [_scenario()],
@@ -222,6 +331,26 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
             "days": 3,
         }
 
+        tariff_result = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/tariff-replay"
+        )
+        assert tariff_result.status_code == 200
+        assert tariff_result.json()["contract_version"] == "ci_physical_scenario_review_v6"
+        assert captured_tariff == {
+            "interval_bytes": b"synthetic",
+            "profile": {"profile_id": "test"},
+            "scenarios": [_scenario()],
+        }
+        restored_tariff = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/tariff-replay"
+        )
+        assert restored_tariff.status_code == 200
+        assert restored_tariff.json()["contract_version"] == (
+            "ci_project_tariff_replay_state_v1"
+        )
+        assert restored_tariff.json()["status"] == "ready"
+        assert restored_tariff.json()["result"] == tariff_result.json()
+
         replaced_evidence = client.post(
             f"/api/commercial-industrial/projects/{project['project_id']}/evidence-intake/inspect",
             files={
@@ -238,6 +367,12 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         assert stale_after_evidence["stale_reasons"] == [
             "interval_evidence_changed"
         ]
+        stale_tariff = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/tariff-replay"
+        ).json()
+        assert stale_tariff["status"] == "stale"
+        assert stale_tariff["result"] is None
+        assert stale_tariff["stale_reasons"] == ["interval_evidence_changed"]
 
         rerun = client.post(
             f"/api/commercial-industrial/projects/{project['project_id']}/design-feasibility"
@@ -403,3 +538,92 @@ def test_saved_project_evidence_is_owner_scoped(tmp_path, monkeypatch) -> None:
         )
         assert feasibility.status_code == 404
         assert feasibility.json()["detail"]["code"] == "ci_project_not_found"
+
+
+def test_ci_project_site_photos_persist_reload_and_delete(tmp_path) -> None:
+    object_store_root = tmp_path / "site-material-objects"
+    with create_test_client(
+        sqlite_url_for_path(tmp_path / "site-material.sqlite3"),
+        object_store_root=object_store_root,
+    ) as client:
+        project = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Roof photo project"},
+        ).json()
+        project_url = f"/api/commercial-industrial/projects/{project['project_id']}"
+
+        empty = client.get(f"{project_url}/site-material")
+        assert empty.status_code == 200
+        assert empty.json() == {
+            "contract_version": "ci_project_site_material_v1",
+            "photos": [],
+        }
+
+        jpeg = b"\xff\xd8\xff\xe0" + b"private-roof-photo"
+        uploaded = client.post(
+            f"{project_url}/site-material",
+            files={"photo": ("north-roof.jpg", jpeg, "image/jpeg")},
+        )
+        assert uploaded.status_code == 201
+        saved = uploaded.json()["photo"]
+        assert saved["filename"] == "north-roof.jpg"
+        assert saved["content_type"] == "image/jpeg"
+        assert saved["size_bytes"] == len(jpeg)
+        assert saved["content_url"].endswith(
+            f"/site-material/{saved['photo_id']}/content"
+        )
+        assert "object_store" not in str(uploaded.json())
+
+        restored = client.get(f"{project_url}/site-material")
+        assert restored.status_code == 200
+        assert restored.json()["photos"] == [saved]
+
+        content = client.get(saved["content_url"])
+        assert content.status_code == 200
+        assert content.headers["content-type"] == "image/jpeg"
+        assert content.headers["cache-control"] == "private, max-age=300"
+        assert content.content == jpeg
+
+        removed = client.delete(
+            f"{project_url}/site-material/{saved['photo_id']}"
+        )
+        assert removed.status_code == 204
+        assert client.get(f"{project_url}/site-material").json()["photos"] == []
+        assert client.get(saved["content_url"]).status_code == 404
+
+    assert [path for path in object_store_root.rglob("*") if path.is_file()] == []
+
+
+def test_ci_project_site_photos_reject_disguised_or_unsupported_files(tmp_path) -> None:
+    with create_test_client(
+        sqlite_url_for_path(tmp_path / "invalid-site-material.sqlite3"),
+        object_store_root=tmp_path / "invalid-site-material-objects",
+    ) as client:
+        project = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Invalid roof photo project"},
+        ).json()
+        endpoint = (
+            f"/api/commercial-industrial/projects/{project['project_id']}"
+            "/site-material"
+        )
+
+        disguised = client.post(
+            endpoint,
+            files={"photo": ("not-really.jpg", b"plain text", "image/jpeg")},
+        )
+        assert disguised.status_code == 422
+        assert (
+            disguised.json()["detail"]["code"]
+            == "ci_project_site_material_content_invalid"
+        )
+
+        unsupported = client.post(
+            endpoint,
+            files={"photo": ("roof.svg", b"<svg/>", "image/svg+xml")},
+        )
+        assert unsupported.status_code == 422
+        assert (
+            unsupported.json()["detail"]["code"]
+            == "ci_project_site_material_type_invalid"
+        )

@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from solar_battery.ci_design_feasibility import (
     CI_DESIGN_FEASIBILITY_CONTRACT_VERSION,
+    CI_PHYSICAL_REVIEW_ORDER_ID,
 )
 from solar_battery.ci_projects import CiProjectError, require_ci_project
 from solar_battery.durable_cockpit.identity import LocalActorContext
@@ -171,6 +172,8 @@ def _evidence_row(
 
 
 def _validate_result_for_storage(result: dict[str, object]) -> None:
+    order = result.get("physical_review_order")
+    scenarios = result.get("scenarios")
     if (
         result.get("contract_version")
         != CI_DESIGN_FEASIBILITY_CONTRACT_VERSION
@@ -180,6 +183,18 @@ def _validate_result_for_storage(result: dict[str, object]) -> None:
         or result.get("recommendation_permitted") is not False
         or result.get("tariff_evaluated") is not False
         or result.get("currency_values_permitted") is not False
+        or not isinstance(order, dict)
+        or order.get("algorithm_id") != CI_PHYSICAL_REVIEW_ORDER_ID
+        or order.get("recommendation_permitted") is not False
+        or not isinstance(scenarios, list)
+        or not 1 <= len(scenarios) <= 200
+        or order.get("shortlist_count") != min(10, len(scenarios))
+        or any(
+            not isinstance(item, dict)
+            or item.get("physical_review_rank") != index
+            or item.get("recommendation_permitted") is not False
+            for index, item in enumerate(scenarios, start=1)
+        )
     ):
         raise CiProjectError(
             "ci_project_feasibility_result_invalid",

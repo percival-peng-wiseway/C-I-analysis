@@ -99,6 +99,7 @@ class _Scenario:
     max_soc_fraction: float
     initial_soc_fraction: float
     allow_grid_charging: bool
+    grid_emissions_factor_kg_co2e_per_kwh: float
 
 
 @dataclass(frozen=True)
@@ -1470,13 +1471,20 @@ def _annual_tariff_value(
     scenario = calculate_ci_tariff_charges(
         scenario_quantities, profile, days=days, rate_overrides=overrides
     )
+    baseline_categories = {
+        key: round(float(value), 2)
+        for key, value in baseline["categories"].items()
+    }
+    scenario_categories = {
+        key: round(float(value), 2)
+        for key, value in scenario["categories"].items()
+    }
     category_savings = {
         key: round(
-            float(baseline["categories"][key])
-            - float(scenario["categories"][key]),
+            baseline_categories[key] - scenario_categories[key],
             2,
         )
-        for key in baseline["categories"]
+        for key in baseline_categories
     }
     return {
         "calculation_method": "representative_year_repeat_v1",
@@ -1497,6 +1505,8 @@ def _annual_tariff_value(
             - float(scenario["total_inc_gst_aud"]),
             2,
         ),
+        "baseline_categories_ex_gst_aud": baseline_categories,
+        "scenario_categories_ex_gst_aud": scenario_categories,
         "category_savings_ex_gst_aud": category_savings,
         "customer_facing_permission": False,
     }
@@ -1664,6 +1674,16 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
                 max_soc_fraction=_bounded(raw, "max_soc_fraction"),
                 initial_soc_fraction=_bounded(raw, "initial_soc_fraction"),
                 allow_grid_charging=raw["allow_grid_charging"],
+                grid_emissions_factor_kg_co2e_per_kwh=_bounded_number(
+                    {
+                        **raw,
+                        "grid_emissions_factor_kg_co2e_per_kwh": raw.get(
+                            "grid_emissions_factor_kg_co2e_per_kwh", 0.79
+                        ),
+                    },
+                    "grid_emissions_factor_kg_co2e_per_kwh",
+                    maximum=5,
+                ),
             )
             if not isinstance(scenario.allow_grid_charging, bool) or not isinstance(
                 scenario.reactive_support_enabled, bool
@@ -1701,9 +1721,7 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
             ):
                 raise ValueError
             if not battery_zero and (
-                scenario.min_soc_fraction != 0.1
-                or scenario.max_soc_fraction != 1.0
-                or scenario.initial_soc_fraction != 1.0
+                scenario.initial_soc_fraction != scenario.max_soc_fraction
                 or scenario.max_charge_kw != scenario.max_discharge_kw
             ):
                 raise ValueError
@@ -1812,6 +1830,15 @@ def _fraction(raw: dict[str, Any], key: str) -> float:
 def _bounded(raw: dict[str, Any], key: str) -> float:
     value = _number(raw, key)
     if not 0 <= value <= 1:
+        raise ValueError
+    return value
+
+
+def _bounded_number(
+    raw: dict[str, Any], key: str, *, maximum: float
+) -> float:
+    value = _number(raw, key)
+    if not 0 <= value <= maximum:
         raise ValueError
     return value
 
