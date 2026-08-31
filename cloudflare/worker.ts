@@ -1,4 +1,5 @@
 import { Container } from "@cloudflare/containers";
+export { ContainerProxy } from "@cloudflare/containers";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 interface Env {
