@@ -1,4 +1,5 @@
 import { Container } from "@cloudflare/containers";
+import { env as workerEnv } from "cloudflare:workers";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 interface Env {
@@ -15,6 +16,8 @@ interface Env {
   LOCAL_ACTOR_DISPLAY_NAME: string;
 }
 
+const containerEnv = workerEnv as unknown as Env;
+
 const accessJwks = new Map<
   string,
   ReturnType<typeof createRemoteJWKSet>
@@ -25,15 +28,15 @@ export class E3ApiContainer extends Container<Env> {
   sleepAfter = "10m";
 
   envVars: Record<string, string> = {
-    DATABASE_URL: this.env.DATABASE_URL,
+    DATABASE_URL: containerEnv.DATABASE_URL,
     OBJECT_STORE_BACKEND: "http",
     OBJECT_STORE_HTTP_BASE_URL: "http://e3-r2.internal",
     DURABLE_API_AUTH_MODE: "restricted",
-    DURABLE_API_BEARER_TOKEN: this.env.DURABLE_API_BEARER_TOKEN,
-    LOCAL_WORKSPACE_ID: this.env.LOCAL_WORKSPACE_ID,
-    LOCAL_OWNER_ID: this.env.LOCAL_OWNER_ID,
-    LOCAL_ACTOR_ID: this.env.LOCAL_ACTOR_ID,
-    LOCAL_ACTOR_DISPLAY_NAME: this.env.LOCAL_ACTOR_DISPLAY_NAME,
+    DURABLE_API_BEARER_TOKEN: containerEnv.DURABLE_API_BEARER_TOKEN,
+    LOCAL_WORKSPACE_ID: containerEnv.LOCAL_WORKSPACE_ID,
+    LOCAL_OWNER_ID: containerEnv.LOCAL_OWNER_ID,
+    LOCAL_ACTOR_ID: containerEnv.LOCAL_ACTOR_ID,
+    LOCAL_ACTOR_DISPLAY_NAME: containerEnv.LOCAL_ACTOR_DISPLAY_NAME,
   };
 }
 
