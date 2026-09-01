@@ -10,6 +10,7 @@ interface Env {
   DURABLE_API_BEARER_TOKEN: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
+  ACCESS_AUTH_MODE: "required" | "disabled";
   LOCAL_WORKSPACE_ID: string;
   LOCAL_OWNER_ID: string;
   LOCAL_ACTOR_ID: string;
@@ -125,7 +126,10 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
   }
 
   const url = new URL(request.url);
-  if (url.pathname !== "/api/health") {
+  if (
+    url.pathname !== "/api/health" &&
+    env.ACCESS_AUTH_MODE !== "disabled"
+  ) {
     const accessFailure = await verifyAccess(request, env);
     if (accessFailure !== null) {
       return accessFailure;

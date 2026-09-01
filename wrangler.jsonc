@@ -39,10 +39,11 @@
     }
   ],
   "vars": {
+    "ACCESS_AUTH_MODE": "disabled",
     "LOCAL_WORKSPACE_ID": "e3-ci-production",
     "LOCAL_OWNER_ID": "e3-ci-internal",
-    "LOCAL_ACTOR_ID": "cloudflare-access-user",
-    "LOCAL_ACTOR_DISPLAY_NAME": "Cloudflare Access user"
+    "LOCAL_ACTOR_ID": "public-web-user",
+    "LOCAL_ACTOR_DISPLAY_NAME": "Public web user"
   },
   "observability": {
     "enabled": true
