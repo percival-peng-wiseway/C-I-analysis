@@ -21,9 +21,18 @@ from solar_battery.ci_tariff_analysis import (
 from solar_battery.models import CleanedInterval
 
 
-CI_EVIDENCE_INTAKE_CONTRACT_VERSION = "ci_evidence_intake_v9"
+CI_EVIDENCE_INTAKE_CONTRACT_VERSION = "ci_evidence_intake_v10"
 MAX_CI_BILL_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_CI_BILL_PAGES = 20
+MIN_ESTIMATE_BILLING_DAYS = 20
+MAX_ESTIMATE_BILLING_DAYS = 45
+MAX_ESTIMATE_IMPORT_SCALE_FACTOR = 25.0
+_ANNUAL_ESTIMATE_EVIDENCE_CHECK_CODES = (
+    "site_identity_match",
+    "bill_period_covered",
+    "invoice_arithmetic",
+    "bill_review_confirmed",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,20 +258,11 @@ def inspect_ci_evidence_pair(
     ready = all(bool(item["passed"]) for item in pair_checks)
     quality_counts = interval_data["quality_method_counts"]
     site_address = bill.get("site_address")
-    evidence_checks = {str(item["code"]): bool(item["passed"]) for item in pair_checks}
     detected_tariff = _detected_tariff_summary(bill)
     annual_bill_estimate = _annual_bill_estimate(
         bill,
         interval_data,
-        evidence_ready=all(
-            evidence_checks.get(code, False)
-            for code in (
-                "site_identity_match",
-                "bill_period_covered",
-                "invoice_arithmetic",
-                "bill_review_confirmed",
-            )
-        ),
+        evidence_ready=_annual_estimate_evidence_ready(pair_checks),
     )
     return {
         "contract_version": CI_EVIDENCE_INTAKE_CONTRACT_VERSION,
@@ -319,7 +319,7 @@ def inspect_ci_evidence_pair(
 def enrich_ci_evidence_tariff_summary(
     inspection_result: dict[str, object], nem12_bytes: bytes
 ) -> dict[str, object]:
-    """Upgrade a saved v7/v8 inspection without re-parsing its private bill.
+    """Upgrade a saved v7/v8/v9 inspection without re-parsing its private bill.
 
     Analyst-confirmed generic invoices must not be silently reinterpreted on read.
     This enrichment therefore preserves the saved bill fields and only derives the
@@ -333,28 +333,30 @@ def enrich_ci_evidence_tariff_summary(
             "The saved evidence result does not contain a bill summary.",
         )
     interval_data = _parse_ci_setup_interval_data(nem12_bytes)
-    checks = {
-        str(item.get("code")): bool(item.get("passed"))
-        for item in inspection_result.get("pair_checks", [])
-        if isinstance(item, dict)
-    }
+    saved_checks = inspection_result.get("pair_checks", [])
     upgraded = dict(inspection_result)
     upgraded["contract_version"] = CI_EVIDENCE_INTAKE_CONTRACT_VERSION
     upgraded["detected_tariff"] = _detected_tariff_summary(bill)
     upgraded["annual_bill_estimate"] = _annual_bill_estimate(
         bill,
         interval_data,
-        evidence_ready=all(
-            checks.get(code, False)
-            for code in (
-                "site_identity_match",
-                "bill_period_covered",
-                "invoice_arithmetic",
-                "bill_review_confirmed",
-            )
-        ),
+        evidence_ready=_annual_estimate_evidence_ready(saved_checks),
     )
     return upgraded
+
+
+def _annual_estimate_evidence_ready(checks: object) -> bool:
+    if not isinstance(checks, list):
+        return False
+    checks_by_code = {
+        str(item.get("code")): bool(item.get("passed"))
+        for item in checks
+        if isinstance(item, dict)
+    }
+    return all(
+        checks_by_code.get(code, False)
+        for code in _ANNUAL_ESTIMATE_EVIDENCE_CHECK_CODES
+    )
 
 
 _TARIFF_CATEGORY_SPECS = {
@@ -368,7 +370,7 @@ _TARIFF_CATEGORY_SPECS = {
         (
             "additional_charges",
             "Additional charges, credits & adjustments",
-            "days",
+            "excluded",
         ),
     ),
     "energy_import": (
@@ -468,6 +470,10 @@ def _annual_bill_estimate(
     billing_days = _positive_number(bill.get("billing_days"))
     consumption_kwh = _positive_number(bill.get("consumption_kwh"))
     tariff_code = detected["tariff_code"]
+    bill_period_reconciliation = _bill_period_import_reconciliation(
+        bill,
+        interval_data,
+    )
 
     unavailable_reason = None
     if detected["status"] != "category_totals_detected":
@@ -478,14 +484,33 @@ def _annual_bill_estimate(
         unavailable_reason = (
             "The bill/site match, invoice arithmetic, review and bill-period coverage checks must pass first."
         )
-    elif not isinstance(annual_profile, dict):
+    elif interval_data.get("input_format") != "nem12_standard":
+        unavailable_reason = (
+            "The annual estimate requires a standard NEM12 E1 active-import stream."
+        )
+    elif not _valid_annual_import_profile(annual_profile):
         unavailable_reason = (
             "Upload at least 365 consecutive complete days of active-import interval data."
+        )
+    elif not _bill_period_within_annual_profile(bill, annual_profile):
+        unavailable_reason = (
+            "The source bill period must fall within the selected latest 365-day NEM12 E1 coverage."
         )
     elif billing_days is None or consumption_kwh is None:
         unavailable_reason = (
             "The bill must contain a positive billing-day count and import consumption."
         )
+    elif (
+        not billing_days.is_integer()
+        or not MIN_ESTIMATE_BILLING_DAYS
+        <= int(billing_days)
+        <= MAX_ESTIMATE_BILLING_DAYS
+    ):
+        unavailable_reason = (
+            "The source bill must cover one plausible complete billing cycle of 20 to 45 inclusive days."
+        )
+    elif bill_period_reconciliation["status"] != "pass":
+        unavailable_reason = str(bill_period_reconciliation["warning"])
 
     if unavailable_reason is not None:
         return {
@@ -496,6 +521,7 @@ def _annual_bill_estimate(
             "coverage_start": None,
             "coverage_end": None,
             "annual_import_kwh": None,
+            "bill_period_reconciliation": bill_period_reconciliation,
             "total_ex_gst_aud": None,
             "customer_facing_permission": False,
             "warning": unavailable_reason,
@@ -504,30 +530,216 @@ def _annual_bill_estimate(
         }
 
     annual_import_kwh = float(annual_profile["import_kwh"])
+    day_scale_decimal = Decimal(365) / Decimal(int(billing_days))
+    import_scale_decimal = Decimal(str(annual_import_kwh)) / Decimal(
+        str(consumption_kwh)
+    )
+    day_scale = float(day_scale_decimal)
+    import_scale = float(import_scale_decimal)
+    if (
+        not all(math.isfinite(value) and value > 0 for value in (day_scale, import_scale))
+        or day_scale > 365 / MIN_ESTIMATE_BILLING_DAYS
+        or import_scale > MAX_ESTIMATE_IMPORT_SCALE_FACTOR
+    ):
+        return {
+            "status": "unavailable",
+            "method": "unavailable",
+            "confidence": "unavailable",
+            "tariff_code": tariff_code,
+            "coverage_start": None,
+            "coverage_end": None,
+            "annual_import_kwh": None,
+            "bill_period_reconciliation": bill_period_reconciliation,
+            "total_ex_gst_aud": None,
+            "customer_facing_permission": False,
+            "warning": "The derived annual scaling factors are invalid or implausibly large.",
+            "assumptions": [],
+            "groups": [],
+        }
+    categories = bill["charge_categories_ex_gst_aud"]
+    groups: list[dict[str, object]] = []
+    total = Decimal("0.00")
+    for group_key, specs in _TARIFF_CATEGORY_SPECS.items():
+        items: list[dict[str, object]] = []
+        group_total = Decimal("0.00")
+        for item_key, label, scale_basis in specs:
+            source_amount = float(categories[item_key])
+            scale_factor_decimal = (
+                import_scale_decimal
+                if scale_basis == "import_kwh"
+                else day_scale_decimal
+                if scale_basis == "days"
+                else Decimal("0")
+            )
+            scale_factor = float(scale_factor_decimal)
+            annual_amount = (Decimal(str(source_amount)) * scale_factor_decimal).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            group_total += annual_amount
+            items.append(
+                {
+                    "key": item_key,
+                    "label": label,
+                    "source_amount_ex_gst_aud": _round_money(source_amount),
+                    "scaling_basis": (
+                        "annual_import_kwh_over_billed_consumption_kwh"
+                        if scale_basis == "import_kwh"
+                        else "365_days_over_billing_days"
+                        if scale_basis == "days"
+                        else "excluded_unverified_recurrence"
+                    ),
+                    "scaling_factor": round(scale_factor, 9),
+                    "annual_amount_ex_gst_aud": float(annual_amount),
+                }
+            )
+        total += group_total
+        groups.append(
+            {
+                "key": group_key,
+                "label": _TARIFF_GROUP_LABELS[group_key],
+                "total_ex_gst_aud": float(group_total),
+                "items": items,
+            }
+        )
     return {
-        "status": "unavailable",
-        "method": "approved_tariff_replay_required",
-        "confidence": "unavailable",
+        "status": "estimated",
+        "method": "bill_derived_interval_scaled_v1",
+        "confidence": "evidence_limited",
         "tariff_code": tariff_code,
         "coverage_start": annual_profile["coverage_start"],
         "coverage_end": annual_profile["coverage_end"],
         "annual_import_kwh": round(annual_import_kwh, 3),
-        "total_ex_gst_aud": None,
+        "bill_period_reconciliation": bill_period_reconciliation,
+        "total_ex_gst_aud": float(total),
         "customer_facing_permission": False,
         "warning": (
-            "A complete annual import profile is available, but an annual dollar bill is withheld until "
-            "approved retail and network tariff line items, demand rules and bill-period import "
-            "reconciliation are available for a formal interval replay."
+            "Indicative internal estimate only. It scales verified invoice category totals using measured "
+            "annual import and elapsed days; it is not a contractual tariff replay and must not be shown "
+            "as a customer-facing quote."
         ),
         "assumptions": [
-            "The most recent complete 365 consecutive days establish annual import quantity only.",
-            "The network tariff code does not prove the customer's complete retail contract.",
-            "Demand charges require approved monthly windows, ratchets, minimums and kW/kVA rules.",
-            "The interval import for the invoice period must reconcile to billed consumption before replay.",
-            "Public regional or neighbouring-load data cannot authorize a site-specific dollar claim.",
+            "The most recent complete 365 consecutive NEM12 E1 days represent annual site import.",
+            "Energy, regulated and environmental invoice categories vary in direct proportion to import kWh.",
+            "Metering and network charges recur evenly by calendar day.",
+            "Additional charges or credits retain their source amount but are excluded because recurrence is unverified.",
+            "No tariff windows, demand ratchets, minimum demand, losses or contractual unit rates are reconstructed.",
+            "All estimated amounts exclude GST and retain the source bill's category meaning.",
         ],
-        "groups": [],
+        "groups": groups,
     }
+
+
+def _bill_period_import_reconciliation(
+    bill: dict[str, Any], interval_data: dict[str, Any]
+) -> dict[str, object]:
+    unavailable = {
+        "status": "unavailable",
+        "coverage_complete": False,
+        "billing_period_start": bill.get("billing_period_start"),
+        "billing_period_end": bill.get("billing_period_end"),
+        "billing_days": bill.get("billing_days"),
+        "interval_import_kwh": None,
+        "billed_consumption_kwh": bill.get("consumption_kwh"),
+        "difference_kwh": None,
+        "difference_percent": None,
+        "tolerance_percent": 2.0,
+        "warning": (
+            "A complete NEM12 E1 daily-import series covering the bill period is required."
+        ),
+    }
+    if interval_data.get("input_format") != "nem12_standard":
+        return unavailable
+    daily_import = interval_data.get("daily_import_kwh")
+    billed_consumption = _positive_number(bill.get("consumption_kwh"))
+    try:
+        billing_start = date.fromisoformat(str(bill["billing_period_start"]))
+        billing_end = date.fromisoformat(str(bill["billing_period_end"]))
+    except (KeyError, TypeError, ValueError):
+        return unavailable
+    if (
+        not isinstance(daily_import, dict)
+        or billed_consumption is None
+        or billing_end < billing_start
+    ):
+        return unavailable
+    bill_days = [
+        billing_start + timedelta(days=offset)
+        for offset in range((billing_end - billing_start).days + 1)
+    ]
+    source_billing_days = _positive_number(bill.get("billing_days"))
+    if (
+        source_billing_days is None
+        or not source_billing_days.is_integer()
+        or int(source_billing_days) != len(bill_days)
+        or not MIN_ESTIMATE_BILLING_DAYS
+        <= len(bill_days)
+        <= MAX_ESTIMATE_BILLING_DAYS
+    ):
+        return {
+            **unavailable,
+            "warning": (
+                "The source bill must cover one complete 20 to 45 day billing cycle, "
+                "and its stated day count must match the invoice dates."
+            ),
+        }
+    if any(
+        meter_day not in daily_import
+        or not _is_finite_number(daily_import[meter_day])
+        or float(daily_import[meter_day]) < 0
+        for meter_day in bill_days
+    ):
+        return unavailable
+    interval_import = math.fsum(float(daily_import[meter_day]) for meter_day in bill_days)
+    difference = interval_import - billed_consumption
+    difference_percent = abs(difference) / billed_consumption * 100
+    passed = difference_percent <= 2.0 + 1e-12
+    return {
+        "status": "pass" if passed else "failed",
+        "coverage_complete": True,
+        "billing_period_start": billing_start.isoformat(),
+        "billing_period_end": billing_end.isoformat(),
+        "billing_days": len(bill_days),
+        "interval_import_kwh": round(interval_import, 3),
+        "billed_consumption_kwh": round(billed_consumption, 3),
+        "difference_kwh": round(difference, 3),
+        "difference_percent": round(difference_percent, 6),
+        "tolerance_percent": 2.0,
+        "warning": (
+            "The NEM12 E1 import reconciles to billed consumption within 2%."
+            if passed
+            else "The bill-period NEM12 E1 import differs from billed consumption by more than 2%."
+        ),
+    }
+
+
+def _valid_annual_import_profile(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        coverage_start = date.fromisoformat(str(value["coverage_start"]))
+        coverage_end = date.fromisoformat(str(value["coverage_end"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    import_kwh = _positive_number(value.get("import_kwh"))
+    return bool(
+        value.get("method") == "latest_complete_365_consecutive_days_v1"
+        and value.get("day_count") == 365
+        and coverage_end - coverage_start == timedelta(days=364)
+        and import_kwh is not None
+    )
+
+
+def _bill_period_within_annual_profile(
+    bill: dict[str, Any], annual_profile: dict[str, object]
+) -> bool:
+    try:
+        billing_start = date.fromisoformat(str(bill["billing_period_start"]))
+        billing_end = date.fromisoformat(str(bill["billing_period_end"]))
+        coverage_start = date.fromisoformat(str(annual_profile["coverage_start"]))
+        coverage_end = date.fromisoformat(str(annual_profile["coverage_end"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return coverage_start <= billing_start <= billing_end <= coverage_end
 
 
 def _latest_complete_annual_import_profile(
@@ -566,6 +778,8 @@ def _derived_rate_label(
     billing_days: float | None,
     consumption_kwh: float | None,
 ) -> str:
+    if scale_basis == "excluded":
+        return "Not annualised; recurrence is unverified"
     if scale_basis == "import_kwh" and consumption_kwh is not None:
         return (
             f"{source_amount / consumption_kwh * 100:.4f} c/kWh derived category average"
@@ -624,12 +838,13 @@ def _parse_ci_setup_interval_data(upload_bytes: bytes) -> dict[str, Any]:
         streams: dict[str, dict[date, list[float]]] = parsed_nem12["streams"]
         aligned_stream_ids = set(parsed_nem12["aligned_stream_ids"])
         complete_stream_set = aligned_stream_ids == {"E1", "B1", "Q1", "K1"}
+        daily_import_kwh = {
+            meter_day: math.fsum(values)
+            for meter_day, values in streams["E1"].items()
+            if len(values) == 288
+        }
         annual_import_profile = _latest_complete_annual_import_profile(
-            {
-                meter_day: math.fsum(values)
-                for meter_day, values in streams["E1"].items()
-                if len(values) == 288
-            }
+            daily_import_kwh
         )
         return {
             "input_format": "nem12_standard",
@@ -656,6 +871,7 @@ def _parse_ci_setup_interval_data(upload_bytes: bytes) -> dict[str, Any]:
                 streams["E1"],
                 streams["Q1"] if "Q1" in aligned_stream_ids else None,
             ),
+            "daily_import_kwh": daily_import_kwh,
             "annual_import_profile": annual_import_profile,
         }
     return _parse_wide_interval_csv(text)
@@ -716,6 +932,7 @@ def _parse_wide_interval_csv(text: str) -> dict[str, Any]:
         ),
         "interval_message": "Thirty-minute measurements are preserved at their source resolution; they are not upsampled into 15-minute billing demand.",
         "annual_demand_heatmap": heatmap,
+        "daily_import_kwh": daily_import_kwh,
         "annual_import_profile": _latest_complete_annual_import_profile(
             daily_import_kwh
         ),

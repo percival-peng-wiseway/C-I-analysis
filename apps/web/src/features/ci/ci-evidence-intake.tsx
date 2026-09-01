@@ -69,8 +69,9 @@ export function CiEvidenceIntake({
   const directionsUrl = detectedSiteAddress ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(detectedSiteAddress)}` : null;
   const savedBillName = !replacing ? saved?.files.bill.filename ?? (setupReady ? "Saved to project" : null) : null;
   const savedNem12Name = !replacing ? saved?.files.interval.filename ?? (setupReady ? "Saved to project" : null) : null;
-  const detectedChargeGroups = result?.contract_version === "ci_evidence_intake_v9" ? result.detected_tariff : undefined;
-  const annualBillReadiness = result?.contract_version === "ci_evidence_intake_v9" ? result.annual_bill_estimate : undefined;
+  const tariffSummaryAvailable = result?.contract_version === "ci_evidence_intake_v9" || result?.contract_version === "ci_evidence_intake_v10";
+  const detectedChargeGroups = tariffSummaryAvailable ? result.detected_tariff : undefined;
+  const annualBillReadiness = tariffSummaryAvailable ? result.annual_bill_estimate : undefined;
 
   return (
     <section className="scroll-mt-20 space-y-4" id="evidence-intake">

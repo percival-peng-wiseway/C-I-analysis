@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import PurePath
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from solar_battery.ci_projects import CiProjectError, require_ci_project
 from solar_battery.durable_cockpit.identity import LocalActorContext
@@ -123,6 +123,40 @@ def update_ci_project_evidence_inspection(
     row.updated_by_actor_id = actor.actor_id
     row.updated_at = datetime.now(timezone.utc)
     session.flush()
+
+
+def update_ci_project_evidence_inspection_if_current(
+    session,
+    *,
+    project_id: UUID,
+    actor: LocalActorContext,
+    expected_saved_at: str,
+    inspection_result: dict[str, object],
+) -> bool:
+    """Persist a lazy inspection upgrade only when its source snapshot is current."""
+
+    require_ci_project(session, project_id=project_id, actor=actor)
+    try:
+        expected_updated_at = datetime.fromisoformat(expected_saved_at)
+    except (TypeError, ValueError):
+        return False
+    result = session.execute(
+        update(CiProjectEvidenceModel)
+        .where(
+            CiProjectEvidenceModel.project_id == project_id,
+            CiProjectEvidenceModel.workspace_id == actor.workspace_id,
+            CiProjectEvidenceModel.owner_id == actor.owner_id,
+            CiProjectEvidenceModel.updated_at == expected_updated_at,
+        )
+        .values(
+            inspection_result_json=inspection_result,
+            updated_by_actor_id=actor.actor_id,
+            updated_at=datetime.now(timezone.utc),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    session.flush()
+    return result.rowcount == 1
 
 
 def ci_project_evidence_state(

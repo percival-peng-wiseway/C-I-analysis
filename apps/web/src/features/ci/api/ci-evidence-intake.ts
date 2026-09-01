@@ -1,5 +1,5 @@
 export interface CiEvidenceIntakeResult {
-  contract_version: "ci_evidence_intake_v7" | "ci_evidence_intake_v8" | "ci_evidence_intake_v9";
+  contract_version: "ci_evidence_intake_v7" | "ci_evidence_intake_v8" | "ci_evidence_intake_v9" | "ci_evidence_intake_v10";
   intake_status: "ready_for_profile_review" | "action_required";
   bill: {
     fingerprint: string;
@@ -95,7 +95,7 @@ export interface CiDetectedTariff {
   groups: CiDetectedTariffGroup[];
 }
 
-export interface CiAnnualBillEstimate {
+export interface CiAnnualBillEstimateV9Unavailable {
   status: "unavailable";
   method: "approved_tariff_replay_required" | "unavailable";
   confidence: "unavailable";
@@ -109,6 +109,80 @@ export interface CiAnnualBillEstimate {
   assumptions: string[];
   groups: [];
 }
+
+export interface CiBillPeriodReconciliation {
+  status: "pass" | "failed" | "unavailable";
+  coverage_complete: boolean;
+  billing_period_start: string | null;
+  billing_period_end: string | null;
+  billing_days: number | null;
+  interval_import_kwh: number | null;
+  billed_consumption_kwh: number | null;
+  difference_kwh: number | null;
+  difference_percent: number | null;
+  tolerance_percent: 2;
+  warning: string;
+}
+
+export interface CiAnnualBillEstimateV10Unavailable {
+  status: "unavailable";
+  method: "unavailable";
+  confidence: "unavailable";
+  tariff_code: string | null;
+  coverage_start: null;
+  coverage_end: null;
+  annual_import_kwh: null;
+  bill_period_reconciliation: CiBillPeriodReconciliation;
+  total_ex_gst_aud: null;
+  customer_facing_permission: false;
+  warning: string;
+  assumptions: string[];
+  groups: [];
+}
+
+export interface CiAnnualBillEstimateItem {
+  key: string;
+  label: string;
+  source_amount_ex_gst_aud: number;
+  scaling_basis: "365_days_over_billing_days" | "annual_import_kwh_over_billed_consumption_kwh" | "excluded_unverified_recurrence";
+  scaling_factor: number;
+  annual_amount_ex_gst_aud: number;
+}
+
+export interface CiAnnualBillEstimateGroup {
+  key: "fixed" | "other_usage" | "energy_import";
+  label: string;
+  total_ex_gst_aud: number;
+  items: CiAnnualBillEstimateItem[];
+}
+
+export interface CiAnnualBillEstimateEstimated {
+  status: "estimated";
+  method: "bill_derived_interval_scaled_v1";
+  confidence: "evidence_limited";
+  tariff_code: string | null;
+  coverage_start: string;
+  coverage_end: string;
+  annual_import_kwh: number;
+  bill_period_reconciliation: CiBillPeriodReconciliation & {
+    status: "pass";
+    coverage_complete: true;
+    billing_period_start: string;
+    billing_period_end: string;
+    billing_days: number;
+    interval_import_kwh: number;
+    billed_consumption_kwh: number;
+    difference_kwh: number;
+    difference_percent: number;
+  };
+  total_ex_gst_aud: number;
+  customer_facing_permission: false;
+  warning: string;
+  assumptions: string[];
+  groups: CiAnnualBillEstimateGroup[];
+}
+
+export type CiAnnualBillEstimate = CiAnnualBillEstimateV9Unavailable | CiAnnualBillEstimateV10Unavailable | CiAnnualBillEstimateEstimated;
 
 export interface CiProjectEvidenceState {
   contract_version: "ci_project_evidence_state_v1";
@@ -235,12 +309,12 @@ function isSafeSavedFile(value: CiSavedEvidenceFile | undefined): boolean {
 function isSafePersistedResult(payload: CiEvidenceIntakeResult): boolean {
   const returnedAddress = typeof payload.bill?.site_address === "string" && payload.bill.site_address.trim().length > 0;
   return !(
-    !["ci_evidence_intake_v7", "ci_evidence_intake_v8", "ci_evidence_intake_v9"].includes(payload.contract_version) ||
+    !["ci_evidence_intake_v7", "ci_evidence_intake_v8", "ci_evidence_intake_v9", "ci_evidence_intake_v10"].includes(payload.contract_version) ||
     !["ready_for_profile_review", "action_required"].includes(payload.intake_status) ||
     payload.privacy?.files_persisted !== true ||
     typeof payload.privacy?.customer_identifiers_returned !== "boolean" ||
     (payload.contract_version === "ci_evidence_intake_v7" && payload.privacy.customer_identifiers_returned !== false) ||
-    (["ci_evidence_intake_v8", "ci_evidence_intake_v9"].includes(payload.contract_version) && payload.privacy.customer_identifiers_returned !== returnedAddress) ||
+    (["ci_evidence_intake_v8", "ci_evidence_intake_v9", "ci_evidence_intake_v10"].includes(payload.contract_version) && payload.privacy.customer_identifiers_returned !== returnedAddress) ||
     payload.privacy?.customer_facing_permission !== false ||
     !Array.isArray(payload.pair_checks) ||
     !Array.isArray(payload.nem12?.stream_ids) ||
@@ -257,8 +331,13 @@ function isSafePersistedResult(payload: CiEvidenceIntakeResult): boolean {
     !isSafeBill(payload.bill) ||
     (payload.contract_version === "ci_evidence_intake_v9" && (
       !isSafeDetectedTariff(payload.detected_tariff) ||
-      !isSafeAnnualBillEstimate(payload.annual_bill_estimate) ||
+      !isSafeV9AnnualBillEstimate(payload.annual_bill_estimate) ||
       !isSafeV9CrossFields(payload)
+    )) ||
+    (payload.contract_version === "ci_evidence_intake_v10" && (
+      !isSafeDetectedTariff(payload.detected_tariff) ||
+      !isSafeV10AnnualBillEstimate(payload.annual_bill_estimate) ||
+      !isSafeV10CrossFields(payload)
     )) ||
     !isSafeAnnualDemandHeatmap(payload.annual_demand_heatmap)
   );
@@ -276,7 +355,7 @@ function isSafeDetectedTariff(value: CiDetectedTariff | undefined) {
   );
 }
 
-function isSafeAnnualBillEstimate(value: CiAnnualBillEstimate | undefined) {
+function isSafeV9AnnualBillEstimate(value: CiAnnualBillEstimate | undefined) {
   const optionalNonNegativeFinite = (item: unknown) => item === null || (typeof item === "number" && Number.isFinite(item) && item >= 0);
   return Boolean(
     value &&
@@ -305,6 +384,165 @@ function isSafeAnnualBillEstimate(value: CiAnnualBillEstimate | undefined) {
   );
 }
 
+function isSafeV10AnnualBillEstimate(value: CiAnnualBillEstimate | undefined) {
+  if (!value || value.customer_facing_permission !== false || !isSafeLabel(value.warning, 2_000)) return false;
+  if (!Array.isArray(value.assumptions) || !value.assumptions.every((item) => isSafeLabel(item, 2_000))) return false;
+  if (value.tariff_code !== null && !isSafeLabel(value.tariff_code, 80)) return false;
+  if (value.status === "unavailable") {
+    if (!("bill_period_reconciliation" in value)) return false;
+    return value.method === "unavailable" &&
+      value.confidence === "unavailable" &&
+      value.coverage_start === null &&
+      value.coverage_end === null &&
+      value.annual_import_kwh === null &&
+      value.total_ex_gst_aud === null &&
+      isSafeBillPeriodReconciliation(value.bill_period_reconciliation) &&
+      Array.isArray(value.groups) && value.groups.length === 0;
+  }
+  return value.status === "estimated" &&
+    value.method === "bill_derived_interval_scaled_v1" &&
+    value.confidence === "evidence_limited" &&
+    isIsoDate(value.coverage_start) &&
+    isIsoDate(value.coverage_end) &&
+    isPositiveFinite(value.annual_import_kwh) &&
+    isNonNegativeFinite(value.total_ex_gst_aud) &&
+    isSafeEstimatedReconciliation(value.bill_period_reconciliation) &&
+    isSafeAnnualBillGroups(value.groups, value) &&
+    moneyMatches(value.total_ex_gst_aud, value.groups.reduce((total, group) => total + group.total_ex_gst_aud, 0));
+}
+
+function isSafeBillPeriodReconciliation(value: CiBillPeriodReconciliation | undefined) {
+  if (!value || !["pass", "failed", "unavailable"].includes(value.status)) return false;
+  if (typeof value.coverage_complete !== "boolean" || value.tolerance_percent !== 2 || !isSafeLabel(value.warning, 2_000)) return false;
+  if (value.billing_period_start !== null && !isIsoDate(value.billing_period_start)) return false;
+  if (value.billing_period_end !== null && !isIsoDate(value.billing_period_end)) return false;
+  if (value.billing_days !== null && (!Number.isInteger(value.billing_days) || value.billing_days < 0)) return false;
+  if (value.billed_consumption_kwh !== null && !isNonNegativeFinite(value.billed_consumption_kwh)) return false;
+  if (value.status === "unavailable") {
+    return value.coverage_complete === false &&
+      value.interval_import_kwh === null &&
+      value.difference_kwh === null &&
+      value.difference_percent === null;
+  }
+  if (
+    value.coverage_complete !== true ||
+    !isIsoDate(value.billing_period_start) ||
+    !isIsoDate(value.billing_period_end) ||
+    typeof value.billing_days !== "number" || !Number.isInteger(value.billing_days) || value.billing_days <= 0 ||
+    !isNonNegativeFinite(value.interval_import_kwh) ||
+    !isPositiveFinite(value.billed_consumption_kwh) ||
+    typeof value.difference_kwh !== "number" || !Number.isFinite(value.difference_kwh) ||
+    !isNonNegativeFinite(value.difference_percent)
+  ) return false;
+  const calculatedDifference = value.interval_import_kwh - value.billed_consumption_kwh;
+  const calculatedPercent = Math.abs(calculatedDifference) / value.billed_consumption_kwh * 100;
+  if (!numberMatches(value.difference_kwh, calculatedDifference, 0.0011) || !numberMatches(value.difference_percent, calculatedPercent, 0.000_001_1)) return false;
+  return value.status === "pass"
+    ? value.billing_days >= 20 && value.billing_days <= 45 && value.difference_percent <= value.tolerance_percent
+    : value.difference_percent > value.tolerance_percent;
+}
+
+function isSafeEstimatedReconciliation(value: CiBillPeriodReconciliation | undefined) {
+  return isSafeBillPeriodReconciliation(value) && value?.status === "pass" && value.coverage_complete === true;
+}
+
+const V10_ANNUAL_GROUP_SPECS = {
+  fixed: {
+    label: "Fixed",
+    items: { metering_charges: { label: "Metering charges", scalingBasis: "365_days_over_billing_days" } },
+  },
+  other_usage: {
+    label: "Other usage",
+    items: {
+      network_charges: { label: "Network charges", scalingBasis: "365_days_over_billing_days" },
+      regulated_charges: { label: "Regulated charges", scalingBasis: "annual_import_kwh_over_billed_consumption_kwh" },
+      environmental_charges: { label: "Environmental charges", scalingBasis: "annual_import_kwh_over_billed_consumption_kwh" },
+      additional_charges: { label: "Additional charges, credits & adjustments", scalingBasis: "excluded_unverified_recurrence" },
+    },
+  },
+  energy_import: {
+    label: "Energy (Import)",
+    items: { energy_charges: { label: "Energy charges", scalingBasis: "annual_import_kwh_over_billed_consumption_kwh" } },
+  },
+} as const;
+
+function isSafeAnnualBillGroups(value: CiAnnualBillEstimateGroup[] | undefined, estimate: CiAnnualBillEstimateEstimated) {
+  const allowedKeys = new Set(Object.keys(V10_ANNUAL_GROUP_SPECS));
+  return Boolean(
+    Array.isArray(value) &&
+    value.length === 3 &&
+    value.every((group) => group && typeof group === "object") &&
+    new Set(value.map((group) => group.key)).size === value.length &&
+    value.every((group) => {
+      if (!allowedKeys.has(group.key)) return false;
+      const spec = V10_ANNUAL_GROUP_SPECS[group.key];
+      const expectedItemKeys = Object.keys(spec.items);
+      return group.label === spec.label &&
+        Number.isFinite(group.total_ex_gst_aud) &&
+        Array.isArray(group.items) &&
+        group.items.length === expectedItemKeys.length &&
+        group.items.every((item) => item && typeof item === "object") &&
+        new Set(group.items.map((item) => item.key)).size === group.items.length &&
+        group.items.every((item) => expectedItemKeys.includes(item.key) && isSafeAnnualBillItem(item, group.key, estimate)) &&
+        moneyMatches(group.total_ex_gst_aud, group.items.reduce((total, item) => total + item.annual_amount_ex_gst_aud, 0));
+    }),
+  );
+}
+
+function isSafeAnnualBillItem(item: CiAnnualBillEstimateItem, groupKey: CiAnnualBillEstimateGroup["key"], estimate: CiAnnualBillEstimateEstimated) {
+  const spec = v10AnnualItemSpec(groupKey, item.key);
+  if (!spec || item.label !== spec.label || item.scaling_basis !== spec.scalingBasis) return false;
+  if (!(
+    Number.isFinite(item.source_amount_ex_gst_aud) &&
+    isNonNegativeFinite(item.scaling_factor) &&
+    Number.isFinite(item.annual_amount_ex_gst_aud)
+  )) return false;
+  if (item.scaling_basis === "excluded_unverified_recurrence") {
+    return item.scaling_factor === 0 && item.annual_amount_ex_gst_aud === 0;
+  }
+  const expectedFactor = item.scaling_basis === "365_days_over_billing_days"
+    ? 365 / estimate.bill_period_reconciliation.billing_days
+    : estimate.annual_import_kwh / estimate.bill_period_reconciliation.billed_consumption_kwh;
+  return isPositiveFinite(item.scaling_factor) &&
+    (item.scaling_basis !== "annual_import_kwh_over_billed_consumption_kwh" || expectedFactor <= 25) &&
+    numberMatches(item.scaling_factor, expectedFactor, 0.000_000_001_1) &&
+    moneyMatches(item.annual_amount_ex_gst_aud, item.source_amount_ex_gst_aud * item.scaling_factor);
+}
+
+function v10AnnualItemSpec(groupKey: CiAnnualBillEstimateGroup["key"], itemKey: string) {
+  return (V10_ANNUAL_GROUP_SPECS[groupKey].items as Record<string, {
+    readonly label: string;
+    readonly scalingBasis: CiAnnualBillEstimateItem["scaling_basis"];
+  }>)[itemKey];
+}
+
+function isSafeV10SourceAlignment(payload: CiEvidenceIntakeResult, annual: CiAnnualBillEstimateEstimated) {
+  const detected = payload.detected_tariff;
+  if (!detected || detected.groups.length !== 3) return false;
+  return detected.groups.every((detectedGroup) => {
+    const groupSpec = V10_ANNUAL_GROUP_SPECS[detectedGroup.key];
+    const expectedKeys = Object.keys(groupSpec.items);
+    const annualGroup = annual.groups.find((group) => group.key === detectedGroup.key);
+    if (
+      detectedGroup.label !== groupSpec.label ||
+      detectedGroup.items.length !== expectedKeys.length ||
+      new Set(detectedGroup.items.map((item) => item.key)).size !== expectedKeys.length ||
+      !annualGroup
+    ) return false;
+    return detectedGroup.items.every((detectedItem) => {
+      const itemSpec = v10AnnualItemSpec(detectedGroup.key, detectedItem.key);
+      const annualItem = annualGroup.items.find((item) => item.key === detectedItem.key);
+      const billAmount = payload.bill.charge_categories_ex_gst_aud[detectedItem.key];
+      return itemSpec !== undefined &&
+        detectedItem.label === itemSpec.label &&
+        annualItem !== undefined &&
+        typeof billAmount === "number" && Number.isFinite(billAmount) &&
+        moneyMatches(detectedItem.source_amount_ex_gst_aud, billAmount) &&
+        moneyMatches(annualItem.source_amount_ex_gst_aud, billAmount);
+    });
+  });
+}
+
 function isSafeV9CrossFields(payload: CiEvidenceIntakeResult) {
   const detected = payload.detected_tariff;
   const annual = payload.annual_bill_estimate;
@@ -317,6 +555,36 @@ function isSafeV9CrossFields(payload: CiEvidenceIntakeResult) {
   if (!annual.coverage_start || !annual.coverage_end) return false;
   const coverageDays = (Date.parse(`${annual.coverage_end}T00:00:00Z`) - Date.parse(`${annual.coverage_start}T00:00:00Z`)) / 86_400_000 + 1;
   return coverageDays === 365 && annual.coverage_start >= payload.nem12.coverage_start && annual.coverage_end <= payload.nem12.coverage_end;
+}
+
+function isSafeV10CrossFields(payload: CiEvidenceIntakeResult) {
+  const detected = payload.detected_tariff;
+  const annual = payload.annual_bill_estimate;
+  if (!detected || !annual) return false;
+  if (detected.tariff_code !== payload.bill.network_tariff_code || annual.tariff_code !== payload.bill.network_tariff_code) return false;
+  if (annual.status === "unavailable") return true;
+  if (detected.status !== "category_totals_detected" || !annual.tariff_code) return false;
+  const requiredChecks = new Set(["site_identity_match", "bill_period_covered", "invoice_arithmetic", "bill_review_confirmed"]);
+  const passedChecks = new Set(payload.pair_checks.filter((check) => check.passed).map((check) => check.code));
+  if (![...requiredChecks].every((code) => passedChecks.has(code))) return false;
+  const coverageDays = (Date.parse(`${annual.coverage_end}T00:00:00Z`) - Date.parse(`${annual.coverage_start}T00:00:00Z`)) / 86_400_000 + 1;
+  if (
+    coverageDays !== 365 ||
+    payload.nem12.input_format !== "nem12_standard" ||
+    !payload.nem12.aligned_stream_ids.includes("E1") ||
+    annual.coverage_start < payload.nem12.coverage_start ||
+    annual.coverage_end > payload.nem12.coverage_end ||
+    !isSafeV10SourceAlignment(payload, annual)
+  ) return false;
+  const reconciliation = annual.bill_period_reconciliation;
+  const reconciliationDays = (Date.parse(`${reconciliation.billing_period_end}T00:00:00Z`) - Date.parse(`${reconciliation.billing_period_start}T00:00:00Z`)) / 86_400_000 + 1;
+  return reconciliation.billing_period_start === payload.bill.billing_period_start &&
+    reconciliation.billing_period_end === payload.bill.billing_period_end &&
+    reconciliation.billing_days === payload.bill.billing_days &&
+    reconciliationDays === reconciliation.billing_days &&
+    numberMatches(reconciliation.billed_consumption_kwh, payload.bill.consumption_kwh ?? Number.NaN, 0.0011) &&
+    reconciliation.billing_period_start >= annual.coverage_start &&
+    reconciliation.billing_period_end <= annual.coverage_end;
 }
 
 function isSafeDetectedTariffGroups(value: CiDetectedTariffGroup[] | undefined) {
@@ -344,6 +612,28 @@ function isSafeDetectedTariffGroups(value: CiDetectedTariffGroup[] | undefined) 
 
 function isSafeLabel(value: unknown, maximumLength: number) {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maximumLength;
+}
+
+function isIsoDate(value: unknown) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = Date.parse(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
+}
+
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function moneyMatches(expected: number, actual: number, tolerance = 0.011) {
+  return numberMatches(expected, actual, tolerance);
+}
+
+function numberMatches(expected: number, actual: number, tolerance: number) {
+  return Number.isFinite(expected) && Number.isFinite(actual) && Math.abs(expected - actual) <= tolerance;
 }
 
 function isSafeBill(value: CiEvidenceIntakeResult["bill"] | undefined) {

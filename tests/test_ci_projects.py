@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from uuid import UUID
+
+from solar_battery.ci_project_evidence import (
+    CiEvidenceSource,
+    ci_project_evidence_state,
+    record_ci_project_evidence,
+    store_ci_project_evidence_files,
+    update_ci_project_evidence_inspection_if_current,
+)
+from solar_battery.durable_cockpit.filesystem_object_store import (
+    FilesystemObjectStore,
+)
 
 from tests.durable_test_helpers import (
+    create_sqlite_session_factory,
     create_test_client,
     durable_settings,
+    local_actor,
     sqlite_url_for_path,
 )
 
@@ -92,6 +106,195 @@ def _design_context() -> dict[str, object]:
             "grid_emissions_factor_kg_co2e_per_kwh": 0.79,
         },
     }
+
+
+def _saved_evidence_inspection(
+    marker: str, *, contract_version: str = "ci_evidence_intake_v9"
+) -> dict[str, object]:
+    return {
+        "contract_version": contract_version,
+        "intake_status": "ready_for_profile_review",
+        "marker": marker,
+        "bill": {
+            "site_address": "1 Test Street Melbourne VIC 3000",
+            "network_tariff_code": "LLVT2",
+        },
+        "nem12": {"full_tariff_analysis_ready": True},
+        "privacy": {
+            "files_persisted": True,
+            "customer_identifiers_returned": True,
+            "customer_facing_permission": False,
+        },
+    }
+
+
+def test_lazy_evidence_upgrade_updates_when_saved_at_token_is_current(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "lazy-upgrade-current.sqlite3")
+    object_store_root = tmp_path / "lazy-upgrade-current-objects"
+    session_factory = create_sqlite_session_factory(database_url)
+    actor = local_actor()
+    source_inspection = _saved_evidence_inspection("source-v9")
+    upgraded_inspection = _saved_evidence_inspection(
+        "upgraded-v10", contract_version="ci_evidence_intake_v10"
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda _bill, _interval, **_kwargs: source_inspection,
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.enrich_ci_evidence_tariff_summary",
+        lambda inspection, interval: (
+            upgraded_inspection
+            if inspection["marker"] == "source-v9" and interval == b"source-interval"
+            else inspection
+        ),
+    )
+    captured_tokens: list[str] = []
+
+    def compare_and_swap_spy(*args, expected_saved_at: str, **kwargs) -> bool:
+        captured_tokens.append(expected_saved_at)
+        return update_ci_project_evidence_inspection_if_current(
+            *args, expected_saved_at=expected_saved_at, **kwargs
+        )
+
+    monkeypatch.setattr(
+        "api.ci_routes.update_ci_project_evidence_inspection_if_current",
+        compare_and_swap_spy,
+    )
+
+    with create_test_client(
+        database_url, object_store_root=object_store_root
+    ) as client:
+        project = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Current lazy upgrade"},
+        ).json()
+        project_id = UUID(project["project_id"])
+        project_url = f"/api/commercial-industrial/projects/{project_id}"
+        saved = client.post(
+            f"{project_url}/evidence-intake/inspect",
+            files={
+                "bill": ("source.pdf", b"source-bill", "application/pdf"),
+                "nem12": ("source.csv", b"source-interval", "text/csv"),
+            },
+        )
+        assert saved.status_code == 200
+        with session_factory() as session:
+            before = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+        current_saved_at = before["evidence"]["saved_at"]
+
+        upgraded = client.get(f"{project_url}/evidence-intake")
+
+        assert upgraded.status_code == 200
+        assert upgraded.json()["evidence"]["inspection"] == upgraded_inspection
+        assert captured_tokens == [current_saved_at]
+        with session_factory() as session:
+            persisted = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+        assert persisted["evidence"]["inspection"] == upgraded_inspection
+        assert persisted["evidence"]["saved_at"] != current_saved_at
+
+
+def test_lazy_evidence_upgrade_stale_token_cannot_overwrite_newer_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "lazy-upgrade-stale.sqlite3")
+    object_store_root = tmp_path / "lazy-upgrade-stale-objects"
+    session_factory = create_sqlite_session_factory(database_url)
+    object_store = FilesystemObjectStore(object_store_root)
+    actor = local_actor()
+    source_inspection = _saved_evidence_inspection("source-v9")
+    stale_upgrade = _saved_evidence_inspection(
+        "stale-upgrade", contract_version="ci_evidence_intake_v10"
+    )
+    newer_inspection = _saved_evidence_inspection(
+        "newer-evidence", contract_version="ci_evidence_intake_v10"
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda _bill, _interval, **_kwargs: source_inspection,
+    )
+
+    with create_test_client(
+        database_url, object_store_root=object_store_root
+    ) as client:
+        project = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Stale lazy upgrade"},
+        ).json()
+        project_id = UUID(project["project_id"])
+        project_url = f"/api/commercial-industrial/projects/{project_id}"
+        saved = client.post(
+            f"{project_url}/evidence-intake/inspect",
+            files={
+                "bill": ("source.pdf", b"source-bill", "application/pdf"),
+                "nem12": ("source.csv", b"source-interval", "text/csv"),
+            },
+        )
+        assert saved.status_code == 200
+        with session_factory() as session:
+            before = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+        stale_saved_at = before["evidence"]["saved_at"]
+
+        def replace_evidence_during_upgrade(
+            inspection: dict[str, object], interval: bytes
+        ) -> dict[str, object]:
+            assert inspection["marker"] == "source-v9"
+            assert interval == b"source-interval"
+            bill_source = CiEvidenceSource(
+                "newer.pdf", "application/pdf", b"newer-bill"
+            )
+            interval_source = CiEvidenceSource(
+                "newer.csv", "text/csv", b"newer-interval"
+            )
+            bill_object, interval_object = store_ci_project_evidence_files(
+                object_store,
+                project_id=project_id,
+                bill=bill_source,
+                interval=interval_source,
+            )
+            with session_factory() as session:
+                with session.begin():
+                    old_keys = record_ci_project_evidence(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        bill=bill_source,
+                        interval=interval_source,
+                        bill_object=bill_object,
+                        interval_object=interval_object,
+                        inspection_result=newer_inspection,
+                    )
+            for old_key in old_keys:
+                object_store.delete(old_key)
+            return stale_upgrade
+
+        monkeypatch.setattr(
+            "api.ci_routes.enrich_ci_evidence_tariff_summary",
+            replace_evidence_during_upgrade,
+        )
+
+        restored = client.get(f"{project_url}/evidence-intake")
+
+        assert restored.status_code == 200
+        state = restored.json()
+        assert state["evidence"]["inspection"] == newer_inspection
+        assert state["evidence"]["files"]["bill"]["filename"] == "newer.pdf"
+        assert state["evidence"]["files"]["interval"]["filename"] == "newer.csv"
+        assert state["evidence"]["saved_at"] != stale_saved_at
+        with session_factory() as session:
+            persisted = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+        assert persisted["evidence"]["inspection"] == newer_inspection
+        assert persisted["evidence"]["files"] == state["evidence"]["files"]
 
 
 def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(

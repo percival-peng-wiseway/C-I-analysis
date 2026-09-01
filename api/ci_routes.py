@@ -75,6 +75,7 @@ from solar_battery.ci_project_evidence import (
     record_ci_project_evidence,
     store_ci_project_evidence_files,
     update_ci_project_evidence_inspection,
+    update_ci_project_evidence_inspection_if_current,
 )
 from solar_battery.ci_project_site_material import (
     CI_PROJECT_SITE_MATERIAL_CONTRACT_VERSION,
@@ -317,7 +318,11 @@ def get_ci_project_evidence(
         if (
             isinstance(inspection, dict)
             and inspection.get("contract_version")
-            in {"ci_evidence_intake_v7", "ci_evidence_intake_v8"}
+            in {
+                "ci_evidence_intake_v7",
+                "ci_evidence_intake_v8",
+                "ci_evidence_intake_v9",
+            }
             and isinstance(bill_result, dict)
         ):
             try:
@@ -350,15 +355,21 @@ def get_ci_project_evidence(
             except CiEvidenceIntakeError:
                 pass
             if upgraded != inspection:
+                expected_saved_at = evidence.get("saved_at")
                 with session_factory() as session:
                     with session.begin():
-                        update_ci_project_evidence_inspection(
-                            session,
-                            project_id=project_id,
-                            actor=actor,
-                            inspection_result=upgraded,
-                        )
-                evidence["inspection"] = upgraded
+                        if isinstance(expected_saved_at, str):
+                            update_ci_project_evidence_inspection_if_current(
+                                session,
+                                project_id=project_id,
+                                actor=actor,
+                                expected_saved_at=expected_saved_at,
+                                inspection_result=upgraded,
+                            )
+                with session_factory() as session:
+                    state = ci_project_evidence_state(
+                        session, project_id=project_id, actor=actor
+                    )
         return state
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc

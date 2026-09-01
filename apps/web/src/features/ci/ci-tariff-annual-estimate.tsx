@@ -1,10 +1,12 @@
-import { CircleAlert, Info, ReceiptText } from "lucide-react";
+import { ChevronDown, CircleAlert, Info, ReceiptText } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useId, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type {
   CiAnnualBillEstimate,
+  CiAnnualBillEstimateGroup,
+  CiAnnualBillEstimateItem,
   CiDetectedTariff,
   CiDetectedTariffGroup,
 } from "@/features/ci/api/ci-evidence-intake";
@@ -26,13 +28,14 @@ export function CiTariffAnnualEstimate({
   estimate?: CiAnnualBillEstimate;
   tariffCode: string | null;
 }) {
+  const annualEstimateAvailable = estimate?.status === "estimated";
   return (
     <Card>
       <CardHeader className="border-b border-slate-200 bg-slate-50/40">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <CardTitle as="h2" className="text-lg">Tariff code &amp; annual bill readiness</CardTitle>
-            <p className="mt-1 text-xs text-muted-foreground">Verified invoice-category evidence and the requirements for an auditable annual bill</p>
+            <CardTitle as="h2" className="text-lg">Tariff &amp; {annualEstimateAvailable ? "estimated annual bill" : "annual bill readiness"}</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">Verified invoice-category evidence and {annualEstimateAvailable ? "an internal bill-derived annual estimate" : "the requirements for an auditable annual bill"}</p>
           </div>
           {tariffCode ? <Badge variant="outline">Network tariff {tariffCode}</Badge> : null}
         </div>
@@ -154,6 +157,7 @@ function DetectedGroupTable({ group }: { group: CiDetectedTariffGroup }) {
 }
 
 function EstimatedAnnualBill({ estimate }: { estimate?: CiAnnualBillEstimate }) {
+  if (estimate?.status === "estimated") return <AvailableAnnualBill estimate={estimate} />;
   const annualEvidenceAvailable = Boolean(
     estimate?.method === "approved_tariff_replay_required" &&
     estimate.coverage_start &&
@@ -193,6 +197,119 @@ function EstimatedAnnualBill({ estimate }: { estimate?: CiAnnualBillEstimate }) 
   );
 }
 
+function AvailableAnnualBill({ estimate }: { estimate: Extract<CiAnnualBillEstimate, { status: "estimated" }> }) {
+  const reconciliation = estimate.bill_period_reconciliation;
+  return (
+    <section aria-labelledby="estimated-annual-bill-title" className="border-t border-slate-200 pt-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold text-slate-950" id="estimated-annual-bill-title">Estimated annual bill</h3>
+            <span title="This internal estimate annualises verified invoice category totals. It is not a contractual tariff replay or customer quote."><Info aria-label="About the annual estimate" className="size-4 text-slate-400" /></span>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">Bill-derived estimate for an average year, excluding GST</p>
+        </div>
+        <Badge variant="warning">Evidence-limited estimate</Badge>
+      </div>
+
+      <div className="mt-4 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-slate-800 px-5 py-4 text-white">
+          <div>
+            <strong className="text-lg">Expected bill (baseline)</strong>
+            <p className="mt-1 text-xs text-slate-300">Indicative internal estimate · bill-derived interval scaling</p>
+          </div>
+          <div className="text-left sm:text-right">
+            <span className="block text-xs text-slate-300">Total bill (excl. GST)</span>
+            <strong className="mt-0.5 block text-2xl tabular-nums">{formatAud(estimate.total_ex_gst_aud)}</strong>
+          </div>
+        </div>
+
+        <dl className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm sm:grid-cols-3">
+          <EstimateFact label="Reference interval" value={`${estimate.coverage_start} to ${estimate.coverage_end}`} />
+          <EstimateFact label="Measured annual import" value={`${formatNumber(estimate.annual_import_kwh)} kWh`} />
+          <EstimateFact label="Estimate method" value="Bill-derived interval scaling" />
+        </dl>
+
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <strong className="text-sm text-emerald-950">Bill-period import reconciliation</strong>
+            <Badge variant="success">Passed</Badge>
+          </div>
+          <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-5">
+            <EstimateFact label="Bill period" value={`${reconciliation.billing_period_start} to ${reconciliation.billing_period_end}`} />
+            <EstimateFact label="Billed consumption" value={`${formatNumber(reconciliation.billed_consumption_kwh)} kWh`} />
+            <EstimateFact label="NEM12 E1 import" value={`${formatNumber(reconciliation.interval_import_kwh)} kWh`} />
+            <EstimateFact label="Difference" value={`${formatSignedNumber(reconciliation.difference_kwh)} kWh (${formatPercent(reconciliation.difference_percent)})`} />
+            <EstimateFact label="Tolerance" value={`≤ ${formatPercent(reconciliation.tolerance_percent)}`} />
+          </dl>
+          <p className="mt-3 text-xs leading-5 text-emerald-900">{reconciliation.warning}</p>
+        </div>
+
+        <div className="space-y-3">
+          {GROUPS.map(({ key }) => {
+            const group = estimate.groups.find((item) => item.key === key);
+            return group ? <AnnualEstimateGroup key={group.key} group={group} /> : null;
+          })}
+        </div>
+
+        <WarningMessage>{estimate.warning}</WarningMessage>
+        {estimate.assumptions.length ? (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+            <strong className="text-sm text-slate-800">Estimate assumptions and limits</strong>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-slate-600">{estimate.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function AnnualEstimateGroup({ group }: { group: CiAnnualBillEstimateGroup }) {
+  return (
+    <details className="group overflow-hidden rounded-lg border border-slate-200 bg-white" open>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-900 marker:content-none">
+        <span className="flex items-center gap-2"><ChevronDown aria-hidden="true" className="size-4 transition-transform group-open:rotate-180" />{group.label}</span>
+        <span className="tabular-nums">{formatAud(group.total_ex_gst_aud)}</span>
+      </summary>
+      <div className="overflow-x-auto">
+        <table aria-label={`${group.label} estimated annual charges`} className="w-full min-w-[760px] border-collapse text-sm">
+          <thead className="bg-white text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+            <tr>
+              <th className="px-4 py-3">Item</th>
+              <th className="px-4 py-3 text-right">Source bill amount</th>
+              <th className="px-4 py-3">Annualisation basis</th>
+              <th className="px-4 py-3 text-right">Scaling factor</th>
+              <th className="px-4 py-3 text-right">Estimated ex GST</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 border-t border-slate-100">
+            {group.items.map((item) => <AnnualEstimateItemRow item={item} key={item.key} />)}
+          </tbody>
+          <tfoot className="border-t border-slate-300 bg-slate-100/80">
+            <tr>
+              <th className="px-4 py-3 text-left font-semibold text-slate-950" colSpan={4}>{group.label} total</th>
+              <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-950">{formatAud(group.total_ex_gst_aud)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </details>
+  );
+}
+
+function AnnualEstimateItemRow({ item }: { item: CiAnnualBillEstimateItem }) {
+  const excluded = item.scaling_basis === "excluded_unverified_recurrence";
+  return (
+    <tr>
+      <th className="px-4 py-3 text-left font-medium text-slate-800" scope="row">{item.label}</th>
+      <td className="px-4 py-3 text-right tabular-nums text-slate-700">{formatAud(item.source_amount_ex_gst_aud)}</td>
+      <td className="px-4 py-3 text-slate-600">{annualisationBasisLabel(item.scaling_basis)}</td>
+      <td className="px-4 py-3 text-right tabular-nums text-slate-600">{excluded ? "Not annualised" : `× ${formatScaleFactor(item.scaling_factor)}`}</td>
+      <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-950">{excluded ? <span className="text-amber-800">Excluded</span> : formatAud(item.annual_amount_ex_gst_aud)}</td>
+    </tr>
+  );
+}
+
 function EstimateFact({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</dt><dd className="mt-1 font-medium text-slate-800">{value}</dd></div>;
 }
@@ -211,4 +328,23 @@ function formatAud(value: number | null) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatSignedNumber(value: number) {
+  const amount = formatNumber(value);
+  return value > 0 ? `+${amount}` : amount;
+}
+
+function formatPercent(value: number) {
+  return `${new Intl.NumberFormat("en-AU", { maximumFractionDigits: 3 }).format(value)}%`;
+}
+
+function formatScaleFactor(value: number) {
+  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 4 }).format(value);
+}
+
+function annualisationBasisLabel(value: CiAnnualBillEstimateItem["scaling_basis"]) {
+  if (value === "365_days_over_billing_days") return "365 days ÷ source billing days";
+  if (value === "annual_import_kwh_over_billed_consumption_kwh") return "Measured annual import ÷ billed consumption";
+  return "Excluded — recurrence not verified";
 }

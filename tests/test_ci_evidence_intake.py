@@ -38,6 +38,17 @@ Power Factor at highest demand 0.800
 Network Provider: POWCP | Tariff: LLVT2
 """
 
+ANNUAL_BILL_TEXT = BILL_TEXT.replace(
+    "05 Jan 26 - 05 Jan 26",
+    "06 Dec 25 - 05 Jan 26",
+).replace(
+    "No. of Days 1",
+    "No. of Days 31",
+).replace(
+    "Consumption this period: 288.000 kWh",
+    "Consumption this period: 8928.000 kWh",
+)
+
 GENERIC_BILL_TEXT = """
 AGL Electricity Tax Invoice
 NMI: SYNTH00001
@@ -141,7 +152,7 @@ def test_evidence_intake_matches_bill_and_nem12_and_returns_only_the_site_addres
 
     result = inspect_ci_evidence_pair(b"synthetic-pdf", _nem12_bytes())
 
-    assert result["contract_version"] == "ci_evidence_intake_v9"
+    assert result["contract_version"] == "ci_evidence_intake_v10"
     assert result["intake_status"] == "ready_for_profile_review"
     assert result["bill"]["network_tariff_code"] == "LLVT2"
     assert result["bill"]["total_inc_gst_aud"] == 46.20
@@ -197,7 +208,7 @@ def test_evidence_intake_matches_bill_and_nem12_and_returns_only_the_site_addres
     assert result["annual_bill_estimate"]["status"] == "unavailable"
 
 
-def test_evidence_intake_withholds_annual_dollars_without_approved_tariff_replay(
+def test_annual_bill_estimate_rejects_one_day_bill_with_complete_annual_e1(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(ci_evidence_intake, "_extract_pdf_text", lambda _: BILL_TEXT)
@@ -206,21 +217,75 @@ def test_evidence_intake_withholds_annual_dollars_without_approved_tariff_replay
 
     estimate = result["annual_bill_estimate"]
     assert estimate["status"] == "unavailable"
-    assert estimate["method"] == "approved_tariff_replay_required"
-    assert estimate["confidence"] == "unavailable"
+    assert estimate["method"] == "unavailable"
+    assert estimate["groups"] == []
+    assert "20 to 45 inclusive days" in estimate["warning"]
+
+
+def test_evidence_intake_estimates_annual_bill_from_reconciled_bill_and_e1(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        ci_evidence_intake, "_extract_pdf_text", lambda _: ANNUAL_BILL_TEXT
+    )
+
+    result = inspect_ci_evidence_pair(b"synthetic-pdf", _annual_nem12_bytes())
+
+    estimate = result["annual_bill_estimate"]
+    assert estimate["status"] == "estimated"
+    assert estimate["method"] == "bill_derived_interval_scaled_v1"
+    assert estimate["confidence"] == "evidence_limited"
     assert estimate["coverage_start"] == "2025-01-06"
     assert estimate["coverage_end"] == "2026-01-05"
     assert estimate["annual_import_kwh"] == 105_120.0
-    assert estimate["total_ex_gst_aud"] is None
+    assert estimate["bill_period_reconciliation"] == {
+        "status": "pass",
+        "coverage_complete": True,
+        "billing_period_start": "2025-12-06",
+        "billing_period_end": "2026-01-05",
+        "billing_days": 31,
+        "interval_import_kwh": 8928.0,
+        "billed_consumption_kwh": 8928.0,
+        "difference_kwh": 0.0,
+        "difference_percent": 0.0,
+        "tolerance_percent": 2.0,
+        "warning": "The NEM12 E1 import reconciles to billed consumption within 2%.",
+    }
+    assert estimate["total_ex_gst_aud"] == 494.51
     assert estimate["customer_facing_permission"] is False
-    assert estimate["groups"] == []
-    assert "Public regional" in " ".join(estimate["assumptions"])
+    assert {
+        group["key"]: group["total_ex_gst_aud"]
+        for group in estimate["groups"]
+    } == {
+        "fixed": 58.87,
+        "other_usage": 317.90,
+        "energy_import": 117.74,
+    }
+    assert "not a contractual tariff replay" in estimate["warning"]
+
+
+def test_bill_derived_estimate_does_not_require_llvt2_tariff_code(
+    monkeypatch,
+) -> None:
+    another_tariff = ANNUAL_BILL_TEXT.replace("Tariff: LLVT2", "Tariff: OTHER1")
+    monkeypatch.setattr(
+        ci_evidence_intake, "_extract_pdf_text", lambda _: another_tariff
+    )
+
+    result = inspect_ci_evidence_pair(b"synthetic-pdf", _annual_nem12_bytes())
+
+    assert result["intake_status"] == "action_required"
+    assert result["annual_bill_estimate"]["status"] == "estimated"
+    assert result["annual_bill_estimate"]["tariff_code"] == "OTHER1"
+    assert result["annual_bill_estimate"]["total_ex_gst_aud"] == 494.51
 
 
 def test_saved_v8_evidence_can_be_enriched_without_reinterpreting_the_bill(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(ci_evidence_intake, "_extract_pdf_text", lambda _: BILL_TEXT)
+    monkeypatch.setattr(
+        ci_evidence_intake, "_extract_pdf_text", lambda _: ANNUAL_BILL_TEXT
+    )
     original = inspect_ci_evidence_pair(b"synthetic-pdf", _annual_nem12_bytes())
     saved_v8 = {
         key: value
@@ -228,17 +293,222 @@ def test_saved_v8_evidence_can_be_enriched_without_reinterpreting_the_bill(
         if key not in {"detected_tariff", "annual_bill_estimate"}
     }
     saved_v8["contract_version"] = "ci_evidence_intake_v8"
+    saved_v8["pair_checks"] = [
+        check
+        for check in saved_v8["pair_checks"]
+        if check["code"]
+        in {
+            "site_identity_match",
+            "bill_period_covered",
+            "invoice_arithmetic",
+            "bill_review_confirmed",
+        }
+    ]
 
     upgraded = enrich_ci_evidence_tariff_summary(
         saved_v8, _annual_nem12_bytes()
     )
 
-    assert upgraded["contract_version"] == "ci_evidence_intake_v9"
+    assert upgraded["contract_version"] == "ci_evidence_intake_v10"
     assert upgraded["bill"] == saved_v8["bill"]
     assert upgraded["annual_bill_estimate"]["method"] == (
-        "approved_tariff_replay_required"
+        "bill_derived_interval_scaled_v1"
     )
-    assert upgraded["annual_bill_estimate"]["total_ex_gst_aud"] is None
+    assert upgraded["annual_bill_estimate"]["total_ex_gst_aud"] == 494.51
+
+
+def test_annual_bill_estimate_fails_closed_when_bill_period_e1_exceeds_two_percent(
+    monkeypatch,
+) -> None:
+    mismatched_bill = ANNUAL_BILL_TEXT.replace(
+        "Consumption this period: 8928.000 kWh",
+        "Consumption this period: 8700.000 kWh",
+    )
+    monkeypatch.setattr(
+        ci_evidence_intake, "_extract_pdf_text", lambda _: mismatched_bill
+    )
+
+    result = inspect_ci_evidence_pair(b"synthetic-pdf", _annual_nem12_bytes())
+
+    estimate = result["annual_bill_estimate"]
+    assert estimate["status"] == "unavailable"
+    assert estimate["method"] == "unavailable"
+    assert estimate["total_ex_gst_aud"] is None
+    assert estimate["groups"] == []
+    assert estimate["bill_period_reconciliation"]["status"] == "failed"
+    assert estimate["bill_period_reconciliation"]["difference_percent"] == pytest.approx(
+        2.62069
+    )
+
+
+def test_annual_bill_estimate_preserves_negative_additional_credits() -> None:
+    bill = {
+        "billing_period_start": "2025-12-06",
+        "billing_period_end": "2026-01-05",
+        "billing_days": 31,
+        "network_tariff_code": "LLVT2",
+        "consumption_kwh": 8928.0,
+        "invoice_arithmetic_scope": "charge_categories_and_totals",
+        "charge_categories_ex_gst_aud": {
+            "energy_charges": 10.0,
+            "network_charges": 20.0,
+            "regulated_charges": 3.0,
+            "environmental_charges": 4.0,
+            "metering_charges": 5.0,
+            "additional_charges": -2.0,
+        },
+    }
+    daily_import = {
+        date(2025, 1, 6) + timedelta(days=offset): 288.0
+        for offset in range(365)
+    }
+    interval_data = {
+        "input_format": "nem12_standard",
+        "daily_import_kwh": daily_import,
+        "annual_import_profile": ci_evidence_intake._latest_complete_annual_import_profile(
+            daily_import
+        ),
+    }
+
+    estimate = ci_evidence_intake._annual_bill_estimate(
+        bill, interval_data, evidence_ready=True
+    )
+
+    additional = next(
+        item
+        for group in estimate["groups"]
+        for item in group["items"]
+        if item["key"] == "additional_charges"
+    )
+    assert estimate["status"] == "estimated"
+    assert additional["source_amount_ex_gst_aud"] == -2.0
+    assert additional["scaling_basis"] == "excluded_unverified_recurrence"
+    assert additional["scaling_factor"] == 0.0
+    assert additional["annual_amount_ex_gst_aud"] == 0.0
+    assert estimate["total_ex_gst_aud"] == 494.51
+
+
+def test_annual_bill_estimate_requires_every_bill_period_e1_day() -> None:
+    bill = {
+        "billing_period_start": "2025-12-06",
+        "billing_period_end": "2026-01-05",
+        "billing_days": 31,
+        "network_tariff_code": "LLVT2",
+        "consumption_kwh": 8928.0,
+        "invoice_arithmetic_scope": "charge_categories_and_totals",
+        "charge_categories_ex_gst_aud": {
+            "energy_charges": 10.0,
+            "network_charges": 20.0,
+            "regulated_charges": 3.0,
+            "environmental_charges": 4.0,
+            "metering_charges": 5.0,
+            "additional_charges": 0.0,
+        },
+    }
+    daily_import = {
+        date(2026, 1, 6) + timedelta(days=offset): 288.0
+        for offset in range(365)
+    }
+    interval_data = {
+        "input_format": "nem12_standard",
+        "daily_import_kwh": daily_import,
+        "annual_import_profile": ci_evidence_intake._latest_complete_annual_import_profile(
+            daily_import
+        ),
+    }
+
+    estimate = ci_evidence_intake._annual_bill_estimate(
+        bill, interval_data, evidence_ready=True
+    )
+
+    assert estimate["status"] == "unavailable"
+    assert estimate["bill_period_reconciliation"]["status"] == "unavailable"
+    assert estimate["bill_period_reconciliation"]["coverage_complete"] is False
+    assert estimate["total_ex_gst_aud"] is None
+
+
+def test_annual_bill_estimate_rejects_bill_outside_latest_annual_e1_window() -> None:
+    bill = {
+        "billing_period_start": "2025-01-01",
+        "billing_period_end": "2025-01-31",
+        "billing_days": 31,
+        "network_tariff_code": "LLVT2",
+        "consumption_kwh": 31.0,
+        "invoice_arithmetic_scope": "charge_categories_and_totals",
+        "charge_categories_ex_gst_aud": {
+            "energy_charges": 10.0,
+            "network_charges": 20.0,
+            "regulated_charges": 3.0,
+            "environmental_charges": 4.0,
+            "metering_charges": 5.0,
+            "additional_charges": 0.0,
+        },
+    }
+    start = date(2025, 1, 1)
+    daily_import = {
+        start + timedelta(days=offset): 1.0 for offset in range(400)
+    }
+    interval_data = {
+        "input_format": "nem12_standard",
+        "daily_import_kwh": daily_import,
+        "annual_import_profile": ci_evidence_intake._latest_complete_annual_import_profile(
+            daily_import
+        ),
+    }
+
+    estimate = ci_evidence_intake._annual_bill_estimate(
+        bill, interval_data, evidence_ready=True
+    )
+
+    assert estimate["bill_period_reconciliation"]["status"] == "pass"
+    assert estimate["status"] == "unavailable"
+    assert "latest 365-day" in estimate["warning"]
+    assert estimate["total_ex_gst_aud"] is None
+
+
+def test_annual_bill_estimate_rejects_implausibly_large_import_scale() -> None:
+    bill = {
+        "billing_period_start": "2025-12-06",
+        "billing_period_end": "2026-01-05",
+        "billing_days": 31,
+        "network_tariff_code": "LLVT2",
+        "consumption_kwh": 31.0,
+        "invoice_arithmetic_scope": "charge_categories_and_totals",
+        "charge_categories_ex_gst_aud": {
+            "energy_charges": 10.0,
+            "network_charges": 20.0,
+            "regulated_charges": 3.0,
+            "environmental_charges": 4.0,
+            "metering_charges": 5.0,
+            "additional_charges": 0.0,
+        },
+    }
+    start = date(2025, 1, 6)
+    bill_start = date(2025, 12, 6)
+    daily_import = {
+        start + timedelta(days=offset): (
+            1.0 if start + timedelta(days=offset) >= bill_start else 10_000.0
+        )
+        for offset in range(365)
+    }
+    interval_data = {
+        "input_format": "nem12_standard",
+        "daily_import_kwh": daily_import,
+        "annual_import_profile": ci_evidence_intake._latest_complete_annual_import_profile(
+            daily_import
+        ),
+    }
+
+    estimate = ci_evidence_intake._annual_bill_estimate(
+        bill, interval_data, evidence_ready=True
+    )
+
+    assert estimate["bill_period_reconciliation"]["status"] == "pass"
+    assert estimate["status"] == "unavailable"
+    assert estimate["warning"] == (
+        "The derived annual scaling factors are invalid or implausibly large."
+    )
+    assert estimate["total_ex_gst_aud"] is None
 
 
 def test_annual_import_profile_selects_latest_365_days_and_rejects_gaps() -> None:

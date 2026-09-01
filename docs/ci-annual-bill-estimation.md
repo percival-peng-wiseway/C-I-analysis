@@ -1,4 +1,4 @@
-# C&I invoice charge groups and annual bill readiness
+# C&I invoice charge groups and annual bill estimates
 
 ## Product boundary
 
@@ -7,29 +7,46 @@ headings: `Fixed`, `Other usage`, and `Energy (Import)`. A network tariff code
 does not prove the customer's full retail contract. Derived daily or c/kWh
 figures are review equivalents, not detected contractual rates.
 
-Customer-dollar and demand-charge claims remain fail-closed. Evidence intake
-does not publish an annual amount from invoice-category extrapolation. It can
-only establish annual-usage readiness when all of the following are true:
+Customer-dollar and demand-charge claims remain fail-closed unless explicit,
+reviewed site evidence is present. Evidence intake may publish an internal,
+evidence-limited annual estimate from the uploaded invoice and NEM12 only when
+all of the following are true:
 
 - the bill and interval source identify the same site;
-- the interval source covers the bill period;
+- the bill represents a plausible complete 20–45 day billing cycle;
+- a standard NEM12 E1 series contains every bill-period day;
+- bill-period interval import reconciles to billed consumption within 2%;
 - invoice arithmetic and bill review checks pass;
 - the bill contains verified category totals, billing days and import kWh; and
 - the interval source contains 365 consecutive complete days of active import.
 
-Even after those checks pass, the annual dollar result remains `unavailable`
-until an approved, effective-dated tariff profile and interval replay pass.
+The estimate is not a contractual tariff replay and remains ineligible for a
+customer-facing recommendation. A formal tariff claim still requires an
+approved, effective-dated tariff profile and interval replay.
 
-## Version 1 readiness calculation
+## Bill-derived interval-scaled calculation
 
-The Python intake selects the most recent complete rolling 365-day E1 or
-reported-kW period and returns its recorded import kWh as the annual quantity
-reference. It does not apply invoice-category rates or publish a dollar total.
+The Python intake selects the most recent complete rolling 365-day standard
+NEM12 E1 period and returns its recorded import kWh as the annual quantity
+reference. It then derives review-equivalent rates from the verified invoice:
 
-The result uses `approved_tariff_replay_required` when the annual interval
-quantity is ready. A formal result must additionally:
+- energy, regulated and environmental categories use the invoice amount divided
+  by billed import kWh, then multiply that rate by the recorded annual NEM12 kWh;
+- metering and aggregate network charges use the invoice amount divided by
+  billing days, then multiply that daily equivalent by 365;
+- additional charges, credits and adjustments retain their observed source
+  amount but are excluded from the estimate unless recurrence is separately
+  established; and
+- the ex-GST estimate is the sum of the resulting category amounts.
 
-- reconcile bill-period E1 import to billed consumption;
+The network category deliberately stays on an observed daily-equivalent basis
+because a category total does not reveal the split between energy, rolling
+demand, seasonal demand and other network components. The result is labelled
+`bill_derived_interval_scaled_v1` and `evidence_limited`.
+
+A formal result must additionally:
+
+- replay each evidenced line item and reconcile the bill-period dollar result;
 - match the correct current retail and network tariff versions and effective dates;
 - classify each interval into evidenced time and demand windows;
 - calculate monthly kW/kVA maxima, ratchets, minimums and seasonal rules; and
