@@ -42,13 +42,34 @@ it("charts verified bill categories and invoice averages", () => {
 
   expect(screen.getByRole("heading", { name: "Detected bill breakdown" })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Detected invoice charge categories" })).toBeTruthy();
+  expect(screen.getByRole("img", { name: /Invoice charge mix excluding credits/ })).toBeTruthy();
   expect(screen.getByRole("rowheader", { name: "Network charges" })).toBeTruthy();
   expect(screen.getByText("55.6%")).toBeTruthy();
   expect(screen.getByText("Total inc GST")).toBeTruthy();
   expect(screen.queryByRole("img", { name: /Invoice composition including GST/ })).toBeNull();
   expect(screen.getByText("90 c/kWh")).toBeTruthy();
   expect(screen.getByText("99 c/kWh")).toBeTruthy();
-  expect(screen.getByRole("img", { name: "Power factor at maximum demand 0.820" })).toBeTruthy();
+  expect(screen.getByText("0.820")).toBeTruthy();
+  expect(screen.getByText(/no contractual target is applied/i)).toBeTruthy();
+});
+
+it("keeps credits visible and excludes them from positive charge shares", () => {
+  render(<CiBillBreakdown bill={{
+    ...categoryBill,
+    charge_categories_ex_gst_aud: {
+      ...categoryBill.charge_categories_ex_gst_aud,
+      additional_charges: -20,
+    },
+    subtotal_ex_gst_aud: 880,
+    gst_aud: 88,
+    total_inc_gst_aud: 968,
+  }} />);
+
+  expect(screen.getByRole("rowheader", { name: "Additional charges / credits" })).toBeTruthy();
+  expect(screen.getByText("Credit / adjustment")).toBeTruthy();
+  expect(screen.getByText("-$20.00")).toBeTruthy();
+  expect(screen.getByText("Detected category net total")).toBeTruthy();
+  expect(screen.getAllByText("$880.00").length).toBeGreaterThan(0);
 });
 
 it("shows confirmed totals without inventing charge categories", () => {

@@ -118,18 +118,19 @@ it("shows annual usage readiness but withholds customer dollar claims", () => {
 it("shows a reconciled bill-derived annual estimate with category detail and exclusions", () => {
   render(<CiTariffAnnualEstimate detectedTariff={detectedTariff} estimate={billDerivedEstimate} tariffCode="LLVT2" />);
 
-  expect(screen.getByText("Expected bill (baseline)")).toBeTruthy();
+  expect(screen.getByText("Bill-derived annualised baseline")).toBeTruthy();
   expect(screen.getByText("$11,410.16")).toBeTruthy();
   expect(screen.getByText("Evidence-limited estimate")).toBeTruthy();
+  expect(screen.getByRole("img", { name: /Annualised charge mix: Fixed \$365\.00, Other usage \$6,045\.16, Energy \(Import\) \$5,000\.00/ })).toBeTruthy();
+  expect(screen.getByRole("img", { name: /Bill-period reconciliation.*Billed consumption 1,000 kWh.*NEM12 E1 import 995 kWh/i })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Fixed estimated annual charges" })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Other usage estimated annual charges" })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Energy (Import) estimated annual charges" })).toBeTruthy();
-  expect(screen.getByText("-5 kWh (0.5%)")).toBeTruthy();
-  expect(screen.getByText("≤ 2%")).toBeTruthy();
+  expect(screen.getByText("Within ±2% internal threshold")).toBeTruthy();
   expect(screen.getByText("-$20.00")).toBeTruthy();
   expect(screen.getByText("Excluded — recurrence not verified")).toBeTruthy();
   expect(screen.getByText("Not annualised")).toBeTruthy();
-  expect(screen.getByText(/not a contractual quote/i)).toBeTruthy();
+  expect(screen.getByText(/not a current tariff or contractual quote/i)).toBeTruthy();
   expect(screen.queryByText("Estimate assumptions and limits")).toBeNull();
   expect(screen.queryByText(billDerivedEstimate.warning)).toBeNull();
   expect(screen.queryByText("The most recent complete 365 NEM12 E1 days represent annual site import.")).toBeNull();
@@ -148,6 +149,7 @@ it("fails closed when detected category detail and annual estimation are unavail
 
   expect(screen.getByText("Verified charge categories are unavailable.")).toBeTruthy();
   expect(screen.getByText("A complete 365-day import series is required.")).toBeTruthy();
-  expect(screen.queryByText(/Expected bill \(baseline\)/)).toBeNull();
+  expect(screen.queryByText(/Bill-derived annualised baseline/)).toBeNull();
+  expect(screen.queryByRole("img", { name: /Annualised charge mix/ })).toBeNull();
   expect(screen.queryByText(/^\$/)).toBeNull();
 });

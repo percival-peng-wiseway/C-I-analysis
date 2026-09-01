@@ -10,6 +10,10 @@ import type {
   CiDetectedTariff,
   CiDetectedTariffGroup,
 } from "@/features/ci/api/ci-evidence-intake";
+import {
+  CiAnnualBillCompositionChart,
+  CiBillPeriodReconciliationChart,
+} from "@/features/ci/ci-annual-bill-visuals";
 
 const GROUPS = [
   { key: "fixed", label: "Fixed" },
@@ -207,7 +211,7 @@ function AvailableAnnualBill({ estimate }: { estimate: Extract<CiAnnualBillEstim
             <h3 className="text-lg font-semibold text-slate-950" id="estimated-annual-bill-title">Estimated annual bill</h3>
             <span title="This internal estimate annualises verified invoice category totals. It is not a contractual tariff replay or customer quote."><Info aria-label="About the annual estimate" className="size-4 text-slate-400" /></span>
           </div>
-          <p className="mt-1 text-xs text-slate-500">Bill-derived estimate for an average year, excluding GST</p>
+          <p className="mt-1 text-xs text-slate-500">Annualised from verified source-bill categories and measured interval evidence, excluding GST</p>
         </div>
         <Badge variant="warning">Evidence-limited estimate</Badge>
       </div>
@@ -215,11 +219,11 @@ function AvailableAnnualBill({ estimate }: { estimate: Extract<CiAnnualBillEstim
       <div className="mt-4 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-slate-800 px-5 py-4 text-white">
           <div>
-            <strong className="text-lg">Expected bill (baseline)</strong>
-            <p className="mt-1 text-xs text-slate-300">Indicative estimate · ex GST · not a contractual quote</p>
+            <strong className="text-lg">Bill-derived annualised baseline</strong>
+            <p className="mt-1 text-xs text-slate-300">Indicative annualisation · ex GST · not a current tariff or contractual quote</p>
           </div>
           <div className="text-left sm:text-right">
-            <span className="block text-xs text-slate-300">Total bill (excl. GST)</span>
+            <span className="block text-xs text-slate-300">Annualised total (excl. GST)</span>
             <strong className="mt-0.5 block text-2xl tabular-nums">{formatAud(estimate.total_ex_gst_aud)}</strong>
           </div>
         </div>
@@ -230,19 +234,9 @@ function AvailableAnnualBill({ estimate }: { estimate: Extract<CiAnnualBillEstim
           <EstimateFact label="Estimate method" value="Bill-derived interval scaling" />
         </dl>
 
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <strong className="text-sm text-emerald-950">Bill-period import reconciliation</strong>
-            <Badge variant="success">Passed</Badge>
-          </div>
-          <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-5">
-            <EstimateFact label="Bill period" value={`${reconciliation.billing_period_start} to ${reconciliation.billing_period_end}`} />
-            <EstimateFact label="Billed consumption" value={`${formatNumber(reconciliation.billed_consumption_kwh)} kWh`} />
-            <EstimateFact label="NEM12 E1 import" value={`${formatNumber(reconciliation.interval_import_kwh)} kWh`} />
-            <EstimateFact label="Difference" value={`${formatSignedNumber(reconciliation.difference_kwh)} kWh (${formatPercent(reconciliation.difference_percent)})`} />
-            <EstimateFact label="Tolerance" value={`≤ ${formatPercent(reconciliation.tolerance_percent)}`} />
-          </dl>
-          <p className="mt-3 text-xs leading-5 text-emerald-900">{reconciliation.warning}</p>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <CiAnnualBillCompositionChart groups={estimate.groups} total={estimate.total_ex_gst_aud} />
+          <CiBillPeriodReconciliationChart reconciliation={reconciliation} />
         </div>
 
         <div className="space-y-3">
@@ -320,15 +314,6 @@ function formatAud(value: number | null) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 1 }).format(value);
-}
-
-function formatSignedNumber(value: number) {
-  const amount = formatNumber(value);
-  return value > 0 ? `+${amount}` : amount;
-}
-
-function formatPercent(value: number) {
-  return `${new Intl.NumberFormat("en-AU", { maximumFractionDigits: 3 }).format(value)}%`;
 }
 
 function formatScaleFactor(value: number) {
