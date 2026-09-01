@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from typing import Literal
 
@@ -7,6 +8,7 @@ from solar_battery.ci_projects import CiProjectError
 
 
 CI_DESIGN_CONTEXT_CONTRACT_VERSION = "ci_design_context_v1"
+CI_DESIGN_CONTEXT_V2_CONTRACT_VERSION = "ci_design_context_v2"
 _OPERATING_STATUSES = {"operational", "limited", "offline", "unknown"}
 
 
@@ -71,6 +73,11 @@ def legacy_ci_design_context(scenarios: list[dict[str, object]]) -> dict[str, ob
 
 
 def validate_ci_design_context(value: object) -> dict[str, object]:
+    if (
+        isinstance(value, dict)
+        and value.get("contract_version") == CI_DESIGN_CONTEXT_V2_CONTRACT_VERSION
+    ):
+        return _validate_v2_design_context(value)
     try:
         if not isinstance(value, dict):
             raise ValueError
@@ -88,6 +95,150 @@ def validate_ci_design_context(value: object) -> dict[str, object]:
         "existing_battery": battery,
         "technical_options": options,
     }
+
+
+def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
+    from solar_battery.ci_solution_generator import (
+        _battery_performance,
+        _effective_derating,
+        _profile_id,
+        _site_factors,
+        _solar_performance,
+        _validated_range,
+    )
+
+    try:
+        solar_asset = _validate_existing_solar(value.get("existing_solar"))
+        battery_asset = _validate_existing_battery(value.get("existing_battery"))
+        if solar_asset != _empty_existing_solar() or battery_asset != _empty_existing_battery():
+            raise ValueError
+        search_space = value.get("search_space")
+        if not isinstance(search_space, dict):
+            raise ValueError
+        pv_range = _validated_range(
+            search_space.get("pv_range"), allow_zero=False
+        )
+        battery_range = _validated_range(
+            search_space.get("battery_range"), allow_zero=True
+        )
+        site = _site_factors(value.get("site_factors"))
+        selection = value.get("profile_selection")
+        if not isinstance(selection, dict):
+            raise ValueError
+        solar_profile = _json_object(selection.get("solar_profile"))
+        battery_profile = _json_object(selection.get("battery_profile"))
+        if (
+            solar_profile.get("status") != "published"
+            or battery_profile.get("status") != "published"
+        ):
+            raise ValueError
+        solar_id = _profile_id(solar_profile)
+        battery_id = _profile_id(battery_profile)
+        if (
+            selection.get("solar_profile_id") != solar_id
+            or selection.get("battery_profile_id") != battery_id
+        ):
+            raise ValueError
+        profile_digest = selection.get("device_profile_sha256")
+        if profile_digest is not None and (
+            not isinstance(profile_digest, str)
+            or len(profile_digest) != 64
+            or any(character not in "0123456789abcdef" for character in profile_digest)
+        ):
+            raise ValueError
+        solar_performance = _solar_performance(solar_profile)
+        battery_performance = _battery_performance(battery_profile)
+        options = _validate_technical_options(
+            value.get("technical_options"), require_initial_soc_basis=True
+        )
+        derating = _effective_derating(site)
+        one_way_efficiency = math.sqrt(
+            float(battery_performance["round_trip_efficiency_percent"]) / 100
+        ) * (
+            float(battery_performance["power_conversion_efficiency_percent"])
+            / 100
+        )
+        minimum_soc = 1 - (
+            float(battery_performance["usable_depth_of_discharge_percent"])
+            / 100
+        )
+        battery_duration = (
+            float(battery_performance["nominal_capacity_kwh_per_unit"])
+            / float(battery_performance["continuous_power_kw_per_unit"])
+        )
+        expected = {
+            "annual_specific_yield_kwh_per_kw": site[
+                "annual_specific_yield_kwh_per_kw"
+            ],
+            "shading_loss_percent": site["shading_loss_percent"],
+            "soiling_loss_percent": site["soiling_loss_percent"],
+            "temperature_loss_percent": site["temperature_loss_percent"],
+            "wiring_mismatch_loss_percent": site[
+                "wiring_mismatch_loss_percent"
+            ],
+            "other_system_loss_percent": site["other_system_loss_percent"],
+            "system_availability_percent": site[
+                "system_availability_percent"
+            ],
+            "effective_derating_percent": round(derating * 100, 8),
+            "target_dc_ac_ratio": solar_performance["default_dc_ac_ratio"],
+            "battery_duration_hours": round(battery_duration, 9),
+            "charge_efficiency_percent": round(one_way_efficiency * 100, 8),
+            "discharge_efficiency_percent": round(one_way_efficiency * 100, 8),
+            "minimum_soc_percent": round(minimum_soc * 100, 8),
+            "maximum_soc_percent": 100.0,
+        }
+        if any(
+            not _same_number(options.get(key), expected_value)
+            for key, expected_value in expected.items()
+        ):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, CiProjectError) as exc:
+        raise CiProjectError(
+            "ci_design_context_invalid",
+            "The generated site, profile and technical design context is inconsistent.",
+        ) from exc
+    return {
+        "contract_version": CI_DESIGN_CONTEXT_V2_CONTRACT_VERSION,
+        "existing_solar": solar_asset,
+        "existing_battery": battery_asset,
+        "search_space": {
+            "pv_range": pv_range,
+            "battery_range": battery_range,
+        },
+        "site_factors": site,
+        "profile_selection": {
+            "solar_profile_id": solar_id,
+            "battery_profile_id": battery_id,
+            "solar_profile": solar_profile,
+            "battery_profile": battery_profile,
+            "device_profile_sha256": profile_digest,
+        },
+        "technical_options": options,
+    }
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError
+    encoded = json.dumps(value, sort_keys=True, allow_nan=False)
+    result = json.loads(encoded)
+    if not isinstance(result, dict):
+        raise ValueError
+    return result
+
+
+def _same_number(left: object, right: object) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return False
+    try:
+        left_number = float(left)
+        right_number = float(right)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(left_number) and math.isclose(
+        left_number, right_number, rel_tol=0, abs_tol=1e-8
+    )
 
 
 def _empty_existing_solar() -> dict[str, object]:
@@ -203,7 +354,9 @@ def _validate_existing_battery(value: object) -> dict[str, object]:
     return result
 
 
-def _validate_technical_options(value: object) -> dict[str, object]:
+def _validate_technical_options(
+    value: object, *, require_initial_soc_basis: bool = False
+) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError
     annual_yield = _bounded_number(value, "annual_specific_yield_kwh_per_kw", 500, 3000)
@@ -229,7 +382,11 @@ def _validate_technical_options(value: object) -> dict[str, object]:
         raise ValueError
     reactive_enabled = _boolean(value, "reactive_support_enabled")
     reactive_cap = _number(value, "reactive_support_max_kvar", positive=reactive_enabled)
-    return {
+    if require_initial_soc_basis and value.get("initial_soc_basis") != (
+        "full_soc_physical_upper_bound"
+    ):
+        raise ValueError
+    result = {
         "annual_specific_yield_kwh_per_kw": annual_yield,
         **losses,
         "system_availability_percent": availability,
@@ -252,6 +409,9 @@ def _validate_technical_options(value: object) -> dict[str, object]:
             5,
         ) if "grid_emissions_factor_kg_co2e_per_kwh" in value else 0.79,
     }
+    if require_initial_soc_basis:
+        result["initial_soc_basis"] = "full_soc_physical_upper_bound"
+    return result
 
 
 def _text(value: dict[str, object], key: str, *, required: bool) -> str:

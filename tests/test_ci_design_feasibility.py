@@ -131,6 +131,20 @@ def test_design_feasibility_shortlists_the_first_ten_physical_results() -> None:
     assert result["scenarios"][0]["authored_inputs"]["pv_capacity_kwp_dc"] == 75.0
 
 
+def test_design_feasibility_omits_carbon_claims_when_factor_is_disabled() -> None:
+    scenario = _scenario()
+    scenario["grid_emissions_factor_kg_co2e_per_kwh"] = 0.0
+
+    result = analyze_ci_design_feasibility(_wide_bytes(), scenarios=[scenario])
+
+    energy = result["scenarios"][0]["coverage_energy"]
+    assert "grid_emissions_factor_kg_co2e_per_kwh" not in energy
+    assert "baseline_scope_2_emissions_t_co2e" not in energy
+    assert "post_system_scope_2_emissions_t_co2e" not in energy
+    assert "avoided_scope_2_emissions_t_co2e" not in energy
+    assert "scope_2_emissions_reduction_percent" not in energy
+
+
 def test_design_feasibility_selects_a_complete_peak_day_with_partial_edges() -> None:
     lines = _wide_bytes(days=4).decode().splitlines()
     partial_edges = ("\n".join([lines[0], *lines[2:-1]]) + "\n").encode()

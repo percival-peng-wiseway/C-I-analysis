@@ -4,7 +4,7 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class CiFinancialAssumptionsRequest(BaseModel):
@@ -47,7 +47,9 @@ class CiProjectCreateRequest(BaseModel):
 
 
 class CiDeviceProfileRequest(BaseModel):
-    contract_version: Literal["ci_device_profile_v2"] = "ci_device_profile_v2"
+    contract_version: Literal["ci_device_profile_v2", "ci_device_profile_v3"] = (
+        "ci_device_profile_v2"
+    )
     profile_id: Literal["workspace_device_profile"] = "workspace_device_profile"
     currency: Literal["AUD"] = "AUD"
     tax_basis: Literal["gst_exclusive"] = "gst_exclusive"
@@ -56,6 +58,8 @@ class CiDeviceProfileRequest(BaseModel):
     inverter_cost_aud_per_kw_ac: float = Field(gt=0, le=1_000_000)
     equipment_catalog: dict[str, object]
     default_equipment_selection: dict[str, str]
+    solution_profiles: dict[str, list[dict[str, object]]] | None = None
+    default_solution_profile_selection: dict[str, str] | None = None
     discount_rate: float = Field(default=0.08, ge=0, lt=1)
     annual_value_escalation_rate: float = Field(default=0.025, ge=0, lt=1)
     annual_value_degradation_rate: float = Field(default=0.005, ge=0, lt=1)
@@ -63,9 +67,75 @@ class CiDeviceProfileRequest(BaseModel):
     analysis_term_years: int = Field(default=15, ge=1, le=50)
 
 
+class CiSolutionPvRangeRequest(BaseModel):
+    minimum_kwp_dc: float = Field(gt=0, le=1_000_000)
+    maximum_kwp_dc: float = Field(gt=0, le=1_000_000)
+    step_kwp_dc: float = Field(gt=0, le=1_000_000)
+
+
+class CiSolutionBatteryRangeRequest(BaseModel):
+    minimum_kwh: float = Field(ge=0, le=1_000_000)
+    maximum_kwh: float = Field(ge=0, le=1_000_000)
+    step_kwh: float = Field(gt=0, le=1_000_000)
+
+
+class CiSolutionSiteFactorsRequest(BaseModel):
+    resource_basis: Literal["gross_specific_yield_before_site_losses"]
+    resource_source: Literal[
+        "analyst_assumption", "site_assessment", "imported_resource_study"
+    ]
+    resource_label: str = Field(min_length=1, max_length=160)
+    annual_specific_yield_kwh_per_kw: float = Field(ge=500, le=3000)
+    array_azimuth_degrees: float = Field(ge=0, le=360)
+    array_tilt_degrees: float = Field(ge=0, le=90)
+    shading_loss_percent: float = Field(ge=0, le=99)
+    soiling_loss_percent: float = Field(ge=0, le=99)
+    temperature_loss_percent: float = Field(ge=0, le=99)
+    wiring_mismatch_loss_percent: float = Field(ge=0, le=99)
+    other_system_loss_percent: float = Field(ge=0, le=99)
+    system_availability_percent: float = Field(ge=1, le=100)
+
+
+class CiSolutionConnectionOptionsRequest(BaseModel):
+    inverter_block_size_kw: float = Field(ge=0.1, le=1000)
+    site_ac_headroom_kw: float = Field(gt=0, le=1_000_000)
+    allow_grid_charging: bool
+    reactive_support_enabled: bool
+    reactive_support_max_kvar: float = Field(ge=0, le=1_000_000)
+    grid_emissions_factor_kg_co2e_per_kwh: float | None = Field(
+        default=None, ge=0, le=5
+    )
+    initial_soc_basis: Literal["full_soc_physical_upper_bound"]
+
+
+class CiSolutionGenerationRequest(BaseModel):
+    contract_version: Literal["ci_solution_generation_request_v1"]
+    pv_range: CiSolutionPvRangeRequest
+    battery_range: CiSolutionBatteryRangeRequest
+    solar_profile_id: str = Field(min_length=1, max_length=160)
+    battery_profile_id: str = Field(min_length=1, max_length=160)
+    site_factors: CiSolutionSiteFactorsRequest
+    connection_options: CiSolutionConnectionOptionsRequest
+
+
 class CiDesignCandidatesRequest(BaseModel):
-    scenarios: list[dict[str, object]] = Field(min_length=1, max_length=200)
+    scenarios: list[dict[str, object]] | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    generation_request: CiSolutionGenerationRequest | None = None
     design_context: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_candidate_source(self):
+        if (self.scenarios is None) == (self.generation_request is None):
+            raise ValueError(
+                "Provide exactly one of scenarios or generation_request."
+            )
+        if self.generation_request is not None and self.design_context is not None:
+            raise ValueError(
+                "Generated solutions derive their design context in Python."
+            )
+        return self
 
 
 class CiIntervalActivityRequest(BaseModel):

@@ -1,215 +1,606 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { BatteryCharging, Cpu, Play, Settings2, SunMedium } from "lucide-react";
+import {
+  BatteryCharging,
+  Cpu,
+  ExternalLink,
+  MapPin,
+  Play,
+  Settings2,
+  SunMedium,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import type { CiDesignContext, CiExistingBatteryAsset, CiExistingSolarAsset, CiTechnicalOptions } from "@/features/ci/api/ci-projects";
+import type {
+  CiBatterySolutionProfile,
+  CiDeviceProfile,
+  CiSolarSolutionProfile,
+} from "@/features/ci/api/ci-device-profile";
+import type {
+  CiDesignContext,
+  CiDesignContextV2,
+  CiSolutionGenerationRequest,
+} from "@/features/ci/api/ci-projects";
 import type { CiScenarioInput } from "@/features/ci/api/ci-scenarios";
 
-type NumericRange = { start: string; end: string; step: string };
-type ExistingSolarForm = Omit<CiExistingSolarAsset, "panel_count" | "panel_rating_w" | "installed_capacity_kwp_dc" | "inverter_capacity_kw_ac" | "installation_year"> & {
-  panel_count: string; panel_rating_w: string; installed_capacity_kwp_dc: string; inverter_capacity_kw_ac: string; installation_year: string;
+type NumericRange = { minimum: string; maximum: string; step: string };
+type SiteFactorsForm = {
+  resource_source: CiSolutionGenerationRequest["site_factors"]["resource_source"];
+  resource_label: string;
+  annual_specific_yield_kwh_per_kw: string;
+  array_azimuth_degrees: string;
+  array_tilt_degrees: string;
+  shading_loss_percent: string;
+  soiling_loss_percent: string;
+  temperature_loss_percent: string;
+  wiring_mismatch_loss_percent: string;
+  other_system_loss_percent: string;
+  system_availability_percent: string;
 };
-type ExistingBatteryForm = Omit<CiExistingBatteryAsset, "nominal_capacity_kwh" | "usable_capacity_kwh" | "power_kw" | "installation_year"> & {
-  nominal_capacity_kwh: string; usable_capacity_kwh: string; power_kw: string; installation_year: string;
+type ConnectionOptionsForm = {
+  inverter_block_size_kw: string;
+  site_ac_headroom_kw: string;
+  allow_grid_charging: boolean;
+  reactive_support_enabled: boolean;
+  reactive_support_max_kvar: string;
+  grid_emissions_factor_kg_co2e_per_kwh: string;
 };
-type TechnicalOptionsForm = {
-  annual_specific_yield_kwh_per_kw: string; shading_loss_percent: string; soiling_loss_percent: string; temperature_loss_percent: string;
-  wiring_mismatch_loss_percent: string; other_system_loss_percent: string; system_availability_percent: string; target_dc_ac_ratio: string;
-  inverter_block_size_kw: string; site_ac_headroom_kw: string; battery_duration_hours: string; charge_efficiency_percent: string;
-  discharge_efficiency_percent: string; minimum_soc_percent: string; maximum_soc_percent: string; allow_grid_charging: boolean;
-  reactive_support_enabled: boolean; reactive_support_max_kvar: string; grid_emissions_factor_kg_co2e_per_kwh: string;
+type RestoredBuilderState = {
+  pvRange: NumericRange;
+  batteryRange: NumericRange;
+  site: SiteFactorsForm;
+  connection: ConnectionOptionsForm;
+  solarProfileId: string;
+  batteryProfileId: string;
 };
 
-const emptyRange = (): NumericRange => ({ start: "", end: "", step: "" });
-const emptySolar = (): ExistingSolarForm => ({ installed: false, brand: "", model: "", panel_count: "", panel_rating_w: "", installed_capacity_kwp_dc: "", inverter_brand: "", inverter_model: "", inverter_capacity_kw_ac: "", installation_year: "", operating_status: "unknown", included_in_interval_baseline: false });
-const emptyBattery = (): ExistingBatteryForm => ({ installed: false, brand: "", model: "", nominal_capacity_kwh: "", usable_capacity_kwh: "", power_kw: "", installation_year: "", operating_status: "unknown", included_in_interval_baseline: false });
-const defaultTechnicalOptions = (): TechnicalOptionsForm => ({
-  annual_specific_yield_kwh_per_kw: "1500", shading_loss_percent: "3", soiling_loss_percent: "2", temperature_loss_percent: "5",
-  wiring_mismatch_loss_percent: "2", other_system_loss_percent: "0", system_availability_percent: "99", target_dc_ac_ratio: "1.15",
-  inverter_block_size_kw: "5", site_ac_headroom_kw: "250", battery_duration_hours: "2", charge_efficiency_percent: "94.86832981",
-  discharge_efficiency_percent: "94.86832981", minimum_soc_percent: "10", maximum_soc_percent: "100", allow_grid_charging: false,
-  reactive_support_enabled: false, reactive_support_max_kvar: "",
-  grid_emissions_factor_kg_co2e_per_kwh: "0.79",
+const defaultPvRange = (): NumericRange => ({ minimum: "100", maximum: "500", step: "100" });
+const defaultBatteryRange = (): NumericRange => ({ minimum: "0", maximum: "500", step: "100" });
+const defaultSiteFactors = (): SiteFactorsForm => ({
+  resource_source: "analyst_assumption",
+  resource_label: "Workspace screening assumption",
+  annual_specific_yield_kwh_per_kw: "1500",
+  array_azimuth_degrees: "0",
+  array_tilt_degrees: "20",
+  shading_loss_percent: "3",
+  soiling_loss_percent: "2",
+  temperature_loss_percent: "5",
+  wiring_mismatch_loss_percent: "2",
+  other_system_loss_percent: "0",
+  system_availability_percent: "99",
+});
+const defaultConnectionOptions = (): ConnectionOptionsForm => ({
+  inverter_block_size_kw: "5",
+  site_ac_headroom_kw: "250",
+  allow_grid_charging: false,
+  reactive_support_enabled: false,
+  reactive_support_max_kvar: "",
+  grid_emissions_factor_kg_co2e_per_kwh: "",
 });
 
-export function CiScenarioBuilder({ error, initialContext, initialSolutions, isPending, onSubmit }: {
-  error: string | null; initialContext?: CiDesignContext; initialSolutions?: CiScenarioInput[]; isPending: boolean;
-  onSubmit: (solutions: CiScenarioInput[], designContext: CiDesignContext) => void;
+export function CiScenarioBuilder({
+  deviceProfile,
+  error,
+  initialContext,
+  initialSolutions,
+  isPending,
+  onSubmit,
+  siteAddress,
+}: {
+  deviceProfile: CiDeviceProfile;
+  error: string | null;
+  initialContext?: CiDesignContext;
+  initialSolutions?: CiScenarioInput[];
+  isPending: boolean;
+  onSubmit: (request: CiSolutionGenerationRequest) => void;
+  siteAddress?: string | null;
 }) {
-  const restored = restoreSearchSpace(initialSolutions, initialContext);
-  const [existingSolar, setExistingSolar] = useState(restored.existingSolar);
-  const [existingBattery, setExistingBattery] = useState(restored.existingBattery);
+  const publishedSolar = useMemo(
+    () => deviceProfile.solution_profiles.solar_profiles.filter((profile) => profile.status === "published"),
+    [deviceProfile],
+  );
+  const publishedBattery = useMemo(
+    () => deviceProfile.solution_profiles.battery_profiles.filter((profile) => profile.status === "published" && profile.coupling === "ac"),
+    [deviceProfile],
+  );
+  const restored = restoreBuilderState(
+    initialContext,
+    initialSolutions,
+    deviceProfile,
+    publishedSolar,
+    publishedBattery,
+  );
   const [pvRange, setPvRange] = useState(restored.pvRange);
   const [batteryRange, setBatteryRange] = useState(restored.batteryRange);
-  const [technical, setTechnical] = useState(restored.technical);
-  const pvValues = rangeValues(pvRange, 20);
-  const batteryValues = rangeValues(batteryRange, 15);
-  const solutionCount = (pvValues?.length ?? 0) * (batteryValues?.length ?? 0);
-  const designContext = useMemo(() => buildDesignContext(existingSolar, existingBattery, technical), [existingSolar, existingBattery, technical]);
-  const solutions = useMemo(() => buildSolutions(pvValues, batteryValues, designContext), [pvValues?.join(","), batteryValues?.join(","), designContext]);
-  const status = searchSpaceStatus(pvValues, batteryValues, solutionCount, designContext);
-  const hybridInverterRange = designContext && pvValues?.length && batteryValues?.length
-    ? pvValues.flatMap((pvCapacity) => batteryValues.map((batteryCapacity) => autoHybridInverterCapacity(pvCapacity, batteryCapacity, designContext.technical_options)))
-    : [];
-  const effectiveYield = designContext ? designContext.technical_options.annual_specific_yield_kwh_per_kw * Number(designContext.technical_options.effective_derating_percent ?? 0) / 100 : null;
+  const [site, setSite] = useState(restored.site);
+  const [connection, setConnection] = useState(restored.connection);
+  const [solarProfileId, setSolarProfileId] = useState(restored.solarProfileId);
+  const [batteryProfileId, setBatteryProfileId] = useState(restored.batteryProfileId);
+
+  const solarProfile = publishedSolar.find((profile) => profile.profile_id === solarProfileId) ?? null;
+  const batteryProfile = publishedBattery.find((profile) => profile.profile_id === batteryProfileId) ?? null;
+  const request = useMemo(
+    () => buildGenerationRequest({ batteryProfile, batteryRange, connection, pvRange, site, solarProfile }),
+    [batteryProfile, batteryRange, connection, pvRange, site, solarProfile],
+  );
+  const requestedCount = rangeCount(pvRange, true) * rangeCount(batteryRange, false);
+  const candidateUpperBound = canonicalCandidateUpperBound(pvRange, batteryRange);
+  const effectiveYield = effectiveSpecificYield(site);
+  const status = generatorStatus(request, requestedCount, candidateUpperBound, publishedSolar.length, publishedBattery.length);
 
   return (
     <section aria-labelledby="search-space-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Build the system search space</h2>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Build the solution search space</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">
+            Existing onsite PV and batteries are excluded in this version. Python snaps requested sizes to the selected equipment profiles and generates the auditable candidates.
+          </p>
+        </div>
         <span className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium tabular-nums text-slate-700">{status}</span>
       </div>
 
-      <form className="mt-6 space-y-7" onSubmit={(event) => { event.preventDefault(); if (solutions && designContext) onSubmit(solutions, designContext); }}>
-        <WorkflowSection description="Equipment already onsite." step="01" title="Existing site assets">
-          <div className="grid gap-4 xl:grid-cols-2"><ExistingSolarCard onChange={setExistingSolar} value={existingSolar} /><ExistingBatteryCard onChange={setExistingBattery} value={existingBattery} /></div>
-        </WorkflowSection>
-
-        <WorkflowSection description="PV and battery ranges; inverter sizing is automatic." step="02" title="New capacity ranges">
-          <div className="grid gap-4 lg:grid-cols-3">
-            <RangeCard icon={SunMedium} onChange={setPvRange} range={pvRange} title="Added PV" unit="kWp DC" />
-            <RangeCard icon={BatteryCharging} onChange={setBatteryRange} range={batteryRange} title="Added battery" unit="kWh" />
-            <section aria-label="Automatic hybrid inverter sizing" className="rounded-xl border border-cyan-100 bg-cyan-50/50 p-4">
-              <div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Cpu className="size-4" /></span><div><h3 className="font-semibold text-slate-950">Hybrid inverter / PCS</h3><p className="text-xs text-slate-500">Shared AC capacity · auto-sized</p></div></div>
-              <div className="mt-5 rounded-lg bg-white p-3"><p className="text-xs font-medium text-slate-500">System rating</p><strong className="mt-1 block text-base tabular-nums text-slate-950">{hybridInverterRange.length ? `${compact(Math.min(...hybridInverterRange))}–${compact(Math.max(...hybridInverterRange))} kW AC` : "Set PV and battery"}</strong><p className="mt-1 text-[11px] leading-4 text-slate-500">One shared unit for solar conversion and battery charge/discharge.</p></div>
+      <form
+        className="mt-7 space-y-8"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (request && candidateUpperBound <= 200) onSubmit(request);
+        }}
+      >
+        <WorkflowSection
+          description="Location establishes the solar-resource context. The address is evidence only; the authored yield and losses below drive this screening run."
+          step="01"
+          title="Location & solar resource"
+        >
+          <div className="grid gap-4 xl:grid-cols-[minmax(260px,.8fr)_minmax(0,2.2fr)]">
+            <LocationCard address={siteAddress} />
+            <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h4 className="font-semibold text-slate-950">Site performance factors</h4>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">Specific yield is gross, before the listed site losses. This prevents imported net-yield data from being derated twice.</p>
+                </div>
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">Source required</span>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <SelectField
+                  label="Resource source"
+                  onChange={(resource_source) => setSite({ ...site, resource_source: resource_source as SiteFactorsForm["resource_source"] })}
+                  options={[
+                    ["analyst_assumption", "Analyst assumption"],
+                    ["site_assessment", "Site assessment"],
+                    ["imported_resource_study", "Imported resource study"],
+                  ]}
+                  value={site.resource_source}
+                />
+                <TextField className="sm:col-span-1 lg:col-span-2" label="Resource source / reference" onChange={(resource_label) => setSite({ ...site, resource_label })} value={site.resource_label} />
+                <NumberField label="Gross annual specific yield (kWh/kWp)" onChange={(annual_specific_yield_kwh_per_kw) => setSite({ ...site, annual_specific_yield_kwh_per_kw })} value={site.annual_specific_yield_kwh_per_kw} />
+                <NumberField label="Array azimuth (°; 0 = north)" onChange={(array_azimuth_degrees) => setSite({ ...site, array_azimuth_degrees })} value={site.array_azimuth_degrees} />
+                <NumberField label="Array tilt (°)" onChange={(array_tilt_degrees) => setSite({ ...site, array_tilt_degrees })} value={site.array_tilt_degrees} />
+              </div>
+              <details className="mt-4 rounded-lg border border-slate-200 bg-white">
+                <summary className="cursor-pointer list-none px-3 py-2.5 text-xs font-semibold text-slate-700">Site losses & availability</summary>
+                <div className="grid gap-3 border-t border-slate-200 p-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <NumberField label="Shading loss (%)" onChange={(shading_loss_percent) => setSite({ ...site, shading_loss_percent })} value={site.shading_loss_percent} />
+                  <NumberField label="Soiling loss (%)" onChange={(soiling_loss_percent) => setSite({ ...site, soiling_loss_percent })} value={site.soiling_loss_percent} />
+                  <NumberField label="Temperature loss (%)" onChange={(temperature_loss_percent) => setSite({ ...site, temperature_loss_percent })} value={site.temperature_loss_percent} />
+                  <NumberField label="Wiring & mismatch loss (%)" onChange={(wiring_mismatch_loss_percent) => setSite({ ...site, wiring_mismatch_loss_percent })} value={site.wiring_mismatch_loss_percent} />
+                  <NumberField label="Other system loss (%)" onChange={(other_system_loss_percent) => setSite({ ...site, other_system_loss_percent })} value={site.other_system_loss_percent} />
+                  <NumberField label="System availability (%)" onChange={(system_availability_percent) => setSite({ ...site, system_availability_percent })} value={site.system_availability_percent} />
+                </div>
+              </details>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-950">
+                <span>Calculation-active site yield after authored losses</span>
+                <strong className="tabular-nums">{effectiveYield === null ? "Complete site factors" : `${formatNumber(effectiveYield)} kWh/kWp`}</strong>
+              </div>
             </section>
           </div>
         </WorkflowSection>
 
-        <WorkflowSection step="03" title="Technical options">
-          <details className="group rounded-xl border border-slate-200 bg-slate-50/60" open>
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-slate-800"><span className="flex items-center gap-2"><Settings2 className="size-4 text-cyan-700" />Technical options</span><span className="text-xs font-normal text-slate-500">Effective yield {effectiveYield === null ? "—" : `${compact(effectiveYield)} kWh/kWp`}</span></summary>
-            <div className="grid gap-5 border-t border-slate-200 p-4 xl:grid-cols-2">
-              <OptionGroup title="Solar production">
-                <CompactField label="Annual specific yield (kWh/kWp)" onChange={(value) => setTechnical({ ...technical, annual_specific_yield_kwh_per_kw: value })} value={technical.annual_specific_yield_kwh_per_kw} />
-                <CompactField label="Shading loss (%)" onChange={(value) => setTechnical({ ...technical, shading_loss_percent: value })} value={technical.shading_loss_percent} />
-                <CompactField label="Soiling loss (%)" onChange={(value) => setTechnical({ ...technical, soiling_loss_percent: value })} value={technical.soiling_loss_percent} />
-                <CompactField label="Temperature loss (%)" onChange={(value) => setTechnical({ ...technical, temperature_loss_percent: value })} value={technical.temperature_loss_percent} />
-                <CompactField label="Wiring & mismatch loss (%)" onChange={(value) => setTechnical({ ...technical, wiring_mismatch_loss_percent: value })} value={technical.wiring_mismatch_loss_percent} />
-                <CompactField label="Other system loss (%)" onChange={(value) => setTechnical({ ...technical, other_system_loss_percent: value })} value={technical.other_system_loss_percent} />
-                <CompactField label="System availability (%)" onChange={(value) => setTechnical({ ...technical, system_availability_percent: value })} value={technical.system_availability_percent} />
-              </OptionGroup>
-              <OptionGroup title="Hybrid inverter & site limit">
-                <CompactField label="Target DC/AC ratio" onChange={(value) => setTechnical({ ...technical, target_dc_ac_ratio: value })} value={technical.target_dc_ac_ratio} />
-                <CompactField label="Hybrid inverter block size (kW)" onChange={(value) => setTechnical({ ...technical, inverter_block_size_kw: value })} value={technical.inverter_block_size_kw} />
-                <CompactField label="Site AC headroom (kW)" onChange={(value) => setTechnical({ ...technical, site_ac_headroom_kw: value })} value={technical.site_ac_headroom_kw} />
-                <label className="col-span-full flex items-center gap-2 text-xs font-medium text-slate-700"><input checked={technical.reactive_support_enabled} onChange={(event) => setTechnical({ ...technical, reactive_support_enabled: event.target.checked })} type="checkbox" />Model inverter reactive support</label>
-                {technical.reactive_support_enabled ? <CompactField label="Reactive support cap (kvar)" onChange={(value) => setTechnical({ ...technical, reactive_support_max_kvar: value })} value={technical.reactive_support_max_kvar} /> : null}
-              </OptionGroup>
-              <OptionGroup title="Battery output">
-                <CompactField label="Battery duration (h)" onChange={(value) => setTechnical({ ...technical, battery_duration_hours: value })} value={technical.battery_duration_hours} />
-                <CompactField label="Charge efficiency (%)" onChange={(value) => setTechnical({ ...technical, charge_efficiency_percent: value })} value={technical.charge_efficiency_percent} />
-                <CompactField label="Discharge efficiency (%)" onChange={(value) => setTechnical({ ...technical, discharge_efficiency_percent: value })} value={technical.discharge_efficiency_percent} />
-                <CompactField label="Minimum SOC (%)" onChange={(value) => setTechnical({ ...technical, minimum_soc_percent: value })} value={technical.minimum_soc_percent} />
-                <CompactField label="Maximum SOC (%)" onChange={(value) => setTechnical({ ...technical, maximum_soc_percent: value })} value={technical.maximum_soc_percent} />
-                <label className="col-span-full flex items-center gap-2 text-xs font-medium text-slate-700"><input checked={technical.allow_grid_charging} onChange={(event) => setTechnical({ ...technical, allow_grid_charging: event.target.checked })} type="checkbox" />Allow grid charging</label>
-              </OptionGroup>
-              <OptionGroup title="Environmental accounting">
-                <CompactField label="Grid emissions factor (kg CO2-e/kWh)" onChange={(value) => setTechnical({ ...technical, grid_emissions_factor_kg_co2e_per_kwh: value })} value={technical.grid_emissions_factor_kg_co2e_per_kwh} />
-                <p className="col-span-full text-xs leading-5 text-slate-500">Used only for an operational Scope 2 estimate. Update it to the approved factor for the project and reporting period.</p>
-              </OptionGroup>
-            </div>
-          </details>
+        <WorkflowSection
+          description="Choose published profiles from Settings, then define target ranges. Requested sizes are snapped to real module or battery-unit increments."
+          step="02"
+          title="Solar & battery profiles"
+        >
+          <div className="grid gap-4 xl:grid-cols-2">
+            <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
+            <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
+          </div>
+          {publishedSolar.length === 0 || publishedBattery.length === 0 ? (
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Publish at least one Solar profile and one AC-coupled Battery profile in Settings before generating solutions. DC-coupled profiles can remain in the library, but the current Python dispatch engine does not model them.</p>
+          ) : (
+            <p className="mt-3 text-xs leading-5 text-slate-500">Add, edit, publish or retire reusable profiles in Settings. The saved project keeps the exact selected profile snapshot so later library edits cannot silently change this design.</p>
+          )}
         </WorkflowSection>
 
-        <div className="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 pt-5">
-          <div className="flex flex-wrap items-center gap-3"><Button className="min-w-44" disabled={!solutions || !designContext || isPending} type="submit">{isPending ? `Generating ${solutionCount} solutions…` : `Generate ${solutionCount || ""} solutions`}<Play className="size-4" /></Button>{error ? <p className="text-sm text-destructive">{error}</p> : null}</div>
+        <WorkflowSection
+          description="Connection limits are project assumptions, not equipment certification or network approval."
+          step="03"
+          title="PCS & connection constraints"
+        >
+          <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+            <div className="flex items-center gap-3">
+              <span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Cpu className="size-4" /></span>
+              <div>
+                <h4 className="font-semibold text-slate-950">Python auto-sizing</h4>
+                <p className="text-xs leading-5 text-slate-500">Each PCS is rounded to the block size. Combinations above site headroom are rejected and reported, never silently clipped.</p>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              <OptionGroup title="Connection capacity">
+                <NumberField label="Inverter / PCS block size (kW)" onChange={(inverter_block_size_kw) => setConnection({ ...connection, inverter_block_size_kw })} value={connection.inverter_block_size_kw} />
+                <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
+                <p className="col-span-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Replace the screening headroom with switchboard, export-limit or network evidence before relying on feasibility results.</p>
+                <CheckField checked={connection.reactive_support_enabled} label="Model inverter reactive support" onChange={(reactive_support_enabled) => setConnection({ ...connection, reactive_support_enabled })} />
+                {connection.reactive_support_enabled ? <NumberField label="Reactive support cap (kvar)" onChange={(reactive_support_max_kvar) => setConnection({ ...connection, reactive_support_max_kvar })} value={connection.reactive_support_max_kvar} /> : null}
+              </OptionGroup>
+              <OptionGroup title="Battery & environmental assumptions">
+                <CheckField checked={connection.allow_grid_charging} label="Allow grid charging" onChange={(allow_grid_charging) => setConnection({ ...connection, allow_grid_charging })} />
+                <NumberField allowBlank label="Grid emissions factor (kg CO2-e/kWh)" onChange={(grid_emissions_factor_kg_co2e_per_kwh) => setConnection({ ...connection, grid_emissions_factor_kg_co2e_per_kwh })} value={connection.grid_emissions_factor_kg_co2e_per_kwh} />
+                <p className="col-span-full text-xs leading-5 text-slate-500">Blank disables the operational emissions estimate. Use an approved region and reporting-year factor when required.</p>
+                <p className="col-span-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600"><strong className="text-slate-800">Initial SOC:</strong> full-SOC physical upper-bound. It is a stress case, not expected savings or a recommendation.</p>
+              </OptionGroup>
+            </div>
+          </section>
+        </WorkflowSection>
+
+        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 pt-5">
+          <div className="flex items-center gap-2 text-xs text-slate-500"><Settings2 className="size-4" />Profile performance and pricing remain separate assumptions.</div>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
+            {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Reduce the PV or battery range. Battery cases can add matched PV-only comparators, so this request could create up to {candidateUpperBound} canonical candidates; the saved limit is 200.</p> : null}
+            <Button className="min-w-48" disabled={!request || candidateUpperBound > 200 || isPending} type="submit">
+              {isPending ? "Generating in Python…" : `Generate ${requestedCount || ""} requested cases`}
+              <Play className="size-4" />
+            </Button>
+          </div>
         </div>
       </form>
     </section>
   );
 }
 
-function WorkflowSection({ children, description, step, title }: { children: ReactNode; description?: string; step: string; title: string }) { return <section><div className="mb-3 flex gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">{step}</span><div><h3 className="font-semibold text-slate-950">{title}</h3>{description ? <p className="mt-0.5 text-xs leading-5 text-slate-500">{description}</p> : null}</div></div>{children}</section>; }
-
-function ExistingSolarCard({ onChange, value }: { onChange: (value: ExistingSolarForm) => void; value: ExistingSolarForm }) {
-  return <AssetCard icon={SunMedium} installed={value.installed} onInstalledChange={(installed) => onChange(installed ? { ...value, installed, operating_status: "operational" } : emptySolar())} title="Existing solar PV">
-    {value.installed ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      <TextField label="Panel brand" onChange={(brand) => onChange({ ...value, brand })} value={value.brand} /><TextField label="Panel model" onChange={(model) => onChange({ ...value, model })} value={value.model} />
-      <CompactField label="Installed capacity (kWp DC)" onChange={(installed_capacity_kwp_dc) => onChange({ ...value, installed_capacity_kwp_dc })} value={value.installed_capacity_kwp_dc} /><CompactField label="Panel quantity" onChange={(panel_count) => onChange({ ...value, panel_count })} value={value.panel_count} /><CompactField label="Panel rating (W)" onChange={(panel_rating_w) => onChange({ ...value, panel_rating_w })} value={value.panel_rating_w} />
-      <CompactField label="Existing inverter (kW AC)" onChange={(inverter_capacity_kw_ac) => onChange({ ...value, inverter_capacity_kw_ac })} value={value.inverter_capacity_kw_ac} /><TextField label="Inverter brand" onChange={(inverter_brand) => onChange({ ...value, inverter_brand })} value={value.inverter_brand} /><TextField label="Inverter model" onChange={(inverter_model) => onChange({ ...value, inverter_model })} value={value.inverter_model} />
-      <CompactField label="Installation year" onChange={(installation_year) => onChange({ ...value, installation_year })} value={value.installation_year} /><StatusField onChange={(operating_status) => onChange({ ...value, operating_status })} value={value.operating_status} /><BaselineField checked={value.included_in_interval_baseline} onChange={(included_in_interval_baseline) => onChange({ ...value, included_in_interval_baseline })} />
-    </div> : <EmptyAssetText />}
-  </AssetCard>;
+function LocationCard({ address }: { address?: string | null }) {
+  const mapsHref = address ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}` : null;
+  return (
+    <section aria-label="Detected project location" className="rounded-xl border border-cyan-100 bg-cyan-50/50 p-4">
+      <span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><MapPin className="size-5" /></span>
+      <p className="mt-4 text-xs font-semibold uppercase tracking-[.12em] text-cyan-800">Detected bill address</p>
+      <strong className="mt-2 block text-sm leading-6 text-slate-950">{address ?? "No site address detected"}</strong>
+      <p className="mt-2 text-xs leading-5 text-slate-600">{address ? "Read from the saved bill evidence. Confirm it before importing any location dataset." : "Return to Evidence or use an analyst-labelled resource assumption."}</p>
+      {mapsHref ? <a className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-800 hover:text-cyan-950" href={mapsHref} rel="noreferrer" target="_blank">Directions in Google Maps <ExternalLink className="size-3.5" /></a> : null}
+    </section>
+  );
 }
 
-function ExistingBatteryCard({ onChange, value }: { onChange: (value: ExistingBatteryForm) => void; value: ExistingBatteryForm }) {
-  return <AssetCard icon={BatteryCharging} installed={value.installed} onInstalledChange={(installed) => onChange(installed ? { ...value, installed, operating_status: "operational" } : emptyBattery())} title="Existing battery">
-    {value.installed ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      <TextField label="Battery brand" onChange={(brand) => onChange({ ...value, brand })} value={value.brand} /><TextField label="Battery model" onChange={(model) => onChange({ ...value, model })} value={value.model} />
-      <CompactField label="Nominal capacity (kWh)" onChange={(nominal_capacity_kwh) => onChange({ ...value, nominal_capacity_kwh })} value={value.nominal_capacity_kwh} /><CompactField label="Usable capacity (kWh)" onChange={(usable_capacity_kwh) => onChange({ ...value, usable_capacity_kwh })} value={value.usable_capacity_kwh} /><CompactField label="Charge/discharge power (kW)" onChange={(power_kw) => onChange({ ...value, power_kw })} value={value.power_kw} />
-      <CompactField label="Battery installation year" onChange={(installation_year) => onChange({ ...value, installation_year })} value={value.installation_year} /><StatusField onChange={(operating_status) => onChange({ ...value, operating_status })} value={value.operating_status} /><BaselineField checked={value.included_in_interval_baseline} onChange={(included_in_interval_baseline) => onChange({ ...value, included_in_interval_baseline })} />
-    </div> : <EmptyAssetText />}
-  </AssetCard>;
+function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, range }: {
+  onProfileChange: (profileId: string) => void;
+  onRangeChange: (range: NumericRange) => void;
+  profile: CiSolarSolutionProfile | null;
+  profiles: CiSolarSolutionProfile[];
+  range: NumericRange;
+}) {
+  return (
+    <ProfileCard icon={SunMedium} title="Solar PV">
+      <SelectField label="Published Solar profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      {profile ? (
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3">
+          <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
+          <ProfileFact label="Module rating" value={`${formatNumber(profile.rated_power_w)} W`} />
+          <ProfileFact label="Module efficiency" value={`${formatNumber(profile.module_efficiency_percent)}%`} />
+          <ProfileFact label="Technology" value={humanize(profile.module_technology)} />
+          <ProfileFact label="Default DC/AC" value={formatNumber(profile.default_dc_ac_ratio)} />
+          <ProfileFact label="Source" value={profile.source_label} />
+        </dl>
+      ) : <MissingProfile />}
+      <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
+      <p className="text-[11px] leading-4 text-slate-500">Actual capacity is rounded up to whole {profile ? `${formatNumber(profile.rated_power_w)} W` : "module"} increments.</p>
+    </ProfileCard>
+  );
 }
 
-function AssetCard({ children, icon: Icon, installed, onInstalledChange, title }: { children: ReactNode; icon: typeof SunMedium; installed: boolean; onInstalledChange: (installed: boolean) => void; title: string }) { return <section aria-label={title} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Icon className="size-4" /></span><h4 className="font-semibold text-slate-950">{title}</h4></div><label className="flex items-center gap-2 text-xs font-medium text-slate-700"><input aria-label={`${title} already installed`} checked={installed} onChange={(event) => onInstalledChange(event.target.checked)} type="checkbox" />Already installed</label></div><div className="mt-4">{children}</div></section>; }
-function EmptyAssetText() { return <p className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-5 text-center text-xs text-slate-500">No existing equipment recorded.</p>; }
-function RangeCard({ icon: Icon, onChange, range, title, unit }: { icon: typeof SunMedium; onChange: (range: NumericRange) => void; range: NumericRange; title: string; unit: string }) { return <section aria-label={`${title} search range`} className="rounded-xl bg-slate-50 p-4"><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Icon className="size-4" /></span><div><h3 className="font-semibold text-slate-950">{title}</h3><p className="text-xs text-slate-500">{unit}</p></div></div><div className="mt-4 grid grid-cols-3 gap-2"><CompactField label="Min" onChange={(start) => onChange({ ...range, start })} value={range.start} /><CompactField label="Max" onChange={(end) => onChange({ ...range, end })} value={range.end} /><CompactField label="Step" onChange={(step) => onChange({ ...range, step })} value={range.step} /></div></section>; }
-function OptionGroup({ children, title }: { children: ReactNode; title: string }) { return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>; }
-function CompactField({ label, onChange, value }: { label: string; onChange: (value: string) => void; value: string }) { return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="0" onChange={(event) => onChange(event.target.value)} step="any" type="number" value={value} /></label>; }
-function TextField({ label, onChange, value }: { label: string; onChange: (value: string) => void; value: string }) { return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-950" maxLength={120} onChange={(event) => onChange(event.target.value)} type="text" value={value} /></label>; }
-function StatusField({ onChange, value }: { onChange: (value: CiExistingSolarAsset["operating_status"]) => void; value: CiExistingSolarAsset["operating_status"] }) { return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>Operating status</span><select aria-label="Operating status" className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm" onChange={(event) => onChange(event.target.value as CiExistingSolarAsset["operating_status"])} value={value}><option value="operational">Operational</option><option value="limited">Limited</option><option value="offline">Offline</option><option value="unknown">Unknown</option></select></label>; }
-function BaselineField({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) { return <label className="flex items-center gap-2 self-end rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700"><input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />Included in NEM12 baseline</label>; }
-
-function buildSolutions(pvValues: number[] | null, batteryValues: number[] | null, context: CiDesignContext | null): CiScenarioInput[] | null {
-  if (!pvValues || !batteryValues || !context || pvValues.length * batteryValues.length > 200) return null;
-  const options = context.technical_options; const derating = Number(options.effective_derating_percent) / 100;
-  if (!positive(derating)) return null;
-  return pvValues.flatMap((pvCapacity, pvIndex) => batteryValues.map((batteryCapacity, batteryIndex) => {
-    const inverterCapacity = autoHybridInverterCapacity(pvCapacity, batteryCapacity, options); const batteryPower = Math.min(inverterCapacity, batteryCapacity === 0 ? 0 : batteryCapacity / options.battery_duration_hours);
-    const pvId = `pv-${String(pvIndex + 1).padStart(3, "0")}`; const batteryId = `battery-${String(batteryIndex + 1).padStart(3, "0")}`;
-    const apparentLimit = options.reactive_support_enabled ? Math.sqrt(inverterCapacity ** 2 + options.reactive_support_max_kvar ** 2) : null;
-    return { scenario_id: `${pvId}__${batteryId}`, label: `${compact(pvCapacity)} kWp PV + ${compact(batteryCapacity)} kWh battery / ${compact(inverterCapacity)} kW hybrid inverter`, battery_system_id: batteryId, battery_technology_id: "generic_li_ion_ac", control_profile_id: "demand_peak_shaving", pv_system_id: pvId, pv_profile_id: "generic_normalized_solar_shape_v1", pv_capacity_kwp_dc: pvCapacity, pv_inverter_capacity_kw_ac: inverterCapacity, shared_ac_headroom_kw: inverterCapacity, reactive_support_enabled: options.reactive_support_enabled, reactive_support_max_kvar: options.reactive_support_enabled ? options.reactive_support_max_kvar : 0, shared_inverter_apparent_power_limit_kva: apparentLimit, reactive_capability_curve: "circular_pq", reactive_capability_provenance: "analyst_assumption", reactive_overcompensation_permitted: false, pv_annual_specific_yield_kwh_per_kw: options.annual_specific_yield_kwh_per_kw, pv_derating_factor: derating, nominal_capacity_kwh: batteryCapacity, max_charge_kw: batteryPower, max_discharge_kw: batteryPower, charge_efficiency: options.charge_efficiency_percent / 100, discharge_efficiency: options.discharge_efficiency_percent / 100, min_soc_fraction: options.minimum_soc_percent / 100, max_soc_fraction: options.maximum_soc_percent / 100, initial_soc_fraction: options.maximum_soc_percent / 100, allow_grid_charging: options.allow_grid_charging, grid_emissions_factor_kg_co2e_per_kwh: options.grid_emissions_factor_kg_co2e_per_kwh ?? 0.79 };
-  }));
+function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles, range }: {
+  onProfileChange: (profileId: string) => void;
+  onRangeChange: (range: NumericRange) => void;
+  profile: CiBatterySolutionProfile | null;
+  profiles: CiBatterySolutionProfile[];
+  range: NumericRange;
+}) {
+  return (
+    <ProfileCard icon={BatteryCharging} title="Battery">
+      <SelectField label="Published Battery profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      {profile ? (
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3">
+          <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
+          <ProfileFact label="Chemistry / coupling" value={`${profile.chemistry} · ${profile.coupling.toUpperCase()}`} />
+          <ProfileFact label="Unit size" value={`${formatNumber(profile.nominal_capacity_kwh_per_unit)} kWh / ${formatNumber(profile.continuous_power_kw_per_unit)} kW`} />
+          <ProfileFact label="Pack RTE" value={`${formatNumber(profile.round_trip_efficiency_percent)}%`} />
+          <ProfileFact label="Usable DoD" value={`${formatNumber(profile.usable_depth_of_discharge_percent)}%`} />
+          <ProfileFact label="Source" value={profile.source_label} />
+        </dl>
+      ) : <MissingProfile />}
+      <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
+      <p className="text-[11px] leading-4 text-slate-500">Actual capacity is rounded to whole units and a matched PV-only comparator is added automatically.</p>
+    </ProfileCard>
+  );
 }
 
-function buildDesignContext(solar: ExistingSolarForm, battery: ExistingBatteryForm, technical: TechnicalOptionsForm): CiDesignContext | null {
-  const annualYield = numberText(technical.annual_specific_yield_kwh_per_kw); const shading = numberText(technical.shading_loss_percent); const soiling = numberText(technical.soiling_loss_percent); const temperature = numberText(technical.temperature_loss_percent); const wiring = numberText(technical.wiring_mismatch_loss_percent); const other = numberText(technical.other_system_loss_percent); const availability = numberText(technical.system_availability_percent); const ratio = numberText(technical.target_dc_ac_ratio); const block = numberText(technical.inverter_block_size_kw); const headroom = numberText(technical.site_ac_headroom_kw); const duration = numberText(technical.battery_duration_hours); const charge = numberText(technical.charge_efficiency_percent); const discharge = numberText(technical.discharge_efficiency_percent); const minSoc = numberText(technical.minimum_soc_percent); const maxSoc = numberText(technical.maximum_soc_percent); const reactiveCap = technical.reactive_support_enabled ? numberText(technical.reactive_support_max_kvar) : 0; const emissionsFactor = numberText(technical.grid_emissions_factor_kg_co2e_per_kwh);
-  const values = [annualYield, shading, soiling, temperature, wiring, other, availability, ratio, block, headroom, duration, charge, discharge, minSoc, maxSoc, reactiveCap, emissionsFactor];
-  const effectiveDerating = availability / 100 * [shading, soiling, temperature, wiring, other].reduce((factor, loss) => factor * (1 - loss / 100), 1);
-  if (!values.every(Number.isFinite) || !positive(annualYield) || [shading, soiling, temperature, wiring, other].some((value) => value < 0 || value >= 100) || !positive(availability) || availability > 100 || ratio < 0.8 || ratio > 2 || !positive(block) || !positive(headroom) || !positive(duration) || !positive(charge) || charge > 100 || !positive(discharge) || discharge > 100 || minSoc < 0 || maxSoc > 100 || minSoc >= maxSoc || effectiveDerating <= 0 || emissionsFactor < 0 || emissionsFactor > 5 || (technical.reactive_support_enabled && !positive(reactiveCap))) return null;
-  const existingSolar = solarAsset(solar); const existingBattery = batteryAsset(battery); if (!existingSolar || !existingBattery) return null;
-  return { contract_version: "ci_design_context_v1", existing_solar: existingSolar, existing_battery: existingBattery, technical_options: { annual_specific_yield_kwh_per_kw: annualYield, shading_loss_percent: shading, soiling_loss_percent: soiling, temperature_loss_percent: temperature, wiring_mismatch_loss_percent: wiring, other_system_loss_percent: other, system_availability_percent: availability, effective_derating_percent: Number((effectiveDerating * 100).toFixed(8)), target_dc_ac_ratio: ratio, inverter_block_size_kw: block, site_ac_headroom_kw: headroom, battery_duration_hours: duration, charge_efficiency_percent: charge, discharge_efficiency_percent: discharge, minimum_soc_percent: minSoc, maximum_soc_percent: maxSoc, allow_grid_charging: technical.allow_grid_charging, reactive_support_enabled: technical.reactive_support_enabled, reactive_support_max_kvar: reactiveCap, grid_emissions_factor_kg_co2e_per_kwh: emissionsFactor } };
+function ProfileCard({ children, icon: Icon, title }: { children: ReactNode; icon: typeof SunMedium; title: string }) {
+  return (
+    <section aria-label={`${title} profile`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+      <div className="mb-4 flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><Icon className="size-5" /></span><div><h4 className="font-semibold text-slate-950">{title}</h4><p className="text-xs text-slate-500">Reusable workspace performance profile</p></div></div>
+      <div className="space-y-3">{children}</div>
+    </section>
+  );
 }
 
-function solarAsset(value: ExistingSolarForm): CiExistingSolarAsset | null {
-  if (!value.installed) return { ...emptySolar(), panel_count: 0, panel_rating_w: 0, installed_capacity_kwp_dc: 0, inverter_capacity_kw_ac: 0, installation_year: null };
-  const panelCount = integerText(value.panel_count); const panelRating = numberText(value.panel_rating_w); const capacity = numberText(value.installed_capacity_kwp_dc); const inverter = optionalNumberText(value.inverter_capacity_kw_ac); const year = optionalYear(value.installation_year);
-  if (!value.brand.trim() || !value.model.trim() || !panelCount || !positive(panelRating) || !positive(capacity) || inverter === null || year === false) return null;
-  return { ...value, brand: value.brand.trim(), model: value.model.trim(), inverter_brand: value.inverter_brand.trim(), inverter_model: value.inverter_model.trim(), panel_count: panelCount, panel_rating_w: panelRating, installed_capacity_kwp_dc: capacity, inverter_capacity_kw_ac: inverter, installation_year: year };
-}
-function batteryAsset(value: ExistingBatteryForm): CiExistingBatteryAsset | null {
-  if (!value.installed) return { ...emptyBattery(), nominal_capacity_kwh: 0, usable_capacity_kwh: 0, power_kw: 0, installation_year: null };
-  const nominal = numberText(value.nominal_capacity_kwh); const usable = numberText(value.usable_capacity_kwh); const power = numberText(value.power_kw); const year = optionalYear(value.installation_year);
-  if (!value.brand.trim() || !value.model.trim() || !positive(nominal) || !positive(usable) || usable > nominal || !positive(power) || year === false) return null;
-  return { ...value, brand: value.brand.trim(), model: value.model.trim(), nominal_capacity_kwh: nominal, usable_capacity_kwh: usable, power_kw: power, installation_year: year };
-}
-
-function restoreSearchSpace(solutions?: CiScenarioInput[], context?: CiDesignContext) {
-  const first = solutions?.[0]; const pvConfigurations = solutions ? [...new Map(solutions.map((item) => [item.pv_system_id, item])).values()].sort((a, b) => a.pv_capacity_kwp_dc - b.pv_capacity_kwp_dc) : []; const batteries = solutions ? [...new Map(solutions.map((item) => [item.battery_system_id, item])).values()].sort((a, b) => a.nominal_capacity_kwh - b.nominal_capacity_kwh) : []; const duration = batteries.find((item) => item.nominal_capacity_kwh > 0 && item.max_discharge_kw > 0); const options = context?.technical_options; const legacyLoss = first ? Math.max(0, (1 - first.pv_derating_factor) * 100) : 0;
-  return { pvRange: pvConfigurations.length ? rangeFromValues(pvConfigurations.map((item) => item.pv_capacity_kwp_dc)) : emptyRange(), batteryRange: batteries.length ? rangeFromValues(batteries.map((item) => item.nominal_capacity_kwh)) : emptyRange(), existingSolar: context ? solarForm(context.existing_solar) : emptySolar(), existingBattery: context ? batteryForm(context.existing_battery) : emptyBattery(), technical: options ? technicalForm(options) : { ...defaultTechnicalOptions(), ...(first ? { annual_specific_yield_kwh_per_kw: String(first.pv_annual_specific_yield_kwh_per_kw), shading_loss_percent: "0", soiling_loss_percent: "0", temperature_loss_percent: "0", wiring_mismatch_loss_percent: "0", other_system_loss_percent: compact(legacyLoss), system_availability_percent: "100", target_dc_ac_ratio: compact(Math.min(2, Math.max(0.8, first.pv_inverter_capacity_kw_ac > 0 ? first.pv_capacity_kwp_dc / first.pv_inverter_capacity_kw_ac : 1.15))), site_ac_headroom_kw: String(first.shared_ac_headroom_kw), battery_duration_hours: duration ? compact(duration.nominal_capacity_kwh / duration.max_discharge_kw) : "2", charge_efficiency_percent: percentage(first.charge_efficiency), discharge_efficiency_percent: percentage(first.discharge_efficiency), minimum_soc_percent: percentage(first.min_soc_fraction), maximum_soc_percent: percentage(first.max_soc_fraction), allow_grid_charging: first.allow_grid_charging, reactive_support_enabled: first.reactive_support_enabled, reactive_support_max_kvar: first.reactive_support_enabled ? String(first.reactive_support_max_kvar) : "" } : {}) } };
+function RangeFields({ label, onChange, range, unit }: { label: string; onChange: (range: NumericRange) => void; range: NumericRange; unit: string }) {
+  return (
+    <fieldset>
+      <legend className="mb-2 text-xs font-semibold text-slate-700">{label} <span className="font-normal text-slate-500">· {unit}</span></legend>
+      <div className="grid grid-cols-3 gap-2">
+        <NumberField label="Minimum" onChange={(minimum) => onChange({ ...range, minimum })} value={range.minimum} />
+        <NumberField label="Maximum" onChange={(maximum) => onChange({ ...range, maximum })} value={range.maximum} />
+        <NumberField label="Step" onChange={(step) => onChange({ ...range, step })} value={range.step} />
+      </div>
+    </fieldset>
+  );
 }
 
-function autoHybridInverterCapacity(pvCapacity: number, batteryCapacity: number, options: CiTechnicalOptions) {
-  const pvPower = pvCapacity / options.target_dc_ac_ratio;
-  const batteryPower = batteryCapacity / options.battery_duration_hours;
-  const requiredPower = Math.max(pvPower, batteryPower);
-  if (requiredPower === 0) return 0;
-  return Math.min(options.site_ac_headroom_kw, Math.ceil(requiredPower / options.inverter_block_size_kw) * options.inverter_block_size_kw);
+function WorkflowSection({ children, description, step, title }: { children: ReactNode; description?: string; step: string; title: string }) {
+  return <section><div className="mb-3 flex gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">{step}</span><div><h3 className="font-semibold text-slate-950">{title}</h3>{description ? <p className="mt-0.5 max-w-4xl text-xs leading-5 text-slate-500">{description}</p> : null}</div></div>{children}</section>;
 }
-function solarForm(value: CiExistingSolarAsset): ExistingSolarForm { return { ...value, panel_count: String(value.panel_count || ""), panel_rating_w: String(value.panel_rating_w || ""), installed_capacity_kwp_dc: String(value.installed_capacity_kwp_dc || ""), inverter_capacity_kw_ac: String(value.inverter_capacity_kw_ac || ""), installation_year: value.installation_year === null ? "" : String(value.installation_year) }; }
-function batteryForm(value: CiExistingBatteryAsset): ExistingBatteryForm { return { ...value, nominal_capacity_kwh: String(value.nominal_capacity_kwh || ""), usable_capacity_kwh: String(value.usable_capacity_kwh || ""), power_kw: String(value.power_kw || ""), installation_year: value.installation_year === null ? "" : String(value.installation_year) }; }
-function technicalForm(value: CiTechnicalOptions): TechnicalOptionsForm { return { annual_specific_yield_kwh_per_kw: String(value.annual_specific_yield_kwh_per_kw), shading_loss_percent: String(value.shading_loss_percent), soiling_loss_percent: String(value.soiling_loss_percent), temperature_loss_percent: String(value.temperature_loss_percent), wiring_mismatch_loss_percent: String(value.wiring_mismatch_loss_percent), other_system_loss_percent: String(value.other_system_loss_percent), system_availability_percent: String(value.system_availability_percent), target_dc_ac_ratio: String(value.target_dc_ac_ratio), inverter_block_size_kw: String(value.inverter_block_size_kw), site_ac_headroom_kw: String(value.site_ac_headroom_kw), battery_duration_hours: String(value.battery_duration_hours), charge_efficiency_percent: String(value.charge_efficiency_percent), discharge_efficiency_percent: String(value.discharge_efficiency_percent), minimum_soc_percent: String(value.minimum_soc_percent), maximum_soc_percent: String(value.maximum_soc_percent), allow_grid_charging: value.allow_grid_charging, reactive_support_enabled: value.reactive_support_enabled, reactive_support_max_kvar: value.reactive_support_enabled ? String(value.reactive_support_max_kvar) : "", grid_emissions_factor_kg_co2e_per_kwh: String(value.grid_emissions_factor_kg_co2e_per_kwh ?? 0.79) }; }
-function rangeFromValues(values: number[]): NumericRange { const sorted = [...new Set(values)].sort((a, b) => a - b); const start = sorted[0] ?? 0; const end = sorted.at(-1) ?? start; const step = sorted.length > 1 ? (end - start) / (sorted.length - 1) : 1; return { start: compact(start), end: compact(end), step: compact(step) }; }
-function rangeValues(range: NumericRange, limit: number) { return numberRange(range.start, range.end, range.step, limit); }
-function numberRange(startText: string, endText: string, stepText: string, limit: number): number[] | null { const start = Number(startText); const end = Number(endText); const step = Number(stepText); if (!nonNegative(startText) || !nonNegative(endText) || !positive(step) || end < start) return null; const count = Math.floor((end - start) / step + 1e-7) + 1; if (count < 1 || count > limit) return null; return Array.from({ length: count }, (_, index) => Number((start + step * index).toFixed(6))); }
-function searchSpaceStatus(pv: number[] | null, battery: number[] | null, count: number, context: CiDesignContext | null) { if (!pv || !battery) return "Set PV and battery ranges"; if (!context) return "Complete asset details and options"; if (count > 200) return `${count} cases · maximum 200`; return `${pv.length} PV × ${battery.length} battery = ${count} cases`; }
-function numberText(value: string) { if (!value.trim()) return Number.NaN; return Number(value); }
-function optionalNumberText(value: string) { if (!value.trim()) return 0; const parsed = Number(value); return nonNegative(parsed) ? parsed : null; }
-function integerText(value: string) { const parsed = numberText(value); return Number.isInteger(parsed) && parsed > 0 ? parsed : 0; }
-function optionalYear(value: string): number | null | false { if (!value.trim()) return null; const year = Number(value); return Number.isInteger(year) && year >= 1980 && year <= 2100 ? year : false; }
-function positive(value: string | number) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0; }
-function nonNegative(value: string | number) { if (typeof value === "string" && !value.trim()) return false; const parsed = Number(value); return Number.isFinite(parsed) && parsed >= 0; }
-function compact(value: number) { return String(Number(value.toFixed(6))); }
-function percentage(value: number) { return String(Number((value * 100).toFixed(10))); }
+
+function OptionGroup({ children, title }: { children: ReactNode; title: string }) {
+  return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>;
+}
+
+function NumberField({ allowBlank = false, label, onChange, value }: { allowBlank?: boolean; label: string; onChange: (value: string) => void; value: string }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="0" onChange={(event) => onChange(event.target.value)} placeholder={allowBlank ? "Not modelled" : undefined} step="any" type="number" value={value} /></label>;
+}
+
+function TextField({ className = "", label, onChange, value }: { className?: string; label: string; onChange: (value: string) => void; value: string }) {
+  return <label className={`grid gap-1 text-xs font-medium text-slate-600 ${className}`}><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-950" maxLength={160} onChange={(event) => onChange(event.target.value)} type="text" value={value} /></label>;
+}
+
+function SelectField({ label, onChange, options, value }: { label: string; onChange: (value: string) => void; options: Array<[string, string]>; value: string }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><select aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-950" onChange={(event) => onChange(event.target.value)} value={value}>{options.length === 0 ? <option value="">No published profiles</option> : null}{options.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>;
+}
+
+function CheckField({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
+  return <label className="col-span-full flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700"><input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />{label}</label>;
+}
+
+function ProfileFact({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[.08em] text-slate-400">{label}</dt><dd className="mt-1 truncate font-medium text-slate-800" title={value}>{value}</dd></div>;
+}
+
+function MissingProfile() {
+  return <p className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-4 text-center text-xs text-amber-900">No published profile is available.</p>;
+}
+
+function buildGenerationRequest({ batteryProfile, batteryRange, connection, pvRange, site, solarProfile }: {
+  batteryProfile: CiBatterySolutionProfile | null;
+  batteryRange: NumericRange;
+  connection: ConnectionOptionsForm;
+  pvRange: NumericRange;
+  site: SiteFactorsForm;
+  solarProfile: CiSolarSolutionProfile | null;
+}): CiSolutionGenerationRequest | null {
+  if (!solarProfile || !batteryProfile || !site.resource_label.trim()) return null;
+  const pv = parsedRange(pvRange, true);
+  const battery = parsedRange(batteryRange, false);
+  const annualYield = parseNumber(site.annual_specific_yield_kwh_per_kw);
+  const azimuth = parseNumber(site.array_azimuth_degrees);
+  const tilt = parseNumber(site.array_tilt_degrees);
+  const shading = parseNumber(site.shading_loss_percent);
+  const soiling = parseNumber(site.soiling_loss_percent);
+  const temperature = parseNumber(site.temperature_loss_percent);
+  const wiring = parseNumber(site.wiring_mismatch_loss_percent);
+  const other = parseNumber(site.other_system_loss_percent);
+  const availability = parseNumber(site.system_availability_percent);
+  const block = parseNumber(connection.inverter_block_size_kw);
+  const headroom = parseNumber(connection.site_ac_headroom_kw);
+  const reactive = connection.reactive_support_enabled ? parseNumber(connection.reactive_support_max_kvar) : 0;
+  const emissions = connection.grid_emissions_factor_kg_co2e_per_kwh.trim() ? parseNumber(connection.grid_emissions_factor_kg_co2e_per_kwh) : null;
+  const losses = [shading, soiling, temperature, wiring, other];
+  if (
+    !pv || !battery ||
+    !between(annualYield, 500, 3000) || !between(azimuth, 0, 360) || !between(tilt, 0, 90) ||
+    losses.some((value) => !between(value, 0, 99)) || !between(availability, 1, 100) ||
+    !between(block, 0.1, 1000) || !positive(headroom) ||
+    (connection.reactive_support_enabled && !positive(reactive)) ||
+    (emissions !== null && !between(emissions, 0, 5))
+  ) return null;
+  return {
+    contract_version: "ci_solution_generation_request_v1",
+    pv_range: { minimum_kwp_dc: pv.minimum, maximum_kwp_dc: pv.maximum, step_kwp_dc: pv.step },
+    battery_range: { minimum_kwh: battery.minimum, maximum_kwh: battery.maximum, step_kwh: battery.step },
+    solar_profile_id: solarProfile.profile_id,
+    battery_profile_id: batteryProfile.profile_id,
+    site_factors: {
+      resource_basis: "gross_specific_yield_before_site_losses",
+      resource_source: site.resource_source,
+      resource_label: site.resource_label.trim(),
+      annual_specific_yield_kwh_per_kw: annualYield,
+      array_azimuth_degrees: azimuth,
+      array_tilt_degrees: tilt,
+      shading_loss_percent: shading,
+      soiling_loss_percent: soiling,
+      temperature_loss_percent: temperature,
+      wiring_mismatch_loss_percent: wiring,
+      other_system_loss_percent: other,
+      system_availability_percent: availability,
+    },
+    connection_options: {
+      inverter_block_size_kw: block,
+      site_ac_headroom_kw: headroom,
+      allow_grid_charging: connection.allow_grid_charging,
+      reactive_support_enabled: connection.reactive_support_enabled,
+      reactive_support_max_kvar: reactive,
+      grid_emissions_factor_kg_co2e_per_kwh: emissions,
+      initial_soc_basis: "full_soc_physical_upper_bound",
+    },
+  };
+}
+
+function restoreBuilderState(
+  context: CiDesignContext | undefined,
+  solutions: CiScenarioInput[] | undefined,
+  deviceProfile: CiDeviceProfile,
+  publishedSolar: CiSolarSolutionProfile[],
+  publishedBattery: CiBatterySolutionProfile[],
+): RestoredBuilderState {
+  const defaults: RestoredBuilderState = {
+    pvRange: defaultPvRange(),
+    batteryRange: defaultBatteryRange(),
+    site: defaultSiteFactors(),
+    connection: defaultConnectionOptions(),
+    solarProfileId: publishedId(deviceProfile.default_solution_profile_selection.solar_profile_id, publishedSolar),
+    batteryProfileId: publishedId(deviceProfile.default_solution_profile_selection.battery_profile_id, publishedBattery),
+  };
+  if (!context) {
+    if (!solutions?.length) return defaults;
+    return {
+      ...defaults,
+      pvRange: rangeFromValues(solutions.map((item) => item.pv_capacity_kwp_dc).filter((value) => value > 0)),
+      batteryRange: rangeFromValues(solutions.map((item) => item.nominal_capacity_kwh)),
+    };
+  }
+  if (context.contract_version === "ci_design_context_v2") return restoreV2(context);
+  const options = context.technical_options;
+  return {
+    ...defaults,
+    pvRange: solutions?.length ? rangeFromValues(solutions.map((item) => item.pv_capacity_kwp_dc).filter((value) => value > 0)) : defaults.pvRange,
+    batteryRange: solutions?.length ? rangeFromValues(solutions.map((item) => item.nominal_capacity_kwh)) : defaults.batteryRange,
+    site: siteFormFromTechnical(options),
+    connection: connectionFormFromTechnical(options),
+  };
+}
+
+function restoreV2(context: CiDesignContextV2): RestoredBuilderState {
+  const options = context.technical_options;
+  return {
+    pvRange: {
+      minimum: formatNumber(context.search_space.pv_range.minimum_kwp_dc),
+      maximum: formatNumber(context.search_space.pv_range.maximum_kwp_dc),
+      step: formatNumber(context.search_space.pv_range.step_kwp_dc),
+    },
+    batteryRange: {
+      minimum: formatNumber(context.search_space.battery_range.minimum_kwh),
+      maximum: formatNumber(context.search_space.battery_range.maximum_kwh),
+      step: formatNumber(context.search_space.battery_range.step_kwh),
+    },
+    site: {
+      resource_source: context.site_factors.resource_source,
+      resource_label: context.site_factors.resource_label,
+      annual_specific_yield_kwh_per_kw: formatNumber(context.site_factors.annual_specific_yield_kwh_per_kw),
+      array_azimuth_degrees: formatNumber(context.site_factors.array_azimuth_degrees),
+      array_tilt_degrees: formatNumber(context.site_factors.array_tilt_degrees),
+      shading_loss_percent: formatNumber(context.site_factors.shading_loss_percent),
+      soiling_loss_percent: formatNumber(context.site_factors.soiling_loss_percent),
+      temperature_loss_percent: formatNumber(context.site_factors.temperature_loss_percent),
+      wiring_mismatch_loss_percent: formatNumber(context.site_factors.wiring_mismatch_loss_percent),
+      other_system_loss_percent: formatNumber(context.site_factors.other_system_loss_percent),
+      system_availability_percent: formatNumber(context.site_factors.system_availability_percent),
+    },
+    connection: connectionFormFromTechnical(options),
+    solarProfileId: context.profile_selection.solar_profile_id,
+    batteryProfileId: context.profile_selection.battery_profile_id,
+  };
+}
+
+function siteFormFromTechnical(options: CiDesignContext["technical_options"]): SiteFactorsForm {
+  return {
+    ...defaultSiteFactors(),
+    annual_specific_yield_kwh_per_kw: formatNumber(options.annual_specific_yield_kwh_per_kw),
+    shading_loss_percent: formatNumber(options.shading_loss_percent),
+    soiling_loss_percent: formatNumber(options.soiling_loss_percent),
+    temperature_loss_percent: formatNumber(options.temperature_loss_percent),
+    wiring_mismatch_loss_percent: formatNumber(options.wiring_mismatch_loss_percent),
+    other_system_loss_percent: formatNumber(options.other_system_loss_percent),
+    system_availability_percent: formatNumber(options.system_availability_percent),
+  };
+}
+
+function connectionFormFromTechnical(options: CiDesignContext["technical_options"]): ConnectionOptionsForm {
+  return {
+    inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
+    site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
+    allow_grid_charging: options.allow_grid_charging,
+    reactive_support_enabled: options.reactive_support_enabled,
+    reactive_support_max_kvar: options.reactive_support_enabled ? formatNumber(options.reactive_support_max_kvar) : "",
+    grid_emissions_factor_kg_co2e_per_kwh: options.grid_emissions_factor_kg_co2e_per_kwh ? formatNumber(options.grid_emissions_factor_kg_co2e_per_kwh) : "",
+  };
+}
+
+function publishedId<T extends { profile_id: string }>(preferred: string, profiles: T[]) {
+  return profiles.some((profile) => profile.profile_id === preferred) ? preferred : (profiles[0]?.profile_id ?? "");
+}
+
+function parsedRange(range: NumericRange, strictlyPositiveMinimum: boolean): { minimum: number; maximum: number; step: number } | null {
+  const minimum = parseNumber(range.minimum);
+  const maximum = parseNumber(range.maximum);
+  const step = parseNumber(range.step);
+  if ((strictlyPositiveMinimum ? !positive(minimum) : minimum < 0) || !Number.isFinite(maximum) || maximum < minimum || !positive(step)) return null;
+  const count = Math.floor((maximum - minimum) / step + 1e-7) + 1;
+  return count >= 1 && count <= 200 ? { minimum, maximum, step } : null;
+}
+
+function rangeCount(range: NumericRange, strictlyPositiveMinimum: boolean) {
+  const parsed = parsedRange(range, strictlyPositiveMinimum);
+  return parsed ? Math.floor((parsed.maximum - parsed.minimum) / parsed.step + 1e-7) + 1 : 0;
+}
+
+function canonicalCandidateUpperBound(pvRange: NumericRange, batteryRange: NumericRange) {
+  const pv = parsedRange(pvRange, true);
+  const battery = parsedRange(batteryRange, false);
+  if (!pv || !battery) return 0;
+  const pvCount = Math.floor((pv.maximum - pv.minimum) / pv.step + 1e-7) + 1;
+  const batteryCount = Math.floor((battery.maximum - battery.minimum) / battery.step + 1e-7) + 1;
+  const comparatorCountPerPv = batteryCount - (battery.minimum === 0 ? 1 : 0);
+  return pvCount * (batteryCount + comparatorCountPerPv);
+}
+
+function rangeFromValues(values: number[]): NumericRange {
+  const sorted = [...new Set(values)].sort((a, b) => a - b);
+  if (!sorted.length) return { minimum: "0", maximum: "0", step: "1" };
+  const minimum = sorted[0];
+  const maximum = sorted.at(-1) ?? minimum;
+  const step = sorted.length > 1 ? (maximum - minimum) / (sorted.length - 1) : Math.max(1, minimum);
+  return { minimum: formatNumber(minimum), maximum: formatNumber(maximum), step: formatNumber(step) };
+}
+
+function effectiveSpecificYield(site: SiteFactorsForm) {
+  const annual = parseNumber(site.annual_specific_yield_kwh_per_kw);
+  const availability = parseNumber(site.system_availability_percent);
+  const losses = [site.shading_loss_percent, site.soiling_loss_percent, site.temperature_loss_percent, site.wiring_mismatch_loss_percent, site.other_system_loss_percent].map(parseNumber);
+  if (!positive(annual) || !between(availability, 1, 100) || losses.some((loss) => !between(loss, 0, 99))) return null;
+  return annual * availability / 100 * losses.reduce((factor, loss) => factor * (1 - loss / 100), 1);
+}
+
+function generatorStatus(request: CiSolutionGenerationRequest | null, count: number, candidateUpperBound: number, solarProfiles: number, batteryProfiles: number) {
+  if (!solarProfiles || !batteryProfiles) return "Publish profiles in Settings";
+  if (!request) return "Complete required assumptions";
+  if (candidateUpperBound > 200) return `${count} requested · up to ${candidateUpperBound} candidates (maximum 200)`;
+  return `${count} requested · Python will snap & validate`;
+}
+
+function parseNumber(value: string) {
+  return value.trim() ? Number(value) : Number.NaN;
+}
+
+function positive(value: number) {
+  return Number.isFinite(value) && value > 0;
+}
+
+function between(value: number, minimum: number, maximum: number) {
+  return Number.isFinite(value) && value >= minimum && value <= maximum;
+}
+
+function formatNumber(value: number) {
+  return String(Number(value.toFixed(6)));
+}
+
+function humanize(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}

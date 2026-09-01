@@ -1,4 +1,5 @@
 import type { CiScenarioInput } from "./ci-scenarios";
+import type { CiBatterySolutionProfile, CiSolarSolutionProfile } from "./ci-device-profile";
 
 export interface CiProject {
   project_id: string;
@@ -23,6 +24,7 @@ export interface CiDesignCandidateResult {
   recommendation_permitted: false;
   disclaimer: string;
   design_context: CiDesignContext | null;
+  generation_summary?: CiSolutionGenerationSummary;
 }
 
 export interface CiExistingSolarAsset {
@@ -73,13 +75,92 @@ export interface CiTechnicalOptions {
   reactive_support_enabled: boolean;
   reactive_support_max_kvar: number;
   grid_emissions_factor_kg_co2e_per_kwh?: number;
+  initial_soc_basis?: "full_soc_physical_upper_bound";
 }
 
-export interface CiDesignContext {
+export interface CiDesignContextV1 {
   contract_version: "ci_design_context_v1";
   existing_solar: CiExistingSolarAsset;
   existing_battery: CiExistingBatteryAsset;
   technical_options: CiTechnicalOptions;
+}
+
+export interface CiSolutionRange {
+  minimum: number;
+  maximum: number;
+  step: number;
+}
+
+export interface CiSiteFactors {
+  resource_basis: "gross_specific_yield_before_site_losses";
+  resource_source: "analyst_assumption" | "site_assessment" | "imported_resource_study";
+  resource_label: string;
+  annual_specific_yield_kwh_per_kw: number;
+  array_azimuth_degrees: number;
+  array_tilt_degrees: number;
+  shading_loss_percent: number;
+  soiling_loss_percent: number;
+  temperature_loss_percent: number;
+  wiring_mismatch_loss_percent: number;
+  other_system_loss_percent: number;
+  system_availability_percent: number;
+}
+
+export interface CiConnectionOptions {
+  inverter_block_size_kw: number;
+  site_ac_headroom_kw: number;
+  allow_grid_charging: boolean;
+  reactive_support_enabled: boolean;
+  reactive_support_max_kvar: number;
+  grid_emissions_factor_kg_co2e_per_kwh: number | null;
+  initial_soc_basis: "full_soc_physical_upper_bound";
+}
+
+export interface CiSolutionGenerationRequest {
+  contract_version: "ci_solution_generation_request_v1";
+  pv_range: {
+    minimum_kwp_dc: number;
+    maximum_kwp_dc: number;
+    step_kwp_dc: number;
+  };
+  battery_range: {
+    minimum_kwh: number;
+    maximum_kwh: number;
+    step_kwh: number;
+  };
+  solar_profile_id: string;
+  battery_profile_id: string;
+  site_factors: CiSiteFactors;
+  connection_options: CiConnectionOptions;
+}
+
+export interface CiDesignContextV2 {
+  contract_version: "ci_design_context_v2";
+  existing_solar: CiExistingSolarAsset;
+  existing_battery: CiExistingBatteryAsset;
+  search_space: {
+    pv_range: CiSolutionGenerationRequest["pv_range"];
+    battery_range: CiSolutionGenerationRequest["battery_range"];
+  };
+  site_factors: CiSiteFactors & { effective_derating_percent?: number };
+  profile_selection: {
+    device_profile_sha256: string | null;
+    solar_profile_id: string;
+    battery_profile_id: string;
+    solar_profile: CiSolarSolutionProfile;
+    battery_profile: CiBatterySolutionProfile;
+  };
+  technical_options: CiTechnicalOptions;
+}
+
+export type CiDesignContext = CiDesignContextV1 | CiDesignContextV2;
+
+export interface CiSolutionGenerationSummary {
+  requested_count: number;
+  generated_candidate_count: number;
+  deduplicated_count: number;
+  rejected_count: number;
+  rejection_reasons: Array<{ code: string; count: number }>;
 }
 
 export const ciProjectsQueryKey = ["ci-projects"] as const;
@@ -126,6 +207,20 @@ export async function validateCiDesignCandidates(
   return assertCiDesignCandidateResult(await response.json());
 }
 
+export async function generateCiDesignCandidates(
+  projectId: string,
+  generationRequest: CiSolutionGenerationRequest,
+  fetcher: typeof fetch = fetch,
+): Promise<CiDesignCandidateResult> {
+  const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-candidates`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ generation_request: generationRequest }),
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, "Solution generation failed."));
+  return assertCiDesignCandidateResult(await response.json());
+}
+
 export async function fetchCiSavedDesign(
   projectId: string,
   fetcher: typeof fetch = fetch,
@@ -154,7 +249,7 @@ function assertCiDesignCandidateResult(value: unknown): CiDesignCandidateResult 
     payload.tariff_evaluated !== false ||
     payload.customer_facing_permission !== false ||
     payload.recommendation_permitted !== false
-    || (payload.design_context !== null && payload.design_context?.contract_version !== "ci_design_context_v1")
+    || (payload.design_context !== null && !["ci_design_context_v1", "ci_design_context_v2"].includes(payload.design_context?.contract_version))
   ) {
     throw new Error("Design validation returned an unsafe contract.");
   }

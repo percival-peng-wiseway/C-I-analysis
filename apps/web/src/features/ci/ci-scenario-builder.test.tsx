@@ -1,87 +1,196 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CiScenarioInput } from "./api/ci-scenarios";
+import type { CiDeviceProfile } from "./api/ci-device-profile";
 import { CiScenarioBuilder } from "./ci-scenario-builder";
 
 afterEach(cleanup);
 
 describe("CiScenarioBuilder", () => {
-  it("restores added PV and battery ranges, auto-sizes inverter, and saves existing assets", async () => {
+  it("submits only the profile selections, site factors and ranges for Python generation", async () => {
     const onSubmit = vi.fn();
-    render(<CiScenarioBuilder error={null} initialSolutions={solutions} isPending={false} onSubmit={onSubmit} />);
+    render(
+      <CiScenarioBuilder
+        deviceProfile={deviceProfile}
+        error={null}
+        isPending={false}
+        onSubmit={onSubmit}
+        siteAddress="10 Sample Street, Melbourne VIC 3000"
+      />,
+    );
 
-    const pv = screen.getByRole("region", { name: "Added PV search range" });
-    const battery = screen.getByRole("region", { name: "Added battery search range" });
+    expect(screen.getByText("10 Sample Street, Melbourne VIC 3000")).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Directions in Google Maps/ }).getAttribute("href")).toContain("10%20Sample%20Street");
+    expect(screen.getByRole("region", { name: "Solar PV profile" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Battery profile" })).toBeTruthy();
+    expect(screen.queryByText("Existing site assets")).toBeNull();
+    expect(screen.getByText("30 requested · Python will snap & validate")).toBeTruthy();
 
-    expect((within(pv).getByLabelText("Min") as HTMLInputElement).value).toBe("100");
-    expect((within(pv).getByLabelText("Max") as HTMLInputElement).value).toBe("150");
-    expect((within(battery).getByLabelText("Min") as HTMLInputElement).value).toBe("200");
-    expect((within(battery).getByLabelText("Max") as HTMLInputElement).value).toBe("400");
-    expect(screen.getByRole("region", { name: "Automatic hybrid inverter sizing" })).toBeTruthy();
-    expect(screen.getByText("Hybrid inverter / PCS")).toBeTruthy();
-    expect(screen.queryByText("PV inverter")).toBeNull();
-    expect(screen.queryByText("Battery PCS")).toBeNull();
-    expect(screen.getByText("2 PV × 2 battery = 4 cases")).toBeTruthy();
-    expect(screen.getAllByText("Technical options")).toHaveLength(2);
+    await userEvent.click(screen.getByRole("button", { name: "Generate 30 requested cases" }));
 
-    await userEvent.click(screen.getByLabelText("Existing solar PV already installed"));
-    await userEvent.type(screen.getByLabelText("Panel brand"), "Trina");
-    await userEvent.type(screen.getByLabelText("Panel model"), "Vertex S+");
-    await userEvent.type(screen.getByLabelText("Installed capacity (kWp DC)"), "50");
-    await userEvent.type(screen.getByLabelText("Panel quantity"), "100");
-    await userEvent.type(screen.getByLabelText("Panel rating (W)"), "500");
-
-    await userEvent.click(screen.getByRole("button", { name: "Generate 4 solutions" }));
     expect(onSubmit).toHaveBeenCalledOnce();
-    expect(onSubmit.mock.calls[0][0]).toHaveLength(4);
-    expect(onSubmit.mock.calls[0][0][0].pv_inverter_capacity_kw_ac).toBe(80);
-    expect(onSubmit.mock.calls[0][0][0].shared_ac_headroom_kw).toBe(80);
-    expect(onSubmit.mock.calls[0][0][1]).toMatchObject({ pv_inverter_capacity_kw_ac: 100, shared_ac_headroom_kw: 100, max_discharge_kw: 100 });
-    expect(onSubmit.mock.calls[0][1]).toMatchObject({ existing_solar: { brand: "Trina", model: "Vertex S+", installed_capacity_kwp_dc: 50 } });
-    expect(onSubmit.mock.calls[0][0][0].grid_emissions_factor_kg_co2e_per_kwh).toBe(0.79);
-    expect(onSubmit.mock.calls[0][1].technical_options.grid_emissions_factor_kg_co2e_per_kwh).toBe(0.79);
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      contract_version: "ci_solution_generation_request_v1",
+      pv_range: { minimum_kwp_dc: 100, maximum_kwp_dc: 500, step_kwp_dc: 100 },
+      battery_range: { minimum_kwh: 0, maximum_kwh: 500, step_kwh: 100 },
+      solar_profile_id: "generic_crystalline_pv_v1",
+      battery_profile_id: "generic_lfp_ac_2h_v1",
+      site_factors: {
+        resource_basis: "gross_specific_yield_before_site_losses",
+        resource_source: "analyst_assumption",
+        resource_label: "Workspace screening assumption",
+        array_azimuth_degrees: 0,
+        array_tilt_degrees: 20,
+      },
+      connection_options: {
+        site_ac_headroom_kw: 250,
+        allow_grid_charging: false,
+        grid_emissions_factor_kg_co2e_per_kwh: null,
+        initial_soc_basis: "full_soc_physical_upper_bound",
+      },
+    });
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("scenarios");
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("existing_solar");
+  });
+
+  it("uses another published profile selected from the workspace library", async () => {
+    const onSubmit = vi.fn();
+    const secondProfile: CiDeviceProfile = structuredClone(deviceProfile);
+    secondProfile.solution_profiles.solar_profiles.push({
+      ...secondProfile.solution_profiles.solar_profiles[0],
+      profile_id: "high_power_pv_v1",
+      name: "High-power PV",
+      rated_power_w: 700,
+    });
+    render(<CiScenarioBuilder deviceProfile={secondProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+
+    await userEvent.selectOptions(screen.getByLabelText("Published Solar profile"), "high_power_pv_v1");
+    await userEvent.click(screen.getByRole("button", { name: "Generate 30 requested cases" }));
+
+    expect(onSubmit.mock.calls[0][0].solar_profile_id).toBe("high_power_pv_v1");
+    expect(screen.getByText("700 W")).toBeTruthy();
+  });
+
+  it("keeps DC-coupled battery profiles out of the current AC dispatch generator", () => {
+    const dcOnly: CiDeviceProfile = structuredClone(deviceProfile);
+    dcOnly.solution_profiles.battery_profiles[0].coupling = "dc";
+
+    render(<CiScenarioBuilder deviceProfile={dcOnly} error={null} isPending={false} onSubmit={vi.fn()} />);
+
+    expect(screen.getByText(/current Python dispatch engine does not model them/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Generate 30 requested cases" })).toHaveProperty("disabled", true);
+  });
+
+  it("disables requests that could exceed the saved canonical candidate limit", async () => {
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" }) as HTMLInputElement[];
+    const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" }) as HTMLInputElement[];
+    const steps = screen.getAllByRole("spinbutton", { name: "Step" }) as HTMLInputElement[];
+
+    await user.clear(minimums[0]); await user.type(minimums[0], "1");
+    await user.clear(maximums[0]); await user.type(maximums[0], "20");
+    await user.clear(steps[0]); await user.type(steps[0], "1");
+    await user.clear(minimums[1]); await user.type(minimums[1], "100");
+    await user.clear(maximums[1]); await user.type(maximums[1], "1000");
+    await user.clear(steps[1]); await user.type(steps[1], "100");
+
+    expect(await screen.findByText("200 requested · up to 400 candidates (maximum 200)")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Generate 200 requested cases" })).toHaveProperty("disabled", true);
   });
 });
 
-const solutions = [
-  scenario("pv-1", "battery-1", 100, 80, 200, 50),
-  scenario("pv-1", "battery-2", 100, 80, 400, 100),
-  scenario("pv-2", "battery-1", 150, 120, 200, 50),
-  scenario("pv-2", "battery-2", 150, 120, 400, 100),
-];
-
-function scenario(pvId: string, batteryId: string, pvCapacity: number, inverterCapacity: number, batteryCapacity: number, batteryPower: number): CiScenarioInput {
-  return {
-    scenario_id: `${pvId}__${batteryId}`,
-    label: `${pvCapacity} kWp + ${batteryCapacity} kWh`,
-    battery_system_id: batteryId,
-    battery_technology_id: "generic_li_ion_ac",
-    control_profile_id: "demand_peak_shaving",
-    pv_system_id: pvId,
-    pv_profile_id: "generic_normalized_solar_shape_v1",
-    pv_capacity_kwp_dc: pvCapacity,
-    pv_inverter_capacity_kw_ac: inverterCapacity,
-    shared_ac_headroom_kw: 250,
-    reactive_support_enabled: false,
-    reactive_support_max_kvar: 0,
-    shared_inverter_apparent_power_limit_kva: null,
-    reactive_capability_curve: "circular_pq",
-    reactive_capability_provenance: "analyst_assumption",
-    reactive_overcompensation_permitted: false,
-    pv_annual_specific_yield_kwh_per_kw: 1500,
-    pv_derating_factor: 0.88,
-    nominal_capacity_kwh: batteryCapacity,
-    max_charge_kw: batteryPower,
-    max_discharge_kw: batteryPower,
-    charge_efficiency: 0.95,
-    discharge_efficiency: 0.95,
-    min_soc_fraction: 0.1,
-    max_soc_fraction: 1,
-    initial_soc_fraction: 1,
-    allow_grid_charging: false,
-  };
-}
+const deviceProfile: CiDeviceProfile = {
+  contract_version: "ci_device_profile_v3",
+  profile_id: "workspace_device_profile",
+  currency: "AUD",
+  tax_basis: "gst_exclusive",
+  pv_cost_aud_per_kwp_dc: 530,
+  battery_cost_aud_per_kwh: 413,
+  inverter_cost_aud_per_kw_ac: 80,
+  equipment_catalog: {
+    pv_products: [{
+      product_id: "astronergy_astro_n7_600_630w",
+      manufacturer: "Astronergy",
+      model: "ASTRO N7 600–630W",
+      rated_power_min_w: 600,
+      rated_power_max_w: 630,
+      capital_cost_aud_per_kwp_dc: 530,
+      replacement_cost_aud_per_kwp_dc: 530,
+      annual_om_aud: 0,
+    }],
+    battery_products: [{
+      product_id: "fox_ess_cq7_ci",
+      manufacturer: "Fox ESS",
+      model: "CQ7 C&I",
+      chemistry: "LFP",
+      module_capacity_kwh: 7,
+      cost_curve: [{ quantity: 30, capital_cost_aud: 77578, replacement_cost_aud: 57456, annual_om_aud: 0 }],
+    }],
+    inverter_products: [{
+      product_id: "fox_ess_h3_plus_125kw",
+      manufacturer: "Fox ESS",
+      model: "H3 Plus Hybrid Inverter",
+      sizing_unit_kw_ac: 125,
+      cost_curve: [{ capacity_kw_ac: 125, capital_cost_aud: 10000, replacement_cost_aud: 10000, annual_om_aud: 0 }],
+    }],
+  },
+  default_equipment_selection: {
+    pv_product_id: "astronergy_astro_n7_600_630w",
+    battery_product_id: "fox_ess_cq7_ci",
+    inverter_product_id: "fox_ess_h3_plus_125kw",
+  },
+  solution_profiles: {
+    solar_profiles: [{
+      profile_id: "generic_crystalline_pv_v1",
+      version: 1,
+      status: "published",
+      name: "Generic crystalline PV screening profile",
+      manufacturer: "Generic",
+      model: "Screening assumption",
+      module_technology: "monocrystalline",
+      rated_power_w: 600,
+      module_efficiency_percent: 22,
+      temperature_coefficient_percent_per_c: -0.35,
+      annual_degradation_percent: 0.5,
+      default_dc_ac_ratio: 1.15,
+      source_type: "analyst_assumption",
+      source_label: "Generic screening assumption",
+      source_date: null,
+    }],
+    battery_profiles: [{
+      profile_id: "generic_lfp_ac_2h_v1",
+      version: 1,
+      status: "published",
+      name: "Generic LFP AC 2-hour screening profile",
+      manufacturer: "Generic",
+      model: "Screening assumption",
+      chemistry: "LFP",
+      coupling: "ac",
+      nominal_capacity_kwh_per_unit: 100,
+      continuous_power_kw_per_unit: 50,
+      round_trip_efficiency_percent: 90,
+      power_conversion_efficiency_percent: 95,
+      usable_depth_of_discharge_percent: 90,
+      standby_loss_percent_per_month: 1,
+      annual_capacity_degradation_percent: 2,
+      minimum_units: 1,
+      maximum_units: 10000,
+      source_type: "analyst_assumption",
+      source_label: "Generic screening assumption",
+      source_date: null,
+    }],
+  },
+  default_solution_profile_selection: {
+    solar_profile_id: "generic_crystalline_pv_v1",
+    battery_profile_id: "generic_lfp_ac_2h_v1",
+  },
+  discount_rate: 0.08,
+  annual_value_escalation_rate: 0.025,
+  annual_value_degradation_rate: 0.005,
+  annual_om_fraction_of_capex: 0.015,
+  analysis_term_years: 15,
+};

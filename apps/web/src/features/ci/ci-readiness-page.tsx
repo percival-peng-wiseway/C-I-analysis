@@ -7,11 +7,19 @@ import {
   ciProjectsQueryKey,
   ciSavedDesignQueryKey,
   fetchCiSavedDesign,
+  generateCiDesignCandidates,
   listCiProjects,
-  validateCiDesignCandidates,
   type CiDesignCandidateResult,
   type CiProject,
 } from "@/features/ci/api/ci-projects";
+import {
+  ciDeviceProfileQueryKey,
+  fetchCiDeviceProfile,
+} from "@/features/ci/api/ci-device-profile";
+import {
+  ciProjectEvidenceQueryKey,
+  fetchCiProjectEvidence,
+} from "@/features/ci/api/ci-evidence-intake";
 import {
   ciSavedFeasibilityQueryKey,
   fetchCiSavedFeasibility,
@@ -53,6 +61,7 @@ export function CiReadinessPage() {
       <div className="premium-content mx-auto flex w-full max-w-[1460px] flex-col gap-6">
         {workspace.stage === "evidence" ? (
           <EvidenceWorkspace
+            key={activeProject.project_id}
             onReady={() => {
               queryClient.setQueryData<CiProject[]>(ciProjectsQueryKey, (current = []) => current.map((item) => item.project_id === activeProject.project_id ? { ...item, setup_status: "ready", current_stage: "system_design", updated_at: new Date().toISOString() } : item));
               void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
@@ -62,6 +71,7 @@ export function CiReadinessPage() {
           />
         ) : workspace.stage === "physical_feasibility" ? (
           <PhysicalFeasibilityWorkspace
+            key={activeProject.project_id}
             onBack={() => workspace.setStage("evidence")}
             onValidated={(candidateCount) => {
               queryClient.setQueryData<CiProject[]>(ciProjectsQueryKey, (current = []) => current.map((item) => item.project_id === activeProject.project_id ? { ...item, current_stage: "system_design", design_status: "ready", design_candidate_count: candidateCount, updated_at: new Date().toISOString() } : item));
@@ -71,9 +81,10 @@ export function CiReadinessPage() {
             project={activeProject}
           />
         ) : workspace.stage === "dispatch" ? (
-          <DispatchWorkspace project={activeProject} />
+          <DispatchWorkspace key={activeProject.project_id} project={activeProject} />
         ) : (
           <CiTariffReplay
+            key={activeProject.project_id}
             profileLabel={readiness.data.active_profile_label}
             profileReady={profileReady}
             project={activeProject}
@@ -92,8 +103,10 @@ function EvidenceWorkspace({ onReady, project }: { onReady: () => void; project:
 function PhysicalFeasibilityWorkspace({ onBack, onValidated, project }: { onBack: () => void; onValidated: (candidateCount: number) => void; project: CiProject }) {
   const queryClient = useQueryClient();
   const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
+  const evidence = useQuery({ queryKey: ciProjectEvidenceQueryKey(project.project_id), queryFn: () => fetchCiProjectEvidence(project.project_id) });
+  const deviceProfile = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
   const run = useMutation({
-    mutationFn: ({ designContext, scenarios }: { designContext: Parameters<typeof validateCiDesignCandidates>[2]; scenarios: Parameters<typeof validateCiDesignCandidates>[1] }) => validateCiDesignCandidates(project.project_id, scenarios, designContext),
+    mutationFn: (request: Parameters<typeof generateCiDesignCandidates>[1]) => generateCiDesignCandidates(project.project_id, request),
     onSuccess: (design) => {
       queryClient.setQueryData(ciSavedDesignQueryKey(project.project_id), design);
       onValidated(design.candidate_count);
@@ -102,14 +115,16 @@ function PhysicalFeasibilityWorkspace({ onBack, onValidated, project }: { onBack
     },
   });
   if (project.setup_status !== "ready") {
-    return <ModulePrerequisite description="Record existing equipment, then define added PV and battery ranges plus the technical options after Evidence is complete." project={project} stage="02" title="Physical feasibility" />;
+    return <ModulePrerequisite description="Complete Evidence, then confirm the site-resource assumptions and choose published Solar and Battery profiles." project={project} stage="02" title="Physical feasibility" />;
   }
-  if (savedDesign.isPending) return <PageState title="Loading physical configurations" description="Restoring existing assets, added-capacity ranges and technical options saved to this project." />;
-  if (savedDesign.isError) return <Card><CardHeader><CardTitle as="h2" className="text-xl">Physical feasibility unavailable</CardTitle><CardDescription>The saved technical design could not be loaded safely.</CardDescription></CardHeader><CardContent><Button onClick={onBack} type="button">Return to Evidence</Button></CardContent></Card>;
+  if (savedDesign.isPending || evidence.isPending || deviceProfile.isPending) return <PageState title="Loading solution generator" description="Restoring the site evidence, profile library and saved solution search space." />;
+  if (savedDesign.isError || evidence.isError || deviceProfile.isError) return <Card><CardHeader><CardTitle as="h2" className="text-xl">Physical feasibility unavailable</CardTitle><CardDescription>The site evidence, profiles or saved technical design could not be loaded safely.</CardDescription></CardHeader><CardContent><Button onClick={onBack} type="button">Return to Evidence</Button></CardContent></Card>;
   const generatedDesign = run.data ?? savedDesign.data;
+  const activeDeviceProfile = deviceProfile.data.profile ?? deviceProfile.data.suggested_profile;
+  const siteAddress = evidence.data.status === "saved" ? evidence.data.evidence?.inspection.bill.site_address ?? null : null;
   return (
     <>
-      <CiScenarioBuilder error={run.error instanceof Error ? run.error.message : null} initialContext={run.data?.design_context ?? savedDesign.data?.design_context ?? undefined} initialSolutions={run.data?.candidates ?? savedDesign.data?.candidates} isPending={run.isPending} onSubmit={(scenarios, designContext) => run.mutate({ scenarios, designContext })} />
+      <CiScenarioBuilder deviceProfile={activeDeviceProfile} error={run.error instanceof Error ? run.error.message : null} initialContext={run.data?.design_context ?? savedDesign.data?.design_context ?? undefined} initialSolutions={run.data?.candidates ?? savedDesign.data?.candidates} isPending={run.isPending} onSubmit={(request) => run.mutate(request)} siteAddress={siteAddress} />
       {generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}
     </>
   );
@@ -133,6 +148,7 @@ function GeneratedDesignSummary({ design }: { design: CiDesignCandidateResult })
         <RangeSummary label="Added battery" unit="kWh" values={battery} />
         <RangeSummary label="Hybrid inverter / PCS" unit="kW AC" values={inverter} />
       </dl>
+      {design.generation_summary ? <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 rounded-lg border border-emerald-200 bg-white/80 px-4 py-2 text-xs text-emerald-950"><span>{design.generation_summary.requested_count} requested</span><span>{design.generation_summary.deduplicated_count} duplicate sizes removed</span><span>{design.generation_summary.rejected_count} rejected by profile or site constraints</span></div> : null}
     </section>
   );
 }

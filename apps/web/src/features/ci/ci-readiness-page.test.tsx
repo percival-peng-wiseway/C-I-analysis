@@ -56,13 +56,18 @@ const generatedDesign = {
 };
 
 const deviceProfileFixture = {
-  contract_version: "ci_device_profile_v2", profile_id: "workspace_device_profile", currency: "AUD", tax_basis: "gst_exclusive", pv_cost_aud_per_kwp_dc: 530, battery_cost_aud_per_kwh: 413, inverter_cost_aud_per_kw_ac: 80,
+  contract_version: "ci_device_profile_v3", profile_id: "workspace_device_profile", currency: "AUD", tax_basis: "gst_exclusive", pv_cost_aud_per_kwp_dc: 530, battery_cost_aud_per_kwh: 413, inverter_cost_aud_per_kw_ac: 80,
   equipment_catalog: {
     pv_products: [{ product_id: "astronergy_astro_n7_600_630w", manufacturer: "Astronergy", model: "ASTRO N7 600–630W", rated_power_min_w: 600, rated_power_max_w: 630, capital_cost_aud_per_kwp_dc: 530, replacement_cost_aud_per_kwp_dc: 530, annual_om_aud: 0 }],
     battery_products: [{ product_id: "fox_ess_cq7_ci", manufacturer: "Fox ESS", model: "CQ7 C&I", chemistry: "LFP", module_capacity_kwh: 7, cost_curve: [{ quantity: 30, capital_cost_aud: 77578, replacement_cost_aud: 57456, annual_om_aud: 0 }, { quantity: 36, capital_cost_aud: 91866, replacement_cost_aud: 69660, annual_om_aud: 0 }, { quantity: 42, capital_cost_aud: 106154, replacement_cost_aud: 81864, annual_om_aud: 0 }] }],
     inverter_products: [{ product_id: "fox_ess_h3_plus_125kw", manufacturer: "Fox ESS", model: "H3 Plus Hybrid Inverter", sizing_unit_kw_ac: 125, cost_curve: [{ capacity_kw_ac: 80, capital_cost_aud: 9000, replacement_cost_aud: 9000, annual_om_aud: 0 }, { capacity_kw_ac: 100, capital_cost_aud: 9500, replacement_cost_aud: 9500, annual_om_aud: 0 }, { capacity_kw_ac: 125, capital_cost_aud: 10000, replacement_cost_aud: 10000, annual_om_aud: 0 }] }],
   },
   default_equipment_selection: { pv_product_id: "astronergy_astro_n7_600_630w", battery_product_id: "fox_ess_cq7_ci", inverter_product_id: "fox_ess_h3_plus_125kw" },
+  solution_profiles: {
+    solar_profiles: [{ profile_id: "generic_crystalline_pv_v1", version: 1, status: "published", name: "Generic crystalline PV screening profile", manufacturer: "Generic", model: "Screening assumption", module_technology: "monocrystalline", rated_power_w: 600, module_efficiency_percent: 22, temperature_coefficient_percent_per_c: -0.35, annual_degradation_percent: 0.5, default_dc_ac_ratio: 1.15, source_type: "analyst_assumption", source_label: "Generic screening assumption", source_date: null }],
+    battery_profiles: [{ profile_id: "generic_lfp_ac_2h_v1", version: 1, status: "published", name: "Generic LFP AC 2-hour screening profile", manufacturer: "Generic", model: "Screening assumption", chemistry: "LFP", coupling: "ac", nominal_capacity_kwh_per_unit: 100, continuous_power_kw_per_unit: 50, round_trip_efficiency_percent: 90, power_conversion_efficiency_percent: 95, usable_depth_of_discharge_percent: 90, standby_loss_percent_per_month: 1, annual_capacity_degradation_percent: 2, minimum_units: 1, maximum_units: 10000, source_type: "analyst_assumption", source_label: "Generic screening assumption", source_date: null }],
+  },
+  default_solution_profile_selection: { solar_profile_id: "generic_crystalline_pv_v1", battery_profile_id: "generic_lfp_ac_2h_v1" },
   discount_rate: .08, annual_value_escalation_rate: .025, annual_value_degradation_rate: .005, annual_om_fraction_of_capex: .015, analysis_term_years: 15,
 };
 
@@ -132,7 +137,10 @@ describe("C&I project workspace", () => {
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Device profile" })).toBeTruthy();
     expect(screen.queryByText("Device profile could not be loaded.")).toBeNull();
-    expect(await screen.findByText("Supported equipment")).toBeTruthy();
+    expect(await screen.findByText("Solution profile library")).toBeTruthy();
+    expect(screen.getByText("Generic crystalline PV screening profile")).toBeTruthy();
+    await user.click(screen.getByRole("tab", { name: "Equipment & finance" }));
+    expect(await screen.findByRole("heading", { name: "Equipment & finance" })).toBeTruthy();
     expect((screen.getByLabelText("Per kWp DC capital") as HTMLInputElement).value).toBe("530");
     expect((screen.getByLabelText("30 capital") as HTMLInputElement).value).toBe("77578");
     expect((screen.getByLabelText("125 kW capital") as HTMLInputElement).value).toBe("10000");
@@ -146,9 +154,28 @@ describe("C&I project workspace", () => {
     renderPage();
     expect(await screen.findByRole("region", { name: "Evidence sources" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Next: Solution Generator" }));
-    expect(screen.getByRole("heading", { name: "Build the system search space" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Build the solution search space" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Previous: Evidence" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next: Scenario Analysis" })).toBeTruthy();
+  });
+
+  it("resets the generator form when switching projects", async () => {
+    const user = userEvent.setup();
+    const first = { ...project, setup_status: "ready", project_id: "project-1" };
+    const second = { ...project, setup_status: "ready", project_id: "project-2", display_name: "Warehouse two" };
+    mockApi([first, second]);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "02 Solution Generator" }));
+    const firstPvMinimum = screen.getAllByRole("spinbutton", { name: "Minimum" })[0] as HTMLInputElement;
+    await user.clear(firstPvMinimum);
+    await user.type(firstPvMinimum, "321");
+    expect(firstPvMinimum.value).toBe("321");
+
+    await user.click(screen.getByRole("button", { name: "Open project Warehouse two" }));
+    await user.click(screen.getByRole("button", { name: "02 Solution Generator" }));
+    expect((screen.getAllByRole("spinbutton", { name: "Minimum" })[0] as HTMLInputElement).value).toBe("100");
   });
 
   it("keeps later templates accessible when Dispatch prerequisites are missing", async () => {

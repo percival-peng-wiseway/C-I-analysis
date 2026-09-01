@@ -747,17 +747,29 @@ def _energy_totals(
             100 * len(active_days) / len(measured_days) if measured_days else 0.0,
             6,
         ),
-        "grid_emissions_factor_kg_co2e_per_kwh": round(emissions_factor, 6),
-        "baseline_scope_2_emissions_t_co2e": round(baseline_emissions, 6),
-        "post_system_scope_2_emissions_t_co2e": round(
-            post_system_emissions, 6
-        ),
-        "avoided_scope_2_emissions_t_co2e": round(avoided_emissions, 6),
-        "scope_2_emissions_reduction_percent": round(
-            100 * avoided_emissions / baseline_emissions
-            if baseline_emissions > 0
-            else 0.0,
-            6,
+        **(
+            {
+                "grid_emissions_factor_kg_co2e_per_kwh": round(
+                    emissions_factor, 6
+                ),
+                "baseline_scope_2_emissions_t_co2e": round(
+                    baseline_emissions, 6
+                ),
+                "post_system_scope_2_emissions_t_co2e": round(
+                    post_system_emissions, 6
+                ),
+                "avoided_scope_2_emissions_t_co2e": round(
+                    avoided_emissions, 6
+                ),
+                "scope_2_emissions_reduction_percent": round(
+                    100 * avoided_emissions / baseline_emissions
+                    if baseline_emissions > 0
+                    else 0.0,
+                    6,
+                ),
+            }
+            if emissions_factor > 0
+            else {}
         ),
     }
 

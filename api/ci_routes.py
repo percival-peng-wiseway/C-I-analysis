@@ -127,6 +127,7 @@ from solar_battery.ci_scenario_analysis import (
     analyze_ci_three_case_comparison,
     validate_ci_design_candidates,
 )
+from solar_battery.ci_solution_generator import generate_ci_solutions
 from solar_battery.ci_tariff_analysis import (
     CiTariffAnalysisError,
     MAX_CI_NEM12_UPLOAD_BYTES,
@@ -170,7 +171,9 @@ def put_ci_device_profile(
         with session_factory() as session:
             with session.begin():
                 return save_ci_device_profile(
-                    session, actor=actor, profile=payload.model_dump()
+                    session,
+                    actor=actor,
+                    profile=payload.model_dump(exclude_none=True),
                 )
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
@@ -553,6 +556,8 @@ def post_ci_design_candidates(
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
+        device_profile = None
+        device_profile_digest = None
         with session_factory() as session:
             project = require_ci_project(session, project_id=project_id, actor=actor)
             if project.setup_status != "ready":
@@ -560,16 +565,48 @@ def post_ci_design_candidates(
                     "ci_project_setup_required",
                     "Complete Setup & catalog before validating system designs.",
                 )
-        validated = validate_ci_design_candidates(payload.scenarios)
-        design_context = validate_ci_design_context(
-            payload.design_context
-            if payload.design_context is not None
-            else legacy_ci_design_context(list(validated["candidates"]))
-        )
+            if payload.generation_request is not None:
+                device_state = ci_device_profile_state(session, actor=actor)
+                device_profile = (
+                    device_state["profile"]
+                    if device_state["status"] == "ready"
+                    else device_state["suggested_profile"]
+                )
+                device_profile_digest = (
+                    str(device_state["profile_sha256"])
+                    if device_state["status"] == "ready"
+                    else None
+                )
+        generation_summary = None
+        if payload.generation_request is not None:
+            if not isinstance(device_profile, dict):
+                raise CiProjectError(
+                    "ci_solution_generation_invalid",
+                    "A device profile is required to generate solutions.",
+                )
+            generated = generate_ci_solutions(
+                payload.generation_request.model_dump(),
+                device_profile=device_profile,
+                device_profile_sha256=device_profile_digest,
+            )
+            validated = validate_ci_design_candidates(generated["candidates"])
+            design_context = validate_ci_design_context(
+                generated["design_context"]
+            )
+            generation_summary = generated["generation_summary"]
+        else:
+            validated = validate_ci_design_candidates(payload.scenarios)
+            design_context = validate_ci_design_context(
+                payload.design_context
+                if payload.design_context is not None
+                else legacy_ci_design_context(list(validated["candidates"]))
+            )
         result = {
             **validated,
             "design_context": design_context,
         }
+        if generation_summary is not None:
+            result["generation_summary"] = generation_summary
         with session_factory() as session:
             with session.begin():
                 record_ci_design_candidates(
