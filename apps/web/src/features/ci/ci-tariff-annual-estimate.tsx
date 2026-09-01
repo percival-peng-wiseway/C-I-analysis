@@ -216,7 +216,7 @@ function AvailableAnnualBill({ estimate }: { estimate: Extract<CiAnnualBillEstim
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-slate-800 px-5 py-4 text-white">
           <div>
             <strong className="text-lg">Expected bill (baseline)</strong>
-            <p className="mt-1 text-xs text-slate-300">Indicative internal estimate · bill-derived interval scaling</p>
+            <p className="mt-1 text-xs text-slate-300">Indicative estimate · ex GST · not a contractual quote</p>
           </div>
           <div className="text-left sm:text-right">
             <span className="block text-xs text-slate-300">Total bill (excl. GST)</span>
@@ -251,14 +251,6 @@ function AvailableAnnualBill({ estimate }: { estimate: Extract<CiAnnualBillEstim
             return group ? <AnnualEstimateGroup key={group.key} group={group} /> : null;
           })}
         </div>
-
-        <WarningMessage>{estimate.warning}</WarningMessage>
-        {estimate.assumptions.length ? (
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <strong className="text-sm text-slate-800">Estimate assumptions and limits</strong>
-            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-slate-600">{estimate.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>
-          </div>
-        ) : null}
       </div>
     </section>
   );

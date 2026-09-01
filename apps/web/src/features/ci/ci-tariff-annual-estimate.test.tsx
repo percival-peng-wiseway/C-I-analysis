@@ -129,7 +129,10 @@ it("shows a reconciled bill-derived annual estimate with category detail and exc
   expect(screen.getByText("-$20.00")).toBeTruthy();
   expect(screen.getByText("Excluded — recurrence not verified")).toBeTruthy();
   expect(screen.getByText("Not annualised")).toBeTruthy();
-  expect(screen.getByText(/not a contractual tariff replay/i)).toBeTruthy();
+  expect(screen.getByText(/not a contractual quote/i)).toBeTruthy();
+  expect(screen.queryByText("Estimate assumptions and limits")).toBeNull();
+  expect(screen.queryByText(billDerivedEstimate.warning)).toBeNull();
+  expect(screen.queryByText("The most recent complete 365 NEM12 E1 days represent annual site import.")).toBeNull();
 });
 
 it("fails closed when detected category detail and annual estimation are unavailable", () => {
