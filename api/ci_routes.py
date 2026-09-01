@@ -40,6 +40,7 @@ from solar_battery.ci_annual_financial_simulation import (
 from solar_battery.ci_evidence_intake import (
     CiEvidenceIntakeError,
     MAX_CI_BILL_UPLOAD_BYTES,
+    enrich_ci_evidence_tariff_summary,
     extract_ci_site_address,
     inspect_ci_evidence_pair,
 )
@@ -315,13 +316,13 @@ def get_ci_project_evidence(
         bill_result = inspection.get("bill") if isinstance(inspection, dict) else None
         if (
             isinstance(inspection, dict)
-            and inspection.get("contract_version") == "ci_evidence_intake_v7"
+            and inspection.get("contract_version")
+            in {"ci_evidence_intake_v7", "ci_evidence_intake_v8"}
             and isinstance(bill_result, dict)
-            and "site_address" not in bill_result
         ):
             try:
                 with session_factory() as session:
-                    bill_source, _ = load_ci_project_evidence_sources(
+                    bill_source, interval_source = load_ci_project_evidence_sources(
                         session,
                         object_store,
                         project_id=project_id,
@@ -329,18 +330,26 @@ def get_ci_project_evidence(
                     )
             except CiProjectError:
                 return state
+            upgraded = dict(inspection)
+            if "site_address" not in bill_result:
+                try:
+                    site_address = extract_ci_site_address(bill_source.data)
+                except CiEvidenceIntakeError:
+                    site_address = None
+                if site_address is not None:
+                    upgraded["contract_version"] = "ci_evidence_intake_v8"
+                    upgraded["bill"] = {**bill_result, "site_address": site_address}
+                    upgraded["privacy"] = {
+                        **dict(inspection.get("privacy", {})),
+                        "customer_identifiers_returned": True,
+                    }
             try:
-                site_address = extract_ci_site_address(bill_source.data)
+                upgraded = enrich_ci_evidence_tariff_summary(
+                    upgraded, interval_source.data
+                )
             except CiEvidenceIntakeError:
-                site_address = None
-            if site_address is not None:
-                upgraded = dict(inspection)
-                upgraded["contract_version"] = "ci_evidence_intake_v8"
-                upgraded["bill"] = {**bill_result, "site_address": site_address}
-                upgraded["privacy"] = {
-                    **dict(inspection.get("privacy", {})),
-                    "customer_identifiers_returned": True,
-                }
+                pass
+            if upgraded != inspection:
                 with session_factory() as session:
                     with session.begin():
                         update_ci_project_evidence_inspection(

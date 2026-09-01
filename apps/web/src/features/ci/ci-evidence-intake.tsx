@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, CircleAlert, FileSearch, FileText, ImagePlus, MapPin, Navigation, ReceiptText, RefreshCw, TableProperties, Trash2, UploadCloud, type LucideIcon } from "lucide-react";
+import { ChevronDown, CircleAlert, FileSearch, FileText, MapPin, Navigation, ReceiptText, RefreshCw, TableProperties, UploadCloud, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -14,15 +14,10 @@ import {
   type CiEvidenceIntakeResult,
   type CiProjectEvidenceState,
 } from "@/features/ci/api/ci-evidence-intake";
-import {
-  ciProjectSiteMaterialQueryKey,
-  deleteCiProjectSitePhoto,
-  fetchCiProjectSiteMaterial,
-  uploadCiProjectSitePhoto,
-} from "@/features/ci/api/ci-site-material";
 import { CiAnnualDemandHeatmap } from "@/features/ci/ci-annual-demand-heatmap";
 import { CiBillBreakdown } from "@/features/ci/ci-bill-breakdown";
 import { CiNem12LoadProfile } from "@/features/ci/ci-nem12-load-profile";
+import { CiTariffAnnualEstimate } from "@/features/ci/ci-tariff-annual-estimate";
 
 export function CiEvidenceIntake({
   onReady,
@@ -42,10 +37,6 @@ export function CiEvidenceIntake({
   const savedEvidence = useQuery({
     queryKey: ciProjectEvidenceQueryKey(projectId),
     queryFn: () => fetchCiProjectEvidence(projectId),
-  });
-  const siteMaterial = useQuery({
-    queryKey: ciProjectSiteMaterialQueryKey(projectId),
-    queryFn: () => fetchCiProjectSiteMaterial(projectId),
   });
   const inspection = useMutation({
     mutationFn: ({ billFile, billReview, nem12File }: { billFile: File; billReview?: CiBillReviewInput; nem12File: File }) => inspectCiEvidencePair(projectId, billFile, nem12File, undefined, billReview),
@@ -68,20 +59,6 @@ export function CiEvidenceIntake({
       if (result.intake_status === "ready_for_profile_review") onReady();
     },
   });
-  const siteUpload = useMutation({
-    mutationFn: async (files: File[]) => {
-      for (const file of files) await uploadCiProjectSitePhoto(projectId, file);
-    },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: ciProjectSiteMaterialQueryKey(projectId) });
-    },
-  });
-  const siteDelete = useMutation({
-    mutationFn: (photoId: string) => deleteCiProjectSitePhoto(projectId, photoId),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ciProjectSiteMaterialQueryKey(projectId) });
-    },
-  });
   const resetResult = () => inspection.reset();
   const saved = savedEvidence.data?.status === "saved" ? savedEvidence.data.evidence : null;
   const result = savedReview.data ?? inspection.data ?? (!replacing ? saved?.inspection : undefined);
@@ -92,14 +69,8 @@ export function CiEvidenceIntake({
   const directionsUrl = detectedSiteAddress ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(detectedSiteAddress)}` : null;
   const savedBillName = !replacing ? saved?.files.bill.filename ?? (setupReady ? "Saved to project" : null) : null;
   const savedNem12Name = !replacing ? saved?.files.interval.filename ?? (setupReady ? "Saved to project" : null) : null;
-  const sitePhotos = siteMaterial.data?.photos ?? [];
-  const addSitePhotos = (files: FileList | null) => {
-    const room = Math.max(0, 8 - sitePhotos.length);
-    const additions = Array.from(files ?? [])
-      .filter((file) => ["image/jpeg", "image/png", "image/webp"].includes(file.type))
-      .slice(0, room);
-    if (additions.length) siteUpload.mutate(additions);
-  };
+  const detectedChargeGroups = result?.contract_version === "ci_evidence_intake_v9" ? result.detected_tariff : undefined;
+  const annualBillReadiness = result?.contract_version === "ci_evidence_intake_v9" ? result.annual_bill_estimate : undefined;
 
   return (
     <section className="scroll-mt-20 space-y-4" id="evidence-intake">
@@ -138,17 +109,13 @@ export function CiEvidenceIntake({
           </div>
         </article>
         <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
-          <EvidenceCardHeader icon={ImagePlus} ready={sitePhotos.length > 0} status={siteUpload.isPending ? "Uploading" : sitePhotos.length ? `${sitePhotos.length} saved` : "Optional"} />
-          <h3 className="mt-4 text-sm font-semibold text-slate-950">Site material</h3>
-          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+          <EvidenceCardHeader icon={MapPin} ready={Boolean(detectedSiteAddress)} status={detectedSiteAddress ? "Detected" : result ? "Unavailable" : "From bill"} />
+          <h3 className="mt-4 text-sm font-semibold text-slate-950">Site address</h3>
+          <div className="mt-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
             <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500"><MapPin className="size-3" />Detected address</span>
             {detectedSiteAddress ? <p className="mt-1 text-xs font-medium leading-5 text-slate-800">{detectedSiteAddress}</p> : <p className="mt-1 text-xs leading-5 text-slate-500">No supply address detected from the bill.</p>}
             {directionsUrl ? <a className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-cyan-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-cyan-800 transition hover:bg-cyan-50" href={directionsUrl} rel="noreferrer" target="_blank"><Navigation className="size-3.5" />Directions</a> : null}
           </div>
-          <label className={`mt-3 flex items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-300 bg-cyan-50/40 px-3 py-3 text-xs font-semibold text-cyan-800 ${siteUpload.isPending || sitePhotos.length >= 8 ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-cyan-50"}`}>
-            <UploadCloud className="size-4" />{siteUpload.isPending ? "Saving photos…" : sitePhotos.length >= 8 ? "8 photo limit reached" : "Upload roof photos"}
-            <input accept="image/jpeg,image/png,image/webp" aria-label="Roof and site photos" className="sr-only" disabled={siteUpload.isPending || sitePhotos.length >= 8} multiple onChange={(event) => { addSitePhotos(event.target.files); event.target.value = ""; }} type="file" />
-          </label>
         </article>
       </section>
 
@@ -162,13 +129,6 @@ export function CiEvidenceIntake({
       {savedEvidence.isPending ? <p className="flex items-center gap-2 px-1 text-xs text-muted-foreground"><RefreshCw className="size-3.5 animate-spin" />Restoring saved evidence…</p> : null}
 
       {savedEvidence.isError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"><strong>Saved evidence could not be restored.</strong><p className="mt-1">You can replace the bill and interval files below.</p></div> : null}
-
-      {siteMaterial.isError || siteUpload.error instanceof Error || siteDelete.error instanceof Error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
-          <strong>Site photos could not be updated.</strong>
-          <p className="mt-1">{siteUpload.error instanceof Error ? siteUpload.error.message : siteDelete.error instanceof Error ? siteDelete.error.message : "Refresh the page and try loading the project photos again."}</p>
-        </div>
-      ) : null}
 
       {activeError instanceof Error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
@@ -225,22 +185,7 @@ export function CiEvidenceIntake({
         </div>
       ) : null}
 
-      <section aria-labelledby="site-material-title" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
-          <h2 className="text-lg font-semibold text-slate-950" id="site-material-title">Uploaded roof photos</h2>
-          <Badge variant="outline">{sitePhotos.length}/8 photos</Badge>
-        </div>
-        {sitePhotos.length ? (
-          <div className="grid gap-3 p-5 sm:grid-cols-2 lg:grid-cols-4">
-            {sitePhotos.map((photo) => (
-              <figure className="group overflow-hidden rounded-lg border border-slate-200 bg-slate-50" key={photo.photo_id}>
-                <div className="relative aspect-[4/3] overflow-hidden bg-slate-100"><img alt={`Roof photo ${photo.filename}`} className="size-full object-cover" src={photo.content_url} /><button aria-label={`Remove ${photo.filename}`} className="absolute right-2 top-2 grid size-8 place-items-center rounded-full bg-slate-950/75 text-white opacity-90 hover:bg-red-700 disabled:cursor-wait disabled:opacity-50" disabled={siteDelete.isPending} onClick={() => siteDelete.mutate(photo.photo_id)} type="button"><Trash2 className="size-4" /></button></div>
-                <figcaption className="truncate px-3 py-2 text-xs text-slate-600">{photo.filename} · {formatBytes(photo.size_bytes)}</figcaption>
-              </figure>
-            ))}
-          </div>
-        ) : <p className="px-5 py-8 text-sm text-slate-500">No roof photos uploaded yet. Add JPG, PNG or WebP images from the Site material card above.</p>}
-      </section>
+      <CiTariffAnnualEstimate detectedTariff={detectedChargeGroups} estimate={annualBillReadiness} tariffCode={detectedTariffCode || null} />
     </section>
   );
 }

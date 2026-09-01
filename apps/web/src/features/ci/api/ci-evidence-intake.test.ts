@@ -155,6 +155,102 @@ describe("inspectCiEvidencePair", () => {
     )).resolves.toMatchObject({ nem12: { full_tariff_analysis_ready: false } });
   });
 
+  it("accepts v9 detected invoice groups while withholding annual dollars", async () => {
+    const v9Result = {
+      ...safeResult,
+      contract_version: "ci_evidence_intake_v9",
+      nem12: { ...safeResult.nem12, coverage_start: "2025-01-01", coverage_end: "2026-01-01" },
+      pair_checks: [
+        { code: "site_identity_match", passed: true, severity: "pass", message: "Matched." },
+        { code: "bill_period_covered", passed: true, severity: "pass", message: "Covered." },
+        { code: "invoice_arithmetic", passed: true, severity: "pass", message: "Reconciled." },
+        { code: "bill_review_confirmed", passed: true, severity: "pass", message: "Confirmed." },
+      ],
+      detected_tariff: {
+        status: "category_totals_detected",
+        tariff_code: "LLVT2",
+        tax_basis: "ex_gst",
+        warning: "Category totals are observed; rate labels are derived.",
+        groups: [
+          { key: "fixed", label: "Fixed", items: [{ key: "metering", label: "Metering charges", source_amount_ex_gst_aud: 1, basis_label: "One-day invoice", rate_label: "Derived daily equivalent" }] },
+          { key: "other_usage", label: "Other usage", items: [{ key: "network", label: "Network charges", source_amount_ex_gst_aud: 4, basis_label: "Invoice category total", rate_label: "Rate split unavailable" }] },
+          { key: "energy_import", label: "Energy (Import)", items: [{ key: "energy", label: "Energy charges", source_amount_ex_gst_aud: 5, basis_label: "10 kWh invoice usage", rate_label: "Derived blended rate" }] },
+        ],
+      },
+      annual_bill_estimate: {
+        status: "unavailable",
+        method: "approved_tariff_replay_required",
+        confidence: "unavailable",
+        tariff_code: "LLVT2",
+        coverage_start: "2025-01-01",
+        coverage_end: "2025-12-31",
+        annual_import_kwh: 3650,
+        total_ex_gst_aud: null,
+        customer_facing_permission: false,
+        warning: "Approved tariff replay is required before publishing a dollar result.",
+        assumptions: ["Demand rules must be evidenced."],
+        groups: [],
+      },
+    };
+    const fetcher = async () => new Response(JSON.stringify(v9Result), { status: 200 });
+
+    await expect(inspectCiEvidencePair(
+      "project-1",
+      new File(["bill"], "bill.pdf"),
+      new File(["nem12"], "meter.csv"),
+      fetcher as typeof fetch,
+    )).resolves.toMatchObject({
+      contract_version: "ci_evidence_intake_v9",
+      annual_bill_estimate: {
+        status: "unavailable",
+        method: "approved_tariff_replay_required",
+        total_ex_gst_aud: null,
+      },
+    });
+  });
+
+  it("rejects a v9 annual estimate that claims customer-facing permission", async () => {
+    const unsafeV9 = {
+      ...safeResult,
+      contract_version: "ci_evidence_intake_v9",
+      detected_tariff: { status: "review_required", tariff_code: "LLVT2", tax_basis: "ex_gst", warning: "Review required.", groups: [] },
+      annual_bill_estimate: {
+        status: "unavailable", method: "unavailable", confidence: "unavailable", tariff_code: "LLVT2",
+        coverage_start: null, coverage_end: null, annual_import_kwh: null, total_ex_gst_aud: null,
+        customer_facing_permission: true, warning: "Unavailable.", assumptions: [], groups: [],
+      },
+    };
+    const fetcher = async () => new Response(JSON.stringify(unsafeV9), { status: 200 });
+
+    await expect(inspectCiEvidencePair(
+      "project-1",
+      new File(["bill"], "bill.pdf"),
+      new File(["nem12"], "meter.csv"),
+      fetcher as typeof fetch,
+    )).rejects.toThrow("unsafe or incomplete");
+  });
+
+  it("rejects a v9 annual dollar extrapolation without an approved replay", async () => {
+    const unsafeV9 = {
+      ...safeResult,
+      contract_version: "ci_evidence_intake_v9",
+      detected_tariff: { status: "review_required", tariff_code: "LLVT2", tax_basis: "ex_gst", warning: "Review required.", groups: [] },
+      annual_bill_estimate: {
+        status: "indicative", method: "latest_complete_365_day_usage_with_invoice_category_scaling_v1", confidence: "low", tariff_code: "LLVT2",
+        coverage_start: "2025-01-01", coverage_end: "2025-12-31", annual_import_kwh: 3650, total_ex_gst_aud: 3650,
+        customer_facing_permission: false, warning: "Invoice extrapolation.", assumptions: [], groups: [],
+      },
+    };
+    const fetcher = async () => new Response(JSON.stringify(unsafeV9), { status: 200 });
+
+    await expect(inspectCiEvidencePair(
+      "project-1",
+      new File(["bill"], "bill.pdf"),
+      new File(["nem12"], "meter.csv"),
+      fetcher as typeof fetch,
+    )).rejects.toThrow("unsafe or incomplete");
+  });
+
   it("accepts a safe 30-minute wide interval result without treating it as formal NEM12", async () => {
     const wideResult = {
       ...safeResult,

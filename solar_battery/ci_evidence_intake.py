@@ -8,6 +8,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from pypdf import PdfReader
@@ -20,7 +21,7 @@ from solar_battery.ci_tariff_analysis import (
 from solar_battery.models import CleanedInterval
 
 
-CI_EVIDENCE_INTAKE_CONTRACT_VERSION = "ci_evidence_intake_v8"
+CI_EVIDENCE_INTAKE_CONTRACT_VERSION = "ci_evidence_intake_v9"
 MAX_CI_BILL_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_CI_BILL_PAGES = 20
 
@@ -248,6 +249,21 @@ def inspect_ci_evidence_pair(
     ready = all(bool(item["passed"]) for item in pair_checks)
     quality_counts = interval_data["quality_method_counts"]
     site_address = bill.get("site_address")
+    evidence_checks = {str(item["code"]): bool(item["passed"]) for item in pair_checks}
+    detected_tariff = _detected_tariff_summary(bill)
+    annual_bill_estimate = _annual_bill_estimate(
+        bill,
+        interval_data,
+        evidence_ready=all(
+            evidence_checks.get(code, False)
+            for code in (
+                "site_identity_match",
+                "bill_period_covered",
+                "invoice_arithmetic",
+                "bill_review_confirmed",
+            )
+        ),
+    )
     return {
         "contract_version": CI_EVIDENCE_INTAKE_CONTRACT_VERSION,
         "intake_status": "ready_for_profile_review" if ready else "action_required",
@@ -280,6 +296,8 @@ def inspect_ci_evidence_pair(
         },
         "pair_checks": pair_checks,
         "annual_demand_heatmap": interval_data["annual_demand_heatmap"],
+        "detected_tariff": detected_tariff,
+        "annual_bill_estimate": annual_bill_estimate,
         "next_steps": [
             "Review the extracted invoice and interval-data checks.",
             (
@@ -296,6 +314,279 @@ def inspect_ci_evidence_pair(
             "customer_facing_permission": False,
         },
     }
+
+
+def enrich_ci_evidence_tariff_summary(
+    inspection_result: dict[str, object], nem12_bytes: bytes
+) -> dict[str, object]:
+    """Upgrade a saved v7/v8 inspection without re-parsing its private bill.
+
+    Analyst-confirmed generic invoices must not be silently reinterpreted on read.
+    This enrichment therefore preserves the saved bill fields and only derives the
+    new tariff-category presentation and annual-usage summary from those fields and
+    the already-saved interval source.
+    """
+    bill = inspection_result.get("bill")
+    if not isinstance(bill, dict):
+        raise CiEvidenceIntakeError(
+            "saved_evidence_incomplete",
+            "The saved evidence result does not contain a bill summary.",
+        )
+    interval_data = _parse_ci_setup_interval_data(nem12_bytes)
+    checks = {
+        str(item.get("code")): bool(item.get("passed"))
+        for item in inspection_result.get("pair_checks", [])
+        if isinstance(item, dict)
+    }
+    upgraded = dict(inspection_result)
+    upgraded["contract_version"] = CI_EVIDENCE_INTAKE_CONTRACT_VERSION
+    upgraded["detected_tariff"] = _detected_tariff_summary(bill)
+    upgraded["annual_bill_estimate"] = _annual_bill_estimate(
+        bill,
+        interval_data,
+        evidence_ready=all(
+            checks.get(code, False)
+            for code in (
+                "site_identity_match",
+                "bill_period_covered",
+                "invoice_arithmetic",
+                "bill_review_confirmed",
+            )
+        ),
+    )
+    return upgraded
+
+
+_TARIFF_CATEGORY_SPECS = {
+    "fixed": (
+        ("metering_charges", "Metering charges", "days"),
+    ),
+    "other_usage": (
+        ("network_charges", "Network charges", "days"),
+        ("regulated_charges", "Regulated charges", "import_kwh"),
+        ("environmental_charges", "Environmental charges", "import_kwh"),
+        (
+            "additional_charges",
+            "Additional charges, credits & adjustments",
+            "days",
+        ),
+    ),
+    "energy_import": (
+        ("energy_charges", "Energy charges", "import_kwh"),
+    ),
+}
+
+_TARIFF_GROUP_LABELS = {
+    "fixed": "Fixed",
+    "other_usage": "Other usage",
+    "energy_import": "Energy (Import)",
+}
+
+
+def _detected_tariff_summary(bill: dict[str, Any]) -> dict[str, object]:
+    categories = bill.get("charge_categories_ex_gst_aud")
+    required = {
+        item_key
+        for specs in _TARIFF_CATEGORY_SPECS.values()
+        for item_key, _, _ in specs
+    }
+    category_detail_available = bool(
+        isinstance(categories, dict)
+        and required <= set(categories)
+        and bill.get("invoice_arithmetic_scope") == "charge_categories_and_totals"
+        and all(_is_finite_number(categories.get(item)) for item in required)
+    )
+    tariff_code = (
+        str(bill["network_tariff_code"])
+        if bill.get("network_tariff_code") is not None
+        else None
+    )
+    if not category_detail_available:
+        return {
+            "status": "review_required",
+            "tariff_code": tariff_code,
+            "tax_basis": "ex_gst",
+            "warning": (
+                "The bill identifies a tariff code, but auditable charge-category totals were not detected. "
+                "Rates and line items will remain unavailable until bill evidence is reviewed."
+            ),
+            "groups": [],
+        }
+
+    billing_days = _positive_number(bill.get("billing_days"))
+    consumption_kwh = _positive_number(bill.get("consumption_kwh"))
+    groups: list[dict[str, object]] = []
+    for group_key, specs in _TARIFF_CATEGORY_SPECS.items():
+        items = []
+        for item_key, label, scale_basis in specs:
+            source_amount = float(categories[item_key])
+            items.append(
+                {
+                    "key": item_key,
+                    "label": label,
+                    "source_amount_ex_gst_aud": _round_money(source_amount),
+                    "basis_label": (
+                        f"Observed total for the {int(billing_days)}-day invoice"
+                        if billing_days is not None
+                        else "Observed invoice category total"
+                    ),
+                    "rate_label": _derived_rate_label(
+                        source_amount,
+                        scale_basis=scale_basis,
+                        billing_days=billing_days,
+                        consumption_kwh=consumption_kwh,
+                    ),
+                }
+            )
+        groups.append(
+            {
+                "key": group_key,
+                "label": _TARIFF_GROUP_LABELS[group_key],
+                "items": items,
+            }
+        )
+    return {
+        "status": "category_totals_detected",
+        "tariff_code": tariff_code,
+        "tax_basis": "ex_gst",
+        "warning": (
+            "The tabs show verified invoice category totals. Daily and kWh figures are derived equivalents "
+            "for review, not detected contractual tariff rates or demand rules."
+        ),
+        "groups": groups,
+    }
+
+
+def _annual_bill_estimate(
+    bill: dict[str, Any],
+    interval_data: dict[str, Any],
+    *,
+    evidence_ready: bool,
+) -> dict[str, object]:
+    detected = _detected_tariff_summary(bill)
+    annual_profile = interval_data.get("annual_import_profile")
+    billing_days = _positive_number(bill.get("billing_days"))
+    consumption_kwh = _positive_number(bill.get("consumption_kwh"))
+    tariff_code = detected["tariff_code"]
+
+    unavailable_reason = None
+    if detected["status"] != "category_totals_detected":
+        unavailable_reason = (
+            "A category-level bill breakdown is required before an annual bill can be estimated."
+        )
+    elif not evidence_ready:
+        unavailable_reason = (
+            "The bill/site match, invoice arithmetic, review and bill-period coverage checks must pass first."
+        )
+    elif not isinstance(annual_profile, dict):
+        unavailable_reason = (
+            "Upload at least 365 consecutive complete days of active-import interval data."
+        )
+    elif billing_days is None or consumption_kwh is None:
+        unavailable_reason = (
+            "The bill must contain a positive billing-day count and import consumption."
+        )
+
+    if unavailable_reason is not None:
+        return {
+            "status": "unavailable",
+            "method": "unavailable",
+            "confidence": "unavailable",
+            "tariff_code": tariff_code,
+            "coverage_start": None,
+            "coverage_end": None,
+            "annual_import_kwh": None,
+            "total_ex_gst_aud": None,
+            "customer_facing_permission": False,
+            "warning": unavailable_reason,
+            "assumptions": [],
+            "groups": [],
+        }
+
+    annual_import_kwh = float(annual_profile["import_kwh"])
+    return {
+        "status": "unavailable",
+        "method": "approved_tariff_replay_required",
+        "confidence": "unavailable",
+        "tariff_code": tariff_code,
+        "coverage_start": annual_profile["coverage_start"],
+        "coverage_end": annual_profile["coverage_end"],
+        "annual_import_kwh": round(annual_import_kwh, 3),
+        "total_ex_gst_aud": None,
+        "customer_facing_permission": False,
+        "warning": (
+            "A complete annual import profile is available, but an annual dollar bill is withheld until "
+            "approved retail and network tariff line items, demand rules and bill-period import "
+            "reconciliation are available for a formal interval replay."
+        ),
+        "assumptions": [
+            "The most recent complete 365 consecutive days establish annual import quantity only.",
+            "The network tariff code does not prove the customer's complete retail contract.",
+            "Demand charges require approved monthly windows, ratchets, minimums and kW/kVA rules.",
+            "The interval import for the invoice period must reconcile to billed consumption before replay.",
+            "Public regional or neighbouring-load data cannot authorize a site-specific dollar claim.",
+        ],
+        "groups": [],
+    }
+
+
+def _latest_complete_annual_import_profile(
+    daily_import_kwh: dict[date, float],
+) -> dict[str, object] | None:
+    valid_days = sorted(
+        meter_day
+        for meter_day, amount in daily_import_kwh.items()
+        if _is_finite_number(amount) and float(amount) >= 0
+    )
+    consecutive: list[date] = []
+    latest_window: list[date] | None = None
+    for meter_day in valid_days:
+        if consecutive and meter_day != consecutive[-1] + timedelta(days=1):
+            consecutive = []
+        consecutive.append(meter_day)
+        if len(consecutive) >= 365:
+            latest_window = consecutive[-365:]
+    if latest_window is None:
+        return None
+    return {
+        "method": "latest_complete_365_consecutive_days_v1",
+        "coverage_start": latest_window[0].isoformat(),
+        "coverage_end": latest_window[-1].isoformat(),
+        "day_count": 365,
+        "import_kwh": round(
+            math.fsum(float(daily_import_kwh[item]) for item in latest_window), 6
+        ),
+    }
+
+
+def _derived_rate_label(
+    source_amount: float,
+    *,
+    scale_basis: str,
+    billing_days: float | None,
+    consumption_kwh: float | None,
+) -> str:
+    if scale_basis == "import_kwh" and consumption_kwh is not None:
+        return (
+            f"{source_amount / consumption_kwh * 100:.4f} c/kWh derived category average"
+        )
+    if billing_days is not None:
+        return f"${source_amount / billing_days:,.4f}/day invoice equivalent"
+    return "Rate unavailable from source bill"
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _positive_number(value: object) -> float | None:
+    return float(value) if _is_finite_number(value) and float(value) > 0 else None
+
+
+def _round_money(value: float) -> float:
+    return float(
+        Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
 
 
 def extract_ci_site_address(bill_pdf_bytes: bytes) -> str | None:
@@ -333,6 +624,13 @@ def _parse_ci_setup_interval_data(upload_bytes: bytes) -> dict[str, Any]:
         streams: dict[str, dict[date, list[float]]] = parsed_nem12["streams"]
         aligned_stream_ids = set(parsed_nem12["aligned_stream_ids"])
         complete_stream_set = aligned_stream_ids == {"E1", "B1", "Q1", "K1"}
+        annual_import_profile = _latest_complete_annual_import_profile(
+            {
+                meter_day: math.fsum(values)
+                for meter_day, values in streams["E1"].items()
+                if len(values) == 288
+            }
+        )
         return {
             "input_format": "nem12_standard",
             "nmi": parsed_nem12["nmi"],
@@ -358,6 +656,7 @@ def _parse_ci_setup_interval_data(upload_bytes: bytes) -> dict[str, Any]:
                 streams["E1"],
                 streams["Q1"] if "Q1" in aligned_stream_ids else None,
             ),
+            "annual_import_profile": annual_import_profile,
         }
     return _parse_wide_interval_csv(text)
 
@@ -383,6 +682,16 @@ def _parse_wide_interval_csv(text: str) -> dict[str, Any]:
         for label in ("E", "B", "Q", "K", "kWh", "kW", "kVA", "PowerFactor")
         if label.lower() in headings
     ]
+    rows_by_day: dict[date, list[datetime]] = {}
+    for timestamp in timestamps:
+        rows_by_day.setdefault(timestamp.date(), []).append(timestamp)
+    daily_import_kwh: dict[date, float] = {}
+    for meter_day, day_rows in sorted(rows_by_day.items()):
+        day_kw = [readings[item]["kw"] for item in day_rows]
+        if len(day_rows) == 48 and all(value is not None for value in day_kw):
+            daily_import_kwh[meter_day] = math.fsum(
+                float(value) * 0.5 for value in day_kw if value is not None
+            )
     return {
         "input_format": "wide_interval_30_minute",
         "nmi": next(iter(nmis)),
@@ -407,6 +716,9 @@ def _parse_wide_interval_csv(text: str) -> dict[str, Any]:
         ),
         "interval_message": "Thirty-minute measurements are preserved at their source resolution; they are not upsampled into 15-minute billing demand.",
         "annual_demand_heatmap": heatmap,
+        "annual_import_profile": _latest_complete_annual_import_profile(
+            daily_import_kwh
+        ),
     }
 
 

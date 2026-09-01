@@ -9,6 +9,7 @@ from solar_battery import ci_evidence_intake
 from solar_battery.ci_evidence_intake import (
     _annual_demand_heatmap,
     _wide_interval_datetime,
+    enrich_ci_evidence_tariff_summary,
     inspect_ci_evidence_pair,
 )
 from tests.durable_test_helpers import create_test_client, sqlite_url_for_path
@@ -95,6 +96,28 @@ def _nem12_bytes(
     return ("\n".join(rows) + "\n").encode()
 
 
+def _annual_nem12_bytes(nmi: str = "SYNTH00001") -> bytes:
+    rows = ["100,NEM12,202601060000,SYNTHETIC"]
+    values = ",".join(["1.0"] * 288)
+    reactive = ",".join(["0.75"] * 288)
+    zeros = ",".join(["0.0"] * 288)
+    start = date(2025, 1, 6)
+    for register, unit, intervals in (
+        ("B1", "kWh", zeros),
+        ("E1", "kWh", values),
+        ("K1", "kVArh", zeros),
+        ("Q1", "kVArh", reactive),
+    ):
+        rows.append(
+            f"200,{nmi},B1E1K1Q1,{register},{register},N1,METER1,{unit},5"
+        )
+        for offset in range(365):
+            meter_day = start + timedelta(days=offset)
+            rows.append(f"300,{meter_day:%Y%m%d},{intervals},A,,,")
+    rows.append("900")
+    return ("\n".join(rows) + "\n").encode()
+
+
 def _wide_30_minute_bytes() -> bytes:
     headings = [
         "NMI", "Meter", "Period", "ReadingDateTime", "E", "B", "Q", "K",
@@ -118,7 +141,7 @@ def test_evidence_intake_matches_bill_and_nem12_and_returns_only_the_site_addres
 
     result = inspect_ci_evidence_pair(b"synthetic-pdf", _nem12_bytes())
 
-    assert result["contract_version"] == "ci_evidence_intake_v8"
+    assert result["contract_version"] == "ci_evidence_intake_v9"
     assert result["intake_status"] == "ready_for_profile_review"
     assert result["bill"]["network_tariff_code"] == "LLVT2"
     assert result["bill"]["total_inc_gst_aud"] == 46.20
@@ -165,6 +188,76 @@ def test_evidence_intake_matches_bill_and_nem12_and_returns_only_the_site_addres
     }
     assert "nmi" not in result["bill"]
     assert all(check["passed"] for check in result["pair_checks"])
+    assert result["detected_tariff"]["status"] == "category_totals_detected"
+    assert [group["key"] for group in result["detected_tariff"]["groups"]] == [
+        "fixed",
+        "other_usage",
+        "energy_import",
+    ]
+    assert result["annual_bill_estimate"]["status"] == "unavailable"
+
+
+def test_evidence_intake_withholds_annual_dollars_without_approved_tariff_replay(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ci_evidence_intake, "_extract_pdf_text", lambda _: BILL_TEXT)
+
+    result = inspect_ci_evidence_pair(b"synthetic-pdf", _annual_nem12_bytes())
+
+    estimate = result["annual_bill_estimate"]
+    assert estimate["status"] == "unavailable"
+    assert estimate["method"] == "approved_tariff_replay_required"
+    assert estimate["confidence"] == "unavailable"
+    assert estimate["coverage_start"] == "2025-01-06"
+    assert estimate["coverage_end"] == "2026-01-05"
+    assert estimate["annual_import_kwh"] == 105_120.0
+    assert estimate["total_ex_gst_aud"] is None
+    assert estimate["customer_facing_permission"] is False
+    assert estimate["groups"] == []
+    assert "Public regional" in " ".join(estimate["assumptions"])
+
+
+def test_saved_v8_evidence_can_be_enriched_without_reinterpreting_the_bill(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ci_evidence_intake, "_extract_pdf_text", lambda _: BILL_TEXT)
+    original = inspect_ci_evidence_pair(b"synthetic-pdf", _annual_nem12_bytes())
+    saved_v8 = {
+        key: value
+        for key, value in original.items()
+        if key not in {"detected_tariff", "annual_bill_estimate"}
+    }
+    saved_v8["contract_version"] = "ci_evidence_intake_v8"
+
+    upgraded = enrich_ci_evidence_tariff_summary(
+        saved_v8, _annual_nem12_bytes()
+    )
+
+    assert upgraded["contract_version"] == "ci_evidence_intake_v9"
+    assert upgraded["bill"] == saved_v8["bill"]
+    assert upgraded["annual_bill_estimate"]["method"] == (
+        "approved_tariff_replay_required"
+    )
+    assert upgraded["annual_bill_estimate"]["total_ex_gst_aud"] is None
+
+
+def test_annual_import_profile_selects_latest_365_days_and_rejects_gaps() -> None:
+    leap_start = date(2024, 1, 1)
+    leap_year = {
+        leap_start + timedelta(days=offset): 100.0 + offset
+        for offset in range(366)
+    }
+
+    profile = ci_evidence_intake._latest_complete_annual_import_profile(leap_year)
+
+    assert profile is not None
+    assert profile["coverage_start"] == "2024-01-02"
+    assert profile["coverage_end"] == "2024-12-31"
+    assert profile["day_count"] == 365
+
+    with_gap = dict(leap_year)
+    del with_gap[date(2024, 7, 1)]
+    assert ci_evidence_intake._latest_complete_annual_import_profile(with_gap) is None
 
 
 def test_evidence_intake_reports_a_site_mismatch_without_echoing_identifiers(monkeypatch) -> None:
@@ -208,6 +301,8 @@ def test_generic_text_bill_is_prefilled_but_requires_one_analyst_confirmation(
     assert first_pass["bill"]["review_status"] == "confirmation_required"
     assert first_pass["bill"]["site_identity_status"] == "extracted"
     assert first_pass["bill"]["site_address"] == "25 Test Street Melbourne VIC 3000"
+    assert first_pass["detected_tariff"]["status"] == "review_required"
+    assert first_pass["annual_bill_estimate"]["status"] == "unavailable"
     assert "SYNTH00001" not in str(first_pass)
 
     confirmed = inspect_ci_evidence_pair(
@@ -219,6 +314,8 @@ def test_generic_text_bill_is_prefilled_but_requires_one_analyst_confirmation(
     assert confirmed["intake_status"] == "ready_for_profile_review"
     assert confirmed["bill"]["review_status"] == "analyst_confirmed"
     assert confirmed["bill"]["invoice_arithmetic_scope"] == "invoice_totals_only"
+    assert confirmed["detected_tariff"]["status"] == "review_required"
+    assert confirmed["annual_bill_estimate"]["status"] == "unavailable"
     assert all(item["passed"] for item in confirmed["pair_checks"])
 
 

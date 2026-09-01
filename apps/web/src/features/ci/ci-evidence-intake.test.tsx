@@ -16,7 +16,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   const user = userEvent.setup();
   const onUseNem12 = vi.fn();
   const inspectionResult = {
-    contract_version: "ci_evidence_intake_v8",
+    contract_version: "ci_evidence_intake_v9",
     intake_status: "ready_for_profile_review",
     bill: {
       fingerprint: "abc123",
@@ -35,7 +35,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
       consumption_kwh: 100,
       highest_metered_demand_kva: 20,
       power_factor_at_highest_demand: 0.9,
-      charge_categories_ex_gst_aud: {},
+      charge_categories_ex_gst_aud: { energy_charges: 30, network_charges: 40, regulated_charges: 8, environmental_charges: 5, metering_charges: 7 },
       subtotal_ex_gst_aud: 90,
       gst_aud: 9,
       total_inc_gst_aud: 99,
@@ -56,7 +56,12 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
       quality_method_counts: { A: 1400 },
       quality_override_count: 0,
     },
-    pair_checks: [{ code: "site_identity_match", passed: true, severity: "pass", message: "The bill and NEM12 identify the same site." }],
+    pair_checks: [
+      { code: "site_identity_match", passed: true, severity: "pass", message: "The bill and NEM12 identify the same site." },
+      { code: "bill_period_covered", passed: true, severity: "pass", message: "The bill period is covered." },
+      { code: "invoice_arithmetic", passed: true, severity: "pass", message: "Invoice totals reconcile." },
+      { code: "bill_review_confirmed", passed: true, severity: "pass", message: "Bill review is confirmed." },
+    ],
     annual_demand_heatmap: {
       metric: "measured_apparent_demand",
       source_streams: ["E1", "Q1"],
@@ -71,28 +76,37 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
         { year: 2026, coverage_start: "2026-01-01", coverage_end: "2026-03-31", day_count: 90, complete_calendar_year: false, interval_count: 90 * 96, expected_interval_count: 90 * 96, missing_interval_count: 0, maximum_interval_demand: 15, average_interval_demand: 8, days: Array.from({ length: 90 }, (_, index) => ({ date: new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10), interval_demand: Array(96).fill(8) })) },
       ],
     },
+    detected_tariff: {
+      status: "category_totals_detected",
+      tariff_code: "LLVT2",
+      tax_basis: "ex_gst",
+      warning: "Category amounts are detected from the bill; displayed blended rates are derived, not approved tariff rates.",
+      groups: [
+        { key: "fixed", label: "Fixed", items: [{ key: "metering_charges", label: "Metering charges", source_amount_ex_gst_aud: 7, basis_label: "31-day invoice period", rate_label: "Derived daily equivalent" }] },
+        { key: "other_usage", label: "Other usage", items: [{ key: "network_charges", label: "Network charges", source_amount_ex_gst_aud: 40, basis_label: "Invoice category total", rate_label: "Demand and usage rate split unavailable" }] },
+        { key: "energy_import", label: "Energy (Import)", items: [{ key: "energy_charges", label: "Energy charges", source_amount_ex_gst_aud: 30, basis_label: "100 kWh invoice consumption", rate_label: "Derived blended rate: 30 c/kWh" }] },
+      ],
+    },
+    annual_bill_estimate: {
+      status: "unavailable",
+      method: "approved_tariff_replay_required",
+      confidence: "unavailable",
+      tariff_code: "LLVT2",
+      coverage_start: "2025-04-01",
+      coverage_end: "2026-03-31",
+      annual_import_kwh: 1200,
+      total_ex_gst_aud: null,
+      customer_facing_permission: false,
+      warning: "Approved tariff and demand evidence are required before publishing an annual dollar result.",
+      assumptions: ["The bill-period interval import must reconcile to billed consumption."],
+      groups: [],
+    },
     next_steps: [],
     privacy: { files_persisted: true, customer_identifiers_returned: true, customer_facing_permission: false },
   };
   let saved = false;
-  let sitePhotos: Array<Record<string, unknown>> = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const pathname = new URL(String(input), "http://local.test").pathname;
-    if (pathname.endsWith("/site-material") && !init?.method) {
-      return new Response(JSON.stringify({ contract_version: "ci_project_site_material_v1", photos: sitePhotos }), { status: 200 });
-    }
-    if (pathname.endsWith("/site-material") && init?.method === "POST") {
-      const photo = {
-        photo_id: "123e4567-e89b-12d3-a456-426614174000",
-        filename: "north-roof.jpg",
-        content_type: "image/jpeg",
-        size_bytes: 4,
-        created_at: "2026-08-19T01:02:03+00:00",
-        content_url: "/api/commercial-industrial/projects/project-1/site-material/123e4567-e89b-12d3-a456-426614174000/content",
-      };
-      sitePhotos = [photo];
-      return new Response(JSON.stringify({ contract_version: "ci_project_site_material_v1", photo }), { status: 201 });
-    }
     if (pathname.endsWith("/evidence-intake") && !init?.method) {
       return new Response(JSON.stringify(saved ? {
         contract_version: "ci_project_evidence_state_v1",
@@ -111,15 +125,15 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   const nem12 = new File(["nem12"], "meter.csv", { type: "text/csv" });
   await user.upload(await screen.findByLabelText("Electricity bill PDF"), new File(["pdf"], "bill.pdf", { type: "application/pdf" }));
   await user.upload(screen.getByLabelText("Matching interval CSV / NEM12"), nem12);
-  await user.upload(screen.getByLabelText("Roof and site photos"), new File(["roof"], "north-roof.jpg", { type: "image/jpeg" }));
-  expect(await screen.findByRole("img", { name: "Roof photo north-roof.jpg" })).toBeTruthy();
-  expect(screen.getByText("north-roof.jpg · 0.0 KB")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Inspect & save" }));
 
   expect(await screen.findByRole("heading", { name: "Bill detected" })).toBeTruthy();
   const directions = screen.getByRole("link", { name: "Directions" });
   expect(directions.getAttribute("href")).toBe("https://www.google.com/maps/dir/?api=1&destination=Unit%204%2C%2018%20Example%20Road%20North%20Sydney%20NSW%202060");
   expect(directions.getAttribute("target")).toBe("_blank");
+  expect(screen.getByRole("heading", { name: "Site address" })).toBeTruthy();
+  expect(screen.queryByLabelText("Roof and site photos")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Uploaded roof photos" })).toBeNull();
   expect(screen.getByText("B1 · E1 · K1 · Q1")).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Detected bill breakdown" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Show breakdown" }));
@@ -145,6 +159,12 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   expect(gradient?.style.background).toContain("#991b1b");
   await user.selectOptions(screen.getByRole("combobox", { name: "Demand heatmap calendar year" }), "2026");
   expect(screen.getByRole("img", { name: "2026 15-minute measured-demand heatmap, E1 and Q1 apparent demand in kVA" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Detected invoice charge groups" })).toBeTruthy();
+  await user.click(screen.getByRole("tab", { name: "Energy (Import)" }));
+  expect(screen.getByRole("table", { name: "Energy (Import) detected invoice charges" })).toBeTruthy();
+  expect(screen.getByText("1,200 kWh")).toBeTruthy();
+  expect(screen.getByText("Withheld pending approved tariff replay")).toBeTruthy();
+  expect(screen.queryByText("$1,060.00")).toBeNull();
   expect(onUseNem12).toHaveBeenCalledWith();
 
   firstView.unmount();
@@ -157,8 +177,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   expect(screen.getByText("meter.csv")).toBeTruthy();
   expect(screen.getByLabelText("Electricity bill PDF")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "15-minute demand heatmap" })).toBeTruthy();
-  expect(await screen.findByRole("img", { name: "Roof photo north-roof.jpg" })).toBeTruthy();
-  expect(screen.getByText("north-roof.jpg · 0.0 KB")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Uploaded roof photos" })).toBeNull();
 });
 
 it("confirms a retailer-neutral bill without adding a company adapter", async () => {
@@ -185,7 +204,6 @@ it("confirms a retailer-neutral bill without adding a company adapter", async ()
   let saved = false;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const pathname = new URL(String(input), "http://local.test").pathname;
-    if (pathname.endsWith("/site-material") && !init?.method) return new Response(JSON.stringify({ contract_version: "ci_project_site_material_v1", photos: [] }), { status: 200 });
     if (!init?.method) return new Response(JSON.stringify(saved ? {
       contract_version: "ci_project_evidence_state_v1", status: "saved",
       evidence: { saved_at: "2026-08-17T01:02:03+00:00", files: { bill: { filename: "agl.pdf", content_type: "application/pdf", size_bytes: 3 }, interval: { filename: "meter.csv", content_type: "text/csv", size_bytes: 5 } }, inspection: baseResult },
