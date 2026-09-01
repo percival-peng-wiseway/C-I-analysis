@@ -18,6 +18,7 @@ BILL_TEXT = """
 Your Business Electricity Tax Invoice 05 Jan 26 - 05 Jan 26
 originenergy.com.au
 NMI SYNTH00001
+Supply address: Unit 4, 18 Example Road North Sydney NSW 2060
 No. of Days 1
 INVOICE SUMMARY
 Energy Charges $10.00
@@ -39,6 +40,7 @@ Network Provider: POWCP | Tariff: LLVT2
 GENERIC_BILL_TEXT = """
 AGL Electricity Tax Invoice
 NMI: SYNTH00001
+Site address: 25 Test Street Melbourne VIC 3000
 Billing Period: 05/01/2026 to 05/01/2026
 Network Tariff Code: LLVT2
 Total electricity usage: 288.000 kWh
@@ -109,17 +111,20 @@ def _wide_30_minute_bytes() -> bytes:
     return ("\n".join(rows) + "\n").encode()
 
 
-def test_evidence_intake_matches_bill_and_nem12_without_returning_identity(monkeypatch) -> None:
+def test_evidence_intake_matches_bill_and_nem12_and_returns_only_the_site_address(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(ci_evidence_intake, "_extract_pdf_text", lambda _: BILL_TEXT)
 
     result = inspect_ci_evidence_pair(b"synthetic-pdf", _nem12_bytes())
 
-    assert result["contract_version"] == "ci_evidence_intake_v7"
+    assert result["contract_version"] == "ci_evidence_intake_v8"
     assert result["intake_status"] == "ready_for_profile_review"
     assert result["bill"]["network_tariff_code"] == "LLVT2"
     assert result["bill"]["total_inc_gst_aud"] == 46.20
     assert result["bill"]["extraction_method"] == "verified_origin_template"
     assert result["bill"]["review_status"] == "not_required"
+    assert result["bill"]["site_address"] == "Unit 4, 18 Example Road North Sydney NSW 2060"
     assert result["nem12"]["stream_ids"] == ["B1", "E1", "K1", "Q1"]
     assert result["nem12"]["input_format"] == "nem12_standard"
     assert result["nem12"]["aligned_stream_ids"] == ["B1", "E1", "K1", "Q1"]
@@ -155,7 +160,7 @@ def test_evidence_intake_matches_bill_and_nem12_without_returning_identity(monke
     ]
     assert result["privacy"] == {
         "files_persisted": False,
-        "customer_identifiers_returned": False,
+        "customer_identifiers_returned": True,
         "customer_facing_permission": False,
     }
     assert "nmi" not in result["bill"]
@@ -202,6 +207,7 @@ def test_generic_text_bill_is_prefilled_but_requires_one_analyst_confirmation(
     assert first_pass["bill"]["network_tariff_code"] == "LLVT2"
     assert first_pass["bill"]["review_status"] == "confirmation_required"
     assert first_pass["bill"]["site_identity_status"] == "extracted"
+    assert first_pass["bill"]["site_address"] == "25 Test Street Melbourne VIC 3000"
     assert "SYNTH00001" not in str(first_pass)
 
     confirmed = inspect_ci_evidence_pair(
@@ -214,6 +220,19 @@ def test_generic_text_bill_is_prefilled_but_requires_one_analyst_confirmation(
     assert confirmed["bill"]["review_status"] == "analyst_confirmed"
     assert confirmed["bill"]["invoice_arithmetic_scope"] == "invoice_totals_only"
     assert all(item["passed"] for item in confirmed["pair_checks"])
+
+
+def test_site_address_extraction_rejects_mailing_and_unlabelled_addresses(monkeypatch) -> None:
+    for bill_text in (
+        "Postal address: PO Box 123 Sydney NSW 2000",
+        "18 Example Road North Sydney NSW 2060",
+    ):
+        monkeypatch.setattr(
+            ci_evidence_intake,
+            "_extract_pdf_text",
+            lambda _, text=bill_text: text,
+        )
+        assert ci_evidence_intake.extract_ci_site_address(b"synthetic-pdf") is None
 
 
 def test_scanned_bill_can_use_request_local_manual_review_without_a_retailer_adapter(

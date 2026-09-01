@@ -1,5 +1,5 @@
 export interface CiEvidenceIntakeResult {
-  contract_version: "ci_evidence_intake_v7";
+  contract_version: "ci_evidence_intake_v7" | "ci_evidence_intake_v8";
   intake_status: "ready_for_profile_review" | "action_required";
   bill: {
     fingerprint: string;
@@ -10,6 +10,7 @@ export interface CiEvidenceIntakeResult {
     missing_fields: string[];
     invoice_arithmetic_scope: "charge_categories_and_totals" | "invoice_totals_only";
     site_identity_status: "extracted" | "missing";
+    site_address?: string | null;
     billing_period_start: string | null;
     billing_period_end: string | null;
     billing_days: number | null;
@@ -65,7 +66,7 @@ export interface CiEvidenceIntakeResult {
   next_steps: string[];
   privacy: {
     files_persisted: true;
-    customer_identifiers_returned: false;
+    customer_identifiers_returned: boolean;
     customer_facing_permission: false;
   };
 }
@@ -193,11 +194,14 @@ function isSafeSavedFile(value: CiSavedEvidenceFile | undefined): boolean {
 }
 
 function isSafePersistedResult(payload: CiEvidenceIntakeResult): boolean {
+  const returnedAddress = typeof payload.bill?.site_address === "string" && payload.bill.site_address.trim().length > 0;
   return !(
-    payload.contract_version !== "ci_evidence_intake_v7" ||
+    !["ci_evidence_intake_v7", "ci_evidence_intake_v8"].includes(payload.contract_version) ||
     !["ready_for_profile_review", "action_required"].includes(payload.intake_status) ||
     payload.privacy?.files_persisted !== true ||
-    payload.privacy?.customer_identifiers_returned !== false ||
+    typeof payload.privacy?.customer_identifiers_returned !== "boolean" ||
+    (payload.contract_version === "ci_evidence_intake_v7" && payload.privacy.customer_identifiers_returned !== false) ||
+    (payload.contract_version === "ci_evidence_intake_v8" && payload.privacy.customer_identifiers_returned !== returnedAddress) ||
     payload.privacy?.customer_facing_permission !== false ||
     !Array.isArray(payload.pair_checks) ||
     !Array.isArray(payload.nem12?.stream_ids) ||
@@ -225,6 +229,7 @@ function isSafeBill(value: CiEvidenceIntakeResult["bill"] | undefined) {
     ["not_required", "confirmation_required", "analyst_confirmed"].includes(value.review_status) &&
     ["charge_categories_and_totals", "invoice_totals_only"].includes(value.invoice_arithmetic_scope) &&
     ["extracted", "missing"].includes(value.site_identity_status) &&
+    (value.site_address === undefined || value.site_address === null || (typeof value.site_address === "string" && value.site_address.trim().length > 0 && value.site_address.length <= 240)) &&
     Array.isArray(value.missing_fields) &&
     optionalFinite(value.billing_days) &&
     optionalFinite(value.consumption_kwh) &&

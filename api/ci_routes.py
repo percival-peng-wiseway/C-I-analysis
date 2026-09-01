@@ -40,6 +40,7 @@ from solar_battery.ci_annual_financial_simulation import (
 from solar_battery.ci_evidence_intake import (
     CiEvidenceIntakeError,
     MAX_CI_BILL_UPLOAD_BYTES,
+    extract_ci_site_address,
     inspect_ci_evidence_pair,
 )
 from solar_battery.ci_design_feasibility import (
@@ -301,13 +302,55 @@ def get_ci_project_evidence(
     project_id: UUID,
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
         with session_factory() as session:
-            return ci_project_evidence_state(
+            state = ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
+        evidence = state.get("evidence")
+        inspection = evidence.get("inspection") if isinstance(evidence, dict) else None
+        bill_result = inspection.get("bill") if isinstance(inspection, dict) else None
+        if (
+            isinstance(inspection, dict)
+            and inspection.get("contract_version") == "ci_evidence_intake_v7"
+            and isinstance(bill_result, dict)
+            and "site_address" not in bill_result
+        ):
+            try:
+                with session_factory() as session:
+                    bill_source, _ = load_ci_project_evidence_sources(
+                        session,
+                        object_store,
+                        project_id=project_id,
+                        actor=actor,
+                    )
+            except CiProjectError:
+                return state
+            try:
+                site_address = extract_ci_site_address(bill_source.data)
+            except CiEvidenceIntakeError:
+                site_address = None
+            if site_address is not None:
+                upgraded = dict(inspection)
+                upgraded["contract_version"] = "ci_evidence_intake_v8"
+                upgraded["bill"] = {**bill_result, "site_address": site_address}
+                upgraded["privacy"] = {
+                    **dict(inspection.get("privacy", {})),
+                    "customer_identifiers_returned": True,
+                }
+                with session_factory() as session:
+                    with session.begin():
+                        update_ci_project_evidence_inspection(
+                            session,
+                            project_id=project_id,
+                            actor=actor,
+                            inspection_result=upgraded,
+                        )
+                evidence["inspection"] = upgraded
+        return state
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 

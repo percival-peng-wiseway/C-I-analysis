@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, CircleAlert, FileSearch, FileText, ImagePlus, ReceiptText, RefreshCw, TableProperties, Trash2, UploadCloud, type LucideIcon } from "lucide-react";
+import { ChevronDown, CircleAlert, FileSearch, FileText, ImagePlus, MapPin, Navigation, ReceiptText, RefreshCw, TableProperties, Trash2, UploadCloud, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -88,6 +88,8 @@ export function CiEvidenceIntake({
   const fullTariffReady = result?.nem12.full_tariff_analysis_ready ?? false;
   const activeError = inspection.error ?? savedReview.error;
   const detectedTariffCode = result?.bill.network_tariff_code?.trim() ?? "";
+  const detectedSiteAddress = result?.bill.site_address?.trim() ?? "";
+  const directionsUrl = detectedSiteAddress ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(detectedSiteAddress)}` : null;
   const savedBillName = !replacing ? saved?.files.bill.filename ?? (setupReady ? "Saved to project" : null) : null;
   const savedNem12Name = !replacing ? saved?.files.interval.filename ?? (setupReady ? "Saved to project" : null) : null;
   const sitePhotos = siteMaterial.data?.photos ?? [];
@@ -138,7 +140,12 @@ export function CiEvidenceIntake({
         <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
           <EvidenceCardHeader icon={ImagePlus} ready={sitePhotos.length > 0} status={siteUpload.isPending ? "Uploading" : sitePhotos.length ? `${sitePhotos.length} saved` : "Optional"} />
           <h3 className="mt-4 text-sm font-semibold text-slate-950">Site material</h3>
-          <label className={`mt-auto flex items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-300 bg-cyan-50/40 px-3 py-3 text-xs font-semibold text-cyan-800 ${siteUpload.isPending || sitePhotos.length >= 8 ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-cyan-50"}`}>
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+            <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500"><MapPin className="size-3" />Detected address</span>
+            {detectedSiteAddress ? <p className="mt-1 text-xs font-medium leading-5 text-slate-800">{detectedSiteAddress}</p> : <p className="mt-1 text-xs leading-5 text-slate-500">No supply address detected from the bill.</p>}
+            {directionsUrl ? <a className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-cyan-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-cyan-800 transition hover:bg-cyan-50" href={directionsUrl} rel="noreferrer" target="_blank"><Navigation className="size-3.5" />Directions</a> : null}
+          </div>
+          <label className={`mt-3 flex items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-300 bg-cyan-50/40 px-3 py-3 text-xs font-semibold text-cyan-800 ${siteUpload.isPending || sitePhotos.length >= 8 ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-cyan-50"}`}>
             <UploadCloud className="size-4" />{siteUpload.isPending ? "Saving photos…" : sitePhotos.length >= 8 ? "8 photo limit reached" : "Upload roof photos"}
             <input accept="image/jpeg,image/png,image/webp" aria-label="Roof and site photos" className="sr-only" disabled={siteUpload.isPending || sitePhotos.length >= 8} multiple onChange={(event) => { addSitePhotos(event.target.files); event.target.value = ""; }} type="file" />
           </label>

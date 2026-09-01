@@ -20,7 +20,7 @@ from solar_battery.ci_tariff_analysis import (
 from solar_battery.models import CleanedInterval
 
 
-CI_EVIDENCE_INTAKE_CONTRACT_VERSION = "ci_evidence_intake_v7"
+CI_EVIDENCE_INTAKE_CONTRACT_VERSION = "ci_evidence_intake_v8"
 MAX_CI_BILL_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_CI_BILL_PAGES = 20
 
@@ -247,6 +247,7 @@ def inspect_ci_evidence_pair(
     ]
     ready = all(bool(item["passed"]) for item in pair_checks)
     quality_counts = interval_data["quality_method_counts"]
+    site_address = bill.get("site_address")
     return {
         "contract_version": CI_EVIDENCE_INTAKE_CONTRACT_VERSION,
         "intake_status": "ready_for_profile_review" if ready else "action_required",
@@ -291,10 +292,20 @@ def inspect_ci_evidence_pair(
         ],
         "privacy": {
             "files_persisted": files_persisted,
-            "customer_identifiers_returned": False,
+            "customer_identifiers_returned": site_address is not None,
             "customer_facing_permission": False,
         },
     }
+
+
+def extract_ci_site_address(bill_pdf_bytes: bytes) -> str | None:
+    """Extract only a labelled Australian supply/site address from a saved bill."""
+    if not bill_pdf_bytes or len(bill_pdf_bytes) > MAX_CI_BILL_UPLOAD_BYTES:
+        raise CiEvidenceIntakeError(
+            "bill_upload_invalid",
+            "The electricity bill PDF is empty or larger than the 10 MB intake limit.",
+        )
+    return _site_address(_extract_pdf_text(bill_pdf_bytes))
 
 
 def _parse_ci_setup_interval_data(upload_bytes: bytes) -> dict[str, Any]:
@@ -747,6 +758,7 @@ def _parse_origin_invoice_text(raw_text: str) -> dict[str, Any]:
         "missing_fields": [],
         "invoice_arithmetic_scope": "charge_categories_and_totals",
         "nmi": nmi,
+        "site_address": _site_address(raw_text),
         "billing_period_start": billing_start.isoformat(),
         "billing_period_end": billing_end.isoformat(),
         "billing_days": days,
@@ -800,6 +812,7 @@ def _parse_generic_invoice_text(raw_text: str) -> dict[str, Any]:
             text,
             r"\b(?:NMI|National\s+Meter(?:ing)?\s+Identifier)\s*[:#-]?\s*([A-Z0-9]{10,11})\b",
         ),
+        "site_address": _site_address(raw_text),
         "billing_period_start": billing_start.isoformat() if billing_start else None,
         "billing_period_end": billing_end.isoformat() if billing_end else None,
         "billing_days": (
@@ -946,6 +959,41 @@ def _generic_retailer(raw_text: str) -> str:
         if re.search(rf"\b{re.escape(retailer)}\b", text, flags=re.IGNORECASE):
             return retailer
     return "Electricity retailer — confirm name"
+
+
+_SITE_ADDRESS_LABEL = re.compile(
+    r"\b(?:electricity\s+)?(?:supply|service|site|premises|property|metering)\s+address\b\s*[:#-]?\s*",
+    flags=re.IGNORECASE,
+)
+_AUSTRALIAN_SITE_ADDRESS = re.compile(
+    r"(?P<address>"
+    r"(?:(?:UNIT|SHOP|LOT|LEVEL|SUITE|FACTORY|TENANCY)\s+[A-Z0-9-]+\s*[,/-]?\s*)?"
+    r"(?:\d{1,6}[A-Z]?(?:\s*[/,-]\s*\d{1,6}[A-Z]?)?)\s+"
+    r"[A-Z0-9][A-Z0-9&'()./\-\s]{1,120}?\s+"
+    r"(?:STREET|ST|ROAD|RD|AVENUE|AVE|DRIVE|DR|COURT|CT|HIGHWAY|HWY|PLACE|PL|"
+    r"LANE|LN|CRESCENT|CRES|BOULEVARD|BLVD|PARADE|PDE|WAY|TERRACE|TCE|CLOSE|CL|"
+    r"CIRCUIT|CCT|ESPLANADE|ESP|GROVE|GR|RISE|SQUARE|SQ)\b"
+    r"[A-Z0-9&'()./\-,\s]{0,80}?\b"
+    r"(?:NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\s+\d{4}\b"
+    r")",
+    flags=re.IGNORECASE,
+)
+
+
+def _site_address(raw_text: str) -> str | None:
+    """Return a labelled street address and reject mailing-address guesswork."""
+    if not raw_text:
+        return None
+    text = re.sub(r"[\t\r\n]+", " ", raw_text)
+    text = re.sub(r"\s+", " ", text).strip()
+    for label in _SITE_ADDRESS_LABEL.finditer(text):
+        candidate = _AUSTRALIAN_SITE_ADDRESS.match(text, label.end())
+        if candidate is None:
+            continue
+        address = re.sub(r"\s+", " ", candidate.group("address")).strip(" ,.-")
+        if "PO BOX" not in address.upper() and len(address) <= 240:
+            return address
+    return None
 
 
 def _optional_match(text: str, pattern: str) -> str | None:

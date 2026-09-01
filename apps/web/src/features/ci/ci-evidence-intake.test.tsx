@@ -16,7 +16,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   const user = userEvent.setup();
   const onUseNem12 = vi.fn();
   const inspectionResult = {
-    contract_version: "ci_evidence_intake_v7",
+    contract_version: "ci_evidence_intake_v8",
     intake_status: "ready_for_profile_review",
     bill: {
       fingerprint: "abc123",
@@ -27,6 +27,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
       missing_fields: [],
       invoice_arithmetic_scope: "charge_categories_and_totals",
       site_identity_status: "extracted",
+      site_address: "Unit 4, 18 Example Road North Sydney NSW 2060",
       billing_period_start: "2026-03-01",
       billing_period_end: "2026-03-31",
       billing_days: 31,
@@ -71,7 +72,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
       ],
     },
     next_steps: [],
-    privacy: { files_persisted: true, customer_identifiers_returned: false, customer_facing_permission: false },
+    privacy: { files_persisted: true, customer_identifiers_returned: true, customer_facing_permission: false },
   };
   let saved = false;
   let sitePhotos: Array<Record<string, unknown>> = [];
@@ -116,6 +117,9 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   await user.click(screen.getByRole("button", { name: "Inspect & save" }));
 
   expect(await screen.findByRole("heading", { name: "Bill detected" })).toBeTruthy();
+  const directions = screen.getByRole("link", { name: "Directions" });
+  expect(directions.getAttribute("href")).toBe("https://www.google.com/maps/dir/?api=1&destination=Unit%204%2C%2018%20Example%20Road%20North%20Sydney%20NSW%202060");
+  expect(directions.getAttribute("target")).toBe("_blank");
   expect(screen.getByText("B1 · E1 · K1 · Q1")).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Detected bill breakdown" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Show breakdown" }));
