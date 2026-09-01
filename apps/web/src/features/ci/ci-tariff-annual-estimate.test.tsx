@@ -122,11 +122,10 @@ it("shows a reconciled bill-derived annual estimate with category detail and exc
   expect(screen.getByText("$11,410.16")).toBeTruthy();
   expect(screen.getByText("Evidence-limited estimate")).toBeTruthy();
   expect(screen.getByRole("img", { name: /Annualised charge mix: Fixed \$365\.00, Other usage \$6,045\.16, Energy \(Import\) \$5,000\.00/ })).toBeTruthy();
-  expect(screen.getByRole("img", { name: /Bill-period reconciliation.*Billed consumption 1,000 kWh.*NEM12 E1 import 995 kWh/i })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Fixed estimated annual charges" })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Other usage estimated annual charges" })).toBeTruthy();
   expect(screen.getByRole("table", { name: "Energy (Import) estimated annual charges" })).toBeTruthy();
-  expect(screen.getByText("Within ±2% internal threshold")).toBeTruthy();
+  expect(screen.queryByText("Bill-period import reconciliation")).toBeNull();
   expect(screen.getByText("-$20.00")).toBeTruthy();
   expect(screen.getByText("Excluded — recurrence not verified")).toBeTruthy();
   expect(screen.getByText("Not annualised")).toBeTruthy();
