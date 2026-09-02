@@ -32,6 +32,7 @@ import {
 } from "@/features/ci/api/ci-workspace-readiness";
 import { CiDesignFeasibility } from "@/features/ci/ci-design-feasibility";
 import { CiEvidenceIntake } from "@/features/ci/ci-evidence-intake";
+import { CiRebateProfilePanel } from "@/features/ci/ci-rebate-profile-panel";
 import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
 import { CiTariffReplay } from "@/features/ci/ci-tariff-replay";
 import { useCiWorkspace, type CiWorkspaceStage } from "@/features/ci/ci-workspace-context";
@@ -83,6 +84,14 @@ export function CiReadinessPage() {
         ) : (
           <CiTariffReplay
             key={activeProject.project_id}
+            onConfigureRebates={() => {
+              workspace.setStage("physical_feasibility");
+              window.setTimeout(() => {
+                const heading = document.getElementById("rebate-profile-title");
+                heading?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                heading?.focus();
+              }, 0);
+            }}
             onConfigureTariff={() => workspace.setStage("evidence")}
             project={activeProject}
           />
@@ -122,6 +131,7 @@ function PhysicalFeasibilityWorkspace({ onBack, onValidated, project }: { onBack
   return (
     <>
       <CiScenarioBuilder deviceProfile={activeDeviceProfile} error={run.error instanceof Error ? run.error.message : null} initialContext={run.data?.design_context ?? savedDesign.data?.design_context ?? undefined} initialSolutions={run.data?.candidates ?? savedDesign.data?.candidates} isPending={run.isPending} onSubmit={(request) => run.mutate(request)} siteAddress={siteAddress} />
+      <CiRebateProfilePanel projectId={project.project_id} />
       {generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}
     </>
   );

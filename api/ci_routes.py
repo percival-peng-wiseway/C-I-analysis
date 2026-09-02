@@ -21,6 +21,7 @@ from api.ci_schemas import (
     CiPricingCatalogPublishRequest,
     CiPricingCatalogReplaceRequest,
     CiProjectCreateRequest,
+    CiProjectRebateProfileSaveRequest,
     CiProjectTariffProfileSaveRequest,
 )
 from api.dependencies import (
@@ -50,6 +51,7 @@ from solar_battery.ci_design_feasibility import (
     analyze_ci_interval_activity,
 )
 from solar_battery.ci_design_context import (
+    CI_DESIGN_CONTEXT_V2_CONTRACT_VERSION,
     legacy_ci_design_context,
     validate_ci_design_context,
 )
@@ -133,6 +135,13 @@ from solar_battery.ci_project_tariff_profile import (
     approved_ci_project_tariff_calculation_profile,
     ci_project_tariff_profile_state,
     save_ci_project_tariff_profile,
+)
+from solar_battery.ci_project_rebate_profile import (
+    approved_ci_project_rebate_calculation_profile,
+    ci_project_rebate_profile_state,
+    rebate_calculation_profile_sha256,
+    rebate_profile_has_enabled_program,
+    save_ci_project_rebate_profile,
 )
 from solar_battery.ci_solution_generator import generate_ci_solutions
 from solar_battery.ci_tariff_analysis import (
@@ -274,6 +283,50 @@ def put_ci_project_tariff_profile(
                     approve_for_calculation=payload.approve_for_calculation,
                     bill_bytes=bill_bytes,
                     interval_bytes=interval_bytes,
+                )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.get("/commercial-industrial/projects/{project_id}/rebate-profile")
+def get_ci_project_rebate_profile(
+    project_id: UUID,
+    response: Response,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        with session_factory() as session:
+            return ci_project_rebate_profile_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.put("/commercial-industrial/projects/{project_id}/rebate-profile")
+def put_ci_project_rebate_profile(
+    project_id: UUID,
+    payload: CiProjectRebateProfileSaveRequest,
+    response: Response,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        with session_factory() as session:
+            with session.begin():
+                return save_ci_project_rebate_profile(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    profile=payload.profile,
+                    approve_for_calculation=payload.approve_for_calculation,
                 )
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
@@ -662,6 +715,15 @@ def post_ci_design_candidates(
             generation_summary = generated["generation_summary"]
         else:
             validated = validate_ci_design_candidates(payload.scenarios)
+            if (
+                isinstance(payload.design_context, dict)
+                and payload.design_context.get("contract_version")
+                == CI_DESIGN_CONTEXT_V2_CONTRACT_VERSION
+            ):
+                raise CiProjectError(
+                    "ci_design_context_invalid",
+                    "Profile-bound design context must be created by the server-side Solution Generator.",
+                )
             design_context = validate_ci_design_context(
                 payload.design_context
                 if payload.design_context is not None
@@ -1080,6 +1142,16 @@ def get_ci_annual_financial_comparison(
                 project_id=project_id,
                 actor=actor,
             )
+            rebate_state = ci_project_rebate_profile_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            rebate_profile = approved_ci_project_rebate_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
             device_state = ci_device_profile_state(session, actor=actor)
             tariff_state = ci_tariff_replay_state(
                 session,
@@ -1101,6 +1173,14 @@ def get_ci_annual_financial_comparison(
                     device_state["profile"]
                     if device_state["status"] == "ready"
                     else None
+                ),
+                active_rebate_profile_sha256=(
+                    rebate_calculation_profile_sha256(rebate_profile)
+                    if rebate_profile is not None
+                    else None
+                ),
+                rebate_profile_blocks_finance=(
+                    _rebate_profile_blocks_finance(rebate_state)
                 ),
             )
     except CiProjectError as exc:
@@ -1129,6 +1209,26 @@ def post_ci_annual_financial_comparison(
                     "ci_project_tariff_profile_required",
                     "Review and approve the project tariff table before running Finance Analysis.",
                 )
+            rebate_state = ci_project_rebate_profile_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            if _rebate_profile_blocks_finance(rebate_state):
+                raise CiProjectError(
+                    "ci_project_rebate_profile_required",
+                    "Review and approve the enabled project rebate programs before running Finance Analysis.",
+                )
+            rebate_profile = approved_ci_project_rebate_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            expected_rebate_profile_sha256 = (
+                rebate_calculation_profile_sha256(rebate_profile)
+                if rebate_profile is not None
+                else None
+            )
             project = require_ci_project(session, project_id=project_id, actor=actor)
             if project.setup_status != "ready":
                 raise CiProjectError(
@@ -1170,6 +1270,7 @@ def post_ci_annual_financial_comparison(
             tariff_replay_result=tariff_result,
             request=payload.model_dump(),
             device_profile=device_profile,
+            rebate_profile=rebate_profile,
         )
         result["project_id"] = str(project_id)
         with session_factory() as session:
@@ -1227,12 +1328,42 @@ def post_ci_annual_financial_comparison(
                             "ci_project_annual_financial_inputs_changed",
                             "The Device profile changed while finance was running. Run finance again.",
                         )
+                current_rebate_state = ci_project_rebate_profile_state(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                )
+                current_rebate_profile = (
+                    approved_ci_project_rebate_calculation_profile(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        for_update=True,
+                    )
+                )
+                current_rebate_profile_sha256 = (
+                    rebate_calculation_profile_sha256(current_rebate_profile)
+                    if current_rebate_profile is not None
+                    else None
+                )
+                if (
+                    _rebate_profile_blocks_finance(current_rebate_state)
+                    or current_rebate_profile_sha256
+                    != expected_rebate_profile_sha256
+                ):
+                    raise CiProjectError(
+                        "ci_project_annual_financial_inputs_changed",
+                        "The project rebate profile changed while finance was running. Run finance again.",
+                    )
                 record_ci_annual_financial_result(
                     session,
                     project_id=project_id,
                     actor=actor,
                     expected_tariff_replay_result_sha256=(
                         expected_tariff_result_sha256
+                    ),
+                    expected_rebate_profile_sha256=(
+                        expected_rebate_profile_sha256
                     ),
                     active_tariff_replay_result=current_tariff_result,
                     result=result,
@@ -1738,9 +1869,17 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
                 "ci_project_setup_required",
                 "ci_project_evidence_inputs_changed",
                 "ci_project_tariff_profile_changed",
+                "ci_project_rebate_profile_required",
                 "ci_project_annual_financial_inputs_changed",
             }
             else status.HTTP_422_UNPROCESSABLE_ENTITY
         ),
         detail={"code": exc.code, "message": str(exc)},
+    )
+
+
+def _rebate_profile_blocks_finance(state: dict[str, object]) -> bool:
+    return (
+        state.get("status") in {"draft", "stale"}
+        and rebate_profile_has_enabled_program(state.get("profile"))
     )

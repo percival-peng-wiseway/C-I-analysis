@@ -53,6 +53,13 @@ class CiProjectTariffProfileSaveRequest(BaseModel):
     approve_for_calculation: bool = False
 
 
+class CiProjectRebateProfileSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: dict[str, object]
+    approve_for_calculation: bool = False
+
+
 class CiDeviceProfileRequest(BaseModel):
     contract_version: Literal["ci_device_profile_v2", "ci_device_profile_v3"] = (
         "ci_device_profile_v2"

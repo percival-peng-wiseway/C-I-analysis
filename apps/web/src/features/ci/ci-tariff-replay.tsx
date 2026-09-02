@@ -56,6 +56,11 @@ import {
   ciProjectTariffProfileQueryKey,
   fetchCiProjectTariffProfile,
 } from "@/features/ci/api/ci-tariff-profile";
+import {
+  ciProjectRebateProfileQueryKey,
+  fetchCiProjectRebateProfile,
+  type CiProjectRebateProfileState,
+} from "@/features/ci/api/ci-rebate-profile";
 import { CiPortfolioReturnChart } from "@/features/ci/ci-annual-financial-workspace";
 
 type ReplayTab = "summary" | "bills" | "financial" | "demand" | "interval" | "assumptions";
@@ -70,9 +75,11 @@ const tabs: Array<{ id: ReplayTab; label: string }> = [
 ];
 
 export function CiTariffReplay({
+  onConfigureRebates,
   onConfigureTariff,
   project,
 }: {
+  onConfigureRebates: () => void;
   onConfigureTariff: () => void;
   project: CiProject;
 }) {
@@ -105,13 +112,20 @@ export function CiTariffReplay({
     queryFn: () => fetchCiProjectTariffProfile(project.project_id),
     retry: false,
   });
+  const rebateProfile = useQuery({
+    queryKey: ciProjectRebateProfileQueryKey(project.project_id),
+    queryFn: () => fetchCiProjectRebateProfile(project.project_id),
+    retry: false,
+  });
   const [equipmentSelection, setEquipmentSelection] = useState<CiEquipmentSelection | null>(null);
 
   useEffect(() => {
-    if (!equipmentSelection && deviceProfile.data?.status === "ready" && deviceProfile.data.profile) {
+    if (deviceProfile.data?.status === "ready" && deviceProfile.data.profile) {
       setEquipmentSelection(deviceProfile.data.profile.default_equipment_selection);
+    } else if (deviceProfile.data?.status === "not_configured") {
+      setEquipmentSelection(null);
     }
-  }, [deviceProfile.data, equipmentSelection]);
+  }, [deviceProfile.data?.profile_sha256, deviceProfile.data?.status]);
 
   const runReplay = useMutation({
     mutationFn: async () => {
@@ -143,11 +157,22 @@ export function CiTariffReplay({
     },
   });
 
-  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending) {
-    return <ReplayLoading />;
+  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending || rebateProfile.isPending) {
+    return <section aria-labelledby="tariff-replay-title" className="space-y-5"><FinanceRunHeader canRun={false} count={project.design_candidate_count} hasResult={false} onRun={() => undefined} pending={false} /><ReplayLoading /></section>;
   }
-  if (evidence.isError || design.isError || dispatch.isError || replay.isError || finance.isError || deviceProfile.isError) {
-    return <ReplayError />;
+  if (evidence.isError || design.isError || dispatch.isError || replay.isError || finance.isError || deviceProfile.isError || tariffProfile.isError || rebateProfile.isError) {
+    const failed = [
+      evidence.isError ? "Evidence" : null,
+      design.isError ? "solution space" : null,
+      dispatch.isError ? "Dispatch" : null,
+      replay.isError ? "saved tariff replay" : null,
+      finance.isError ? "saved Finance result" : null,
+      deviceProfile.isError ? "equipment profile" : null,
+      tariffProfile.isError ? "tariff profile" : null,
+      rebateProfile.isError ? "rebate profile" : null,
+    ].filter((value): value is string => value !== null);
+    const retry = () => { void Promise.all([evidence.refetch(), design.refetch(), dispatch.refetch(), replay.refetch(), finance.refetch(), deviceProfile.refetch(), tariffProfile.refetch(), rebateProfile.refetch()]); };
+    return <section aria-labelledby="tariff-replay-title" className="space-y-5"><FinanceRunHeader canRun={false} count={project.design_candidate_count} hasResult={false} onRun={() => undefined} pending={false} /><ReplayError failed={failed} onRetry={retry} /></section>;
   }
 
   const inspection = evidence.data.evidence?.inspection ?? null;
@@ -161,6 +186,13 @@ export function CiTariffReplay({
   const designReady = Boolean(design.data && design.data.candidate_count > 0);
   const savedDeviceProfile = deviceProfile.data.status === "ready" ? deviceProfile.data.profile : null;
   const tariffApproved = tariffProfile.data?.status === "approved";
+  const enabledRebateCount = countEnabledRebates(rebateProfile.data);
+  const rebateReady = enabledRebateCount === 0 || rebateProfile.data.status === "approved";
+  const rebateDetail = enabledRebateCount === 0
+    ? "No rebate programs selected; Finance will use $0 upfront rebates."
+    : rebateProfile.data.status === "approved"
+      ? `${enabledRebateCount} approved program${enabledRebateCount === 1 ? "" : "s"} will be calculated by Python.`
+      : rebateProfile.data.blockers.map((blocker) => blocker.message).join(" ") || "Save and approve the project rebate profile in Solution Generator.";
   const profileLabel = tariffProfile.data?.profile?.display_label ?? tariffProfile.data?.suggested_profile?.display_label ?? null;
   const tariffDetail = tariffProfile.isError
     ? "The project tariff profile could not be loaded."
@@ -179,6 +211,7 @@ export function CiTariffReplay({
       ready: annualIntervalReady,
     },
     { detail: tariffDetail, label: "Project tariff profile approved", ready: tariffApproved },
+    { detail: rebateDetail, label: "Rebate plan resolved", ready: rebateReady },
     { label: "Equipment & finance profile saved", ready: Boolean(savedDeviceProfile) },
     { label: "Equipment selected", ready: Boolean(equipmentSelection) },
   ];
@@ -191,31 +224,18 @@ export function CiTariffReplay({
 
   return (
     <section aria-labelledby="tariff-replay-title" className="space-y-5">
-      <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
-        <div className="flex items-start gap-3">
-          <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800">
-            <ReceiptText className="size-5" />
-          </span>
-          <div>
-            <h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1>
-          </div>
-        </div>
-        <Button disabled={!canRun || runReplay.isPending} onClick={() => runReplay.mutate()} type="button">
-          {runReplay.isPending ? <RefreshCw className="size-4 animate-spin" /> : result ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
-          {runReplay.isPending ? "Calculating tariff and finance…" : result ? "Re-run tariff + finance" : `Run ${design.data?.candidate_count ?? 0} scenarios`}
-        </Button>
-      </header>
+      <FinanceRunHeader canRun={canRun} count={design.data?.candidate_count ?? 0} hasResult={Boolean(result)} onRun={() => runReplay.mutate()} pending={runReplay.isPending} />
 
-      {error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p> : null}
+      {error ? <p aria-live="assertive" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{error}</p> : null}
       {replay.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved replay no longer matches the current project inputs. Run the scenarios again to refresh the annual bills.</p> : null}
-      {finance.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved financial result no longer matches the tariff replay or equipment catalog. Run tariff + finance again.</p> : null}
+      {finance.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{financeStaleMessage(finance.data.stale_reasons)}</p> : null}
 
       <EquipmentSelectionPanel onChange={setEquipmentSelection} profile={savedDeviceProfile} selection={equipmentSelection} />
 
       {result ? (
-        financeResult ? <CiTariffReplayResult evidenceCode={inspection?.bill.network_tariff_code ?? "Not recorded"} financeResult={financeResult} profileLabel={profileLabel} result={result} /> : <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed />
+        financeResult ? <CiTariffReplayResult evidenceCode={inspection?.bill.network_tariff_code ?? "Not recorded"} financeResult={financeResult} profileLabel={profileLabel} result={result} /> : <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureRebates={onConfigureRebates} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed />
       ) : (
-        <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed={false} />
+        <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureRebates={onConfigureRebates} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed={false} />
       )}
     </section>
   );
@@ -306,7 +326,7 @@ function SolutionGallery({ financeResult, onOpen, result }: { financeResult: CiA
         return <button aria-label={`View details for solution ${solution.financial_review_rank}: ${configuration(scenario)}`} className="group rounded-xl border border-slate-200 p-4 text-left transition hover:border-cyan-300 hover:bg-cyan-50/40 hover:shadow-sm" key={solution.scenario_id} onClick={() => onOpen(solution.scenario_id)} type="button">
           <div className="flex items-center justify-between gap-3"><span className="grid size-8 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">#{solution.financial_review_rank}</span><span className="text-sm font-semibold tabular-nums text-emerald-700">{signedAud(solution.metrics.net_present_value_aud)} NPV</span></div>
           <h3 className="mt-4 text-sm font-semibold leading-6 text-slate-950">{configuration(scenario)}</h3>
-          <dl className="mt-4 grid grid-cols-3 gap-2 border-t border-slate-100 pt-4"><GalleryMetric label="Bill after" value={aud(solution.annual_cost_aud_ex_gst)} /><GalleryMetric label="Saving" value={aud(solution.first_year_value_aud_ex_gst)} /><GalleryMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /></dl>
+          <dl className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-4 sm:grid-cols-4"><GalleryMetric label="Net upfront" value={aud(solution.upfront_cost_aud_ex_gst)} /><GalleryMetric label="Rebates" value={solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)} /><GalleryMetric label="Bill after" value={aud(solution.annual_cost_aud_ex_gst)} /><GalleryMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /></dl>
           <span className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-cyan-800">View analysis <span aria-hidden="true" className="transition group-hover:translate-x-0.5">→</span></span>
         </button>;
       })}
@@ -326,7 +346,7 @@ function SystemConfiguration({ scenario }: { scenario: CiPhysicalScenarioResult[
 
 function KeyMetricStrip({ result, scenario, solution }: { result: CiPhysicalScenarioResult; scenario: CiPhysicalScenarioResult["scenarios"][number]; solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {
   const demandReduction = Math.max(0, result.baseline.raw_rolling_demand_kva - scenario.post_dispatch.raw_rolling_demand_kva);
-  return <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6"><DetailMetric label="CAPEX" value={aud(solution.upfront_cost_aud_ex_gst)} /><DetailMetric label="Annual saving" positive value={aud(solution.first_year_value_aud_ex_gst)} /><DetailMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /><DetailMetric label="IRR" value={percent(solution.metrics.internal_rate_of_return)} /><DetailMetric label="NPV" positive={solution.metrics.net_present_value_aud >= 0} value={signedAud(solution.metrics.net_present_value_aud)} /><DetailMetric label="Demand reduction" value={`${numberLabel(demandReduction)} kVA`} /></div>;
+  return <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8"><DetailMetric label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} /><DetailMetric label="Upfront rebates" positive={solution.upfront_rebate_aud_ex_gst > 0} value={solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)} /><DetailMetric label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} /><DetailMetric label="Annual saving" positive value={aud(solution.first_year_value_aud_ex_gst)} /><DetailMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /><DetailMetric label="IRR" value={percent(solution.metrics.internal_rate_of_return)} /><DetailMetric label="NPV" positive={solution.metrics.net_present_value_aud >= 0} value={signedAud(solution.metrics.net_present_value_aud)} /><DetailMetric label="Demand reduction" value={`${numberLabel(demandReduction)} kVA`} /></div>;
 }
 
 function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancialComparisonResult; solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {
@@ -342,8 +362,10 @@ function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancial
     { label: "Hybrid inverter / PCS", value: breakdown.inverter_aud, color: "bg-violet-500" },
   ] : [];
   return <div className="space-y-5">
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      <Metric icon={BadgeDollarSign} label="CAPEX" value={aud(solution.upfront_cost_aud_ex_gst)} detail="Ex GST" />
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+      <Metric icon={BadgeDollarSign} label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} detail="Equipment · ex GST" />
+      <Metric icon={ShieldCheck} label="Upfront rebates" value={solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)} detail="Python-calculated · ex GST" tone="emerald" />
+      <Metric icon={BadgeDollarSign} label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} detail="Used for year 0" />
       <Metric icon={BarChart3} label="Net present value" value={signedAud(solution.metrics.net_present_value_aud)} detail={`${(result.assumptions.discount_rate * 100).toFixed(1)}% discount rate`} tone="emerald" />
       <Metric icon={Activity} label="Internal rate of return" value={percent(solution.metrics.internal_rate_of_return)} detail={`${result.assumptions.analysis_term_years}-year analysis`} />
       <Metric icon={Clock3} label="Simple payback" value={payback(solution.metrics.payback_period_years)} detail={`${aud(solution.first_year_value_aud_ex_gst)} year-1 tariff value`} />
@@ -352,15 +374,34 @@ function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancial
       <section className="rounded-xl border border-slate-200 p-5">
         <h3 className="font-semibold text-slate-950">Cost composition</h3>
         <p className="mt-1 text-sm text-slate-500">Python-priced equipment and annual operating cost.</p>
-        {capexParts.length ? <><div className="mt-6 flex h-5 overflow-hidden rounded-full bg-slate-100">{capexParts.map((part) => <div className={part.color} key={part.label} style={{ width: `${part.value / solution.upfront_cost_aud_ex_gst * 100}%` }}><span className="sr-only">{part.label} {aud(part.value)}</span></div>)}</div><dl className="mt-5 divide-y divide-slate-100">{capexParts.map((part) => <div className="flex items-center justify-between gap-4 py-3" key={part.label}><dt className="flex items-center gap-2 text-sm text-slate-600"><span className={`size-2.5 rounded-sm ${part.color}`} />{part.label}</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(part.value)}</dd></div>)}<div className="flex items-center justify-between gap-4 py-3"><dt className="text-sm text-slate-600">Annual O&amp;M</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.annual_om_cost_aud_ex_gst)} / yr</dd></div></dl></> : <p className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-500">A component breakdown is unavailable for a manually entered total quotation.</p>}
+        {capexParts.length ? <><div className="mt-6 flex h-5 overflow-hidden rounded-full bg-slate-100">{capexParts.map((part) => <div className={part.color} key={part.label} style={{ width: `${part.value / solution.gross_upfront_cost_aud_ex_gst * 100}%` }}><span className="sr-only">{part.label} {aud(part.value)}</span></div>)}</div><dl className="mt-5 divide-y divide-slate-100">{capexParts.map((part) => <div className="flex items-center justify-between gap-4 py-3" key={part.label}><dt className="flex items-center gap-2 text-sm text-slate-600"><span className={`size-2.5 rounded-sm ${part.color}`} />{part.label}</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(part.value)}</dd></div>)}<div className="flex items-center justify-between gap-4 py-3"><dt className="font-medium text-slate-800">Gross CAPEX</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.gross_upfront_cost_aud_ex_gst)}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="font-medium text-emerald-800">Approved upfront rebates</dt><dd className="font-semibold tabular-nums text-emerald-700">{solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)}</dd></div><div className="flex items-center justify-between gap-4 bg-slate-50 px-2 py-3"><dt className="font-semibold text-slate-950">Net upfront cost</dt><dd className="font-bold tabular-nums text-slate-950">{aud(solution.upfront_cost_aud_ex_gst)}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-sm text-slate-600">Annual O&amp;M</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.annual_om_cost_aud_ex_gst)} / yr</dd></div></dl></> : <p className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-500">A component breakdown is unavailable for a manually entered total quotation. Modelled rebates are not deducted from manual quotes.</p>}
       </section>
       <section className="overflow-hidden rounded-xl border border-slate-200">
         <div className="border-b border-slate-200 p-5"><h3 className="font-semibold text-slate-950">Annual cash flow</h3><p className="mt-1 text-sm text-slate-500">Year 0 CAPEX followed by Python-calculated net operating cash flow.</p></div>
         <div className="max-h-[430px] overflow-auto"><table className="w-full min-w-[560px] text-left text-sm"><thead className="sticky top-0 bg-slate-50 text-xs text-slate-500"><tr><th className="px-5 py-3 font-medium">Year</th><th className="px-4 py-3 text-right font-medium">Annual cash flow</th><th className="px-5 py-3 text-right font-medium">Cumulative</th></tr></thead><tbody className="divide-y divide-slate-100">{cashflowRows.map((row) => <tr className={row.cumulative >= 0 && cashflowRows[row.year - 1]?.cumulative < 0 ? "bg-emerald-50/70" : ""} key={row.year}><td className="px-5 py-3 font-medium text-slate-700">{row.year === 0 ? "0 · Investment" : row.year}</td><td className={`px-4 py-3 text-right font-semibold tabular-nums ${row.annual >= 0 ? "text-emerald-700" : "text-slate-900"}`}>{signedAud(row.annual)}</td><td className={`px-5 py-3 text-right font-semibold tabular-nums ${row.cumulative >= 0 ? "text-emerald-700" : "text-slate-700"}`}>{signedAud(row.cumulative)}</td></tr>)}</tbody></table></div>
       </section>
     </div>
+    <RebateAudit solution={solution} />
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Basis label="Discount rate" value={`${(result.assumptions.discount_rate * 100).toFixed(1)}%`} /><Basis label="Value escalation" value={`${(result.assumptions.annual_value_escalation_rate * 100).toFixed(1)}% / yr`} /><Basis label="Value degradation" value={`${(result.assumptions.annual_value_degradation_rate * 100).toFixed(1)}% / yr`} /><Basis label="Analysis term" value={`${result.assumptions.analysis_term_years} years`} /><Basis label="Pricing basis" value={result.assumptions.price_source === "workspace_device_profile" ? "Device profile" : "Manual quote"} /></div>
   </div>;
+}
+
+function RebateAudit({ solution }: { solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {
+  const applicationLabel = solution.rebate_application_status === "applied_to_device_profile_gross_cost"
+    ? "Applied to device-profile gross cost"
+    : "Information only · not deducted from manual quote";
+  return <section aria-labelledby="rebate-audit-title" className="overflow-hidden rounded-xl border border-slate-200">
+    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 p-5"><div><h3 className="font-semibold text-slate-950" id="rebate-audit-title">Rebate calculation audit</h3><p className="mt-1 text-sm text-slate-500">Indicative certificate values from the approved project profile. Eligibility and the final certificate price are not guaranteed.</p></div><span className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">{applicationLabel}</span></div>
+    <div className="overflow-x-auto"><table className="w-full min-w-[920px] text-left text-sm"><thead className="bg-white text-xs text-slate-500"><tr><th className="px-5 py-3 font-medium">Program</th><th className="px-3 py-3 font-medium">Status</th><th className="px-3 py-3 text-right font-medium">Certificates</th><th className="px-3 py-3 text-right font-medium">Price ex GST</th><th className="px-3 py-3 text-right font-medium">Calculated</th><th className="px-5 py-3 font-medium">Audit basis</th></tr></thead><tbody className="divide-y divide-slate-100">{solution.rebate_breakdown.map((item) => {
+      const audit = solution.rebate_calculation.programs[item.program_id];
+      return <tr key={item.program_id}><td className="px-5 py-4 font-semibold text-slate-950">{item.label}</td><td className="px-3 py-4"><RebateStatus status={item.status} /></td><td className="px-3 py-4 text-right tabular-nums text-slate-700">{numberLabel(item.certificate_quantity, 0)}</td><td className="px-3 py-4 text-right tabular-nums text-slate-700">{item.unit_price_aud_ex_gst === null ? "Not configured" : `${aud2(item.unit_price_aud_ex_gst)} / cert`}</td><td className="px-3 py-4 text-right font-semibold tabular-nums text-emerald-700">{aud2(item.rebate_aud_ex_gst)}</td><td className="px-5 py-4 text-xs leading-5 text-slate-500"><strong className="block text-slate-700">{titleCase(audit.formula.rule_id)}</strong><span className="block">{audit.reason_messages.length ? audit.reason_messages.join(" ") : `${humanize(audit.formula.rounding)} · ${formatOperands(audit.formula.operands)}`}</span><span className="mt-1 block text-slate-400">{formatSources(audit.sources)}</span></td></tr>;
+    })}</tbody><tfoot className="border-t border-slate-200 bg-emerald-50"><tr><th className="px-5 py-3 text-left font-semibold text-emerald-950" colSpan={4}>Total calculated rebate</th><td className="px-3 py-3 text-right font-bold tabular-nums text-emerald-800">{aud2(solution.rebate_calculation.total_rebate_aud_ex_gst)}</td><td className="px-5 py-3 text-xs text-emerald-900">Target date: {solution.rebate_calculation.target_certificate_date ?? "No approved rebate profile"}</td></tr></tfoot></table></div>
+  </section>;
+}
+
+function RebateStatus({ status }: { status: CiAnnualFinancialComparisonResult["solutions"][number]["rebate_breakdown"][number]["status"] }) {
+  const tone = status === "applied" ? "bg-emerald-100 text-emerald-800" : status === "ineligible" ? "bg-amber-100 text-amber-900" : "bg-slate-100 text-slate-600";
+  return <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>{humanize(status)}</span>;
 }
 
 function EquipmentSelectionPanel({ onChange, profile, selection }: { onChange: (selection: CiEquipmentSelection) => void; profile: CiDeviceProfile | null; selection: CiEquipmentSelection | null }) {
@@ -379,6 +420,7 @@ function ReplayReadyState({
   canRun,
   checks,
   design,
+  onConfigureRebates,
   onConfigureTariff,
   profileLabel,
   replayed,
@@ -386,6 +428,7 @@ function ReplayReadyState({
   canRun: boolean;
   checks: Array<{ detail?: string; label: string; ready: boolean }>;
   design: CiDesignCandidateResult | null;
+  onConfigureRebates: () => void;
   onConfigureTariff: () => void;
   profileLabel: string | null;
   replayed: boolean;
@@ -420,6 +463,7 @@ function ReplayReadyState({
             ))}
           </div>
           {!checks.find((item) => item.label === "Project tariff profile approved")?.ready ? <Button className="mt-4" onClick={onConfigureTariff} type="button" variant="outline">Review tariff profile in Evidence</Button> : null}
+          {!checks.find((item) => item.label === "Rebate plan resolved")?.ready ? <Button className="ml-2 mt-4" onClick={onConfigureRebates} type="button" variant="outline">Review rebates in Solution Generator</Button> : null}
           <div className="mt-7 grid gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 sm:grid-cols-3">
             <ProcessStep icon={Activity} label="1. Interval replay" text="Apply scenario grid import and export to each metered interval." />
             <ProcessStep icon={Gauge} label="2. Billing demand" text="Recalculate chargeable kVA inside approved billing windows." />
@@ -551,8 +595,12 @@ function TariffBasis({ evidenceCode, profileLabel, result, scenario }: { evidenc
   return <div className="space-y-6"><section><h3 className="font-semibold text-slate-950">Evidence and calculation basis</h3><div className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 px-4">{rows.map(([label,value])=><div className="grid gap-1 py-3 text-sm sm:grid-cols-[190px_minmax(0,1fr)]" key={label}><dt className="text-slate-500">{label}</dt><dd className="font-medium text-slate-800">{value}</dd></div>)}</div></section><section><h3 className="font-semibold text-slate-950">Python assumptions</h3><ul className="mt-3 space-y-2">{result.assumptions.map((item)=><li className="flex gap-2 text-sm leading-6 text-slate-600" key={item}><span className="mt-2 size-1.5 shrink-0 rounded-full bg-cyan-500" />{item}</li>)}</ul></section></div>;
 }
 
+function FinanceRunHeader({ canRun, count, hasResult, onRun, pending }: { canRun: boolean; count: number; hasResult: boolean; onRun: () => void; pending: boolean }) {
+  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1></div></div><Button disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Calculating tariff and finance…" : hasResult ? "Re-run tariff + finance" : `Run ${count} scenarios`}</Button></header>;
+}
+
 function ReplayLoading() { return <section className="grid min-h-[420px] place-items-center rounded-xl border border-slate-200 bg-white"><div className="text-center"><RefreshCw className="mx-auto size-6 animate-spin text-cyan-700" /><h2 className="mt-4 font-semibold text-slate-950">Loading tariff replay</h2><p className="mt-1 text-sm text-slate-500">Checking project evidence and completed scenarios.</p></div></section>; }
-function ReplayError() { return <section className="rounded-xl border border-red-200 bg-red-50 p-5"><h2 className="font-semibold text-red-950">Tariff replay unavailable</h2><p className="mt-1 text-sm text-red-800">The saved evidence, design or Dispatch result could not be loaded safely.</p></section>; }
+function ReplayError({ failed, onRetry }: { failed: string[]; onRetry: () => void }) { return <section aria-live="assertive" className="rounded-xl border border-red-200 bg-red-50 p-5" role="alert"><h2 className="font-semibold text-red-950">Finance inputs unavailable</h2><p className="mt-1 text-sm text-red-800">Could not safely load: {failed.join(", ")}.</p><Button className="mt-4" onClick={onRetry} type="button" variant="outline"><RefreshCw className="size-4" />Retry loading</Button></section>; }
 function ProcessStep({ icon: Icon, label, text }: { icon: typeof Activity; label: string; text: string }) { return <div className="bg-white p-4"><Icon className="size-4 text-cyan-700" /><h3 className="mt-3 text-sm font-semibold text-slate-900">{label}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{text}</p></div>; }
 function Metric({ detail, icon: Icon, label, tone = "default", value }: { detail: string; icon: typeof Activity; label: string; tone?: "default" | "emerald"; value: string }) { return <div className={`rounded-xl border p-4 ${tone === "emerald" ? "border-emerald-200 bg-emerald-50/60" : "border-slate-200 bg-white"}`}><Icon className={`size-4 ${tone === "emerald" ? "text-emerald-700" : "text-cyan-700"}`} /><p className="mt-4 text-xs text-slate-500">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{value}</p><p className="mt-1 text-xs text-slate-500">{detail}</p></div>; }
 function GalleryMetric({ label, value }: { label: string; value: string }) { return <div className="min-w-0"><dt className="text-[10px] uppercase tracking-wide text-slate-400">{label}</dt><dd className="mt-1 truncate text-xs font-semibold tabular-nums text-slate-800">{value}</dd></div>; }
@@ -568,9 +616,32 @@ function categoryLabel(value: string) { const labels: Record<string,string>={ene
 function nullableUnit(value: number | null, unit: string) { return value === null ? "Not evaluated" : `${numberLabel(value)} ${unit}`; }
 function numberLabel(value: number, digits = 1) { return new Intl.NumberFormat("en-AU",{maximumFractionDigits:digits}).format(value); }
 function aud(value: number) { return new Intl.NumberFormat("en-AU",{style:"currency",currency:"AUD",maximumFractionDigits:0}).format(value); }
+function aud2(value: number) { return new Intl.NumberFormat("en-AU",{style:"currency",currency:"AUD",minimumFractionDigits:2,maximumFractionDigits:2}).format(value); }
 function signedAud(value: number) { return `${value >= 0 ? "+" : "−"}${aud(Math.abs(value))}`; }
 function percent(value: number | null) { return value === null ? "No IRR" : `${(value * 100).toFixed(1)}%`; }
 function payback(value: number | null) { return value === null ? "Beyond term" : `${value.toFixed(1)} yrs`; }
 function Basis({ label, value }: { label: string; value: string }) { return <div className="rounded-lg border border-slate-200 bg-white p-3"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 text-sm font-semibold text-slate-950">{value}</dd></div>; }
 function humanize(value: string) { return value.replaceAll("_"," ").replace(/\bv\d+\b/g,"").replace(/\s+/g," ").trim().replace(/^./,(character)=>character.toUpperCase()); }
 function titleCase(value: string) { return value.replaceAll("_"," ").replace(/^./,(character)=>character.toUpperCase()); }
+function formatOperands(operands: Record<string, unknown>) {
+  const values = Object.entries(operands).map(([label, value]) => {
+    const display = typeof value === "number" ? numberLabel(value, 3) : value === null ? "Not set" : String(value);
+    return `${titleCase(label)} ${display}`;
+  });
+  return values.length ? values.join(" · ") : "No calculation operands";
+}
+function formatSources(sources: Record<string, unknown>) {
+  const values = Object.entries(sources).filter(([, value]) => typeof value === "string" && value.trim()).map(([label, value]) => `${titleCase(label)}: ${String(value)}`);
+  return values.length ? `Sources · ${values.join(" · ")}` : "No approved source recorded";
+}
+function financeStaleMessage(reasons: string[]) {
+  if (reasons.includes("rebate_profile_approval_required")) return "The selected rebate plan is not approved. Review it in Solution Generator before running Finance.";
+  if (reasons.includes("rebate_profile_changed")) return "The approved rebate profile changed. Run tariff + finance again to refresh gross CAPEX, rebates and net upfront cost.";
+  if (reasons.includes("device_profile_changed")) return "The equipment catalog changed. Run tariff + finance again to refresh the financial result.";
+  if (reasons.includes("tariff_replay_changed")) return "The tariff replay changed. Run tariff + finance again to refresh the financial result.";
+  return "The saved financial result is out of date. Run tariff + finance again.";
+}
+function countEnabledRebates(state: CiProjectRebateProfileState) {
+  const profile = state.profile ?? state.suggested_profile;
+  return Object.values(profile.programs).filter((program) => program.enabled).length;
+}

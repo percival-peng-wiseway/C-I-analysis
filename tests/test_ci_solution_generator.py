@@ -320,5 +320,15 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             saved = restored.json()["design"]
             assert saved["candidate_count"] == 4
             assert saved["design_context"] == result["design_context"]
+
+            forged = client.post(
+                f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+                json={
+                    "scenarios": result["candidates"],
+                    "design_context": result["design_context"],
+                },
+            )
+            assert forged.status_code == 422
+            assert forged.json()["detail"]["code"] == "ci_design_context_invalid"
         finally:
             session_factory.kw["bind"].dispose()

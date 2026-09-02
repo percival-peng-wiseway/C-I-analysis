@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CiPhysicalScenarioResult } from "./api/ci-scenarios";
-import type { CiAnnualFinancialComparisonResult } from "./api/ci-annual-financial-comparison";
+import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
 import { CiTariffReplayResult } from "./ci-tariff-replay";
 
 const result = {
@@ -61,21 +61,68 @@ const comparisonResult = {
   ],
 } as CiPhysicalScenarioResult;
 
-const financeResult = {
-  contract_version: "ci_annual_financial_comparison_v3",
+function rebateCalculation(scenarioId: string): CiScenarioRebateCalculation {
+  return {
+    contract_version: "ci_scenario_rebate_calculation_v1",
+    scenario_id: scenarioId,
+    ruleset_id: "au_ci_rebates_2026_v1",
+    ruleset_sha256: "c".repeat(64),
+    target_certificate_date: "2026-09-02",
+    programs: {
+      solar_stc: {
+        program_id: "solar_stc", label: "Solar STCs", status: "applied", reason_codes: [], reason_messages: [],
+        certificate_quantity: 100, unit_price_aud_ex_gst: 39, rebate_aud_ex_gst: 3900,
+        formula: { rule_id: "cer_solar_stc_2026_2030_v1", operands: { postcode_zone_rating: 1.382, deeming_years: 5 }, rounding: "floor_after_multiplication" },
+        sources: { eligibility_source_label: "CER eligibility review", price_source_label: "Net certificate price", price_as_of_date: "2026-09-02", zone_source_label: "CER postcode zone table" },
+      },
+      battery_stc: {
+        program_id: "battery_stc", label: "Battery STCs", status: "ineligible",
+        reason_codes: ["battery_stc_nominal_capacity_out_of_range"], reason_messages: ["Battery STCs require total nominal capacity from 5 kWh through 100 kWh."],
+        certificate_quantity: 0, unit_price_aud_ex_gst: 39, rebate_aud_ex_gst: 0,
+        formula: { rule_id: "cer_battery_stc_2025_2030_v1", operands: { nominal_capacity_kwh: 300, certified_usable_capacity_fraction: 0.9 }, rounding: "floor_after_all_tiers_summed" },
+        sources: { eligibility_source_label: "CER eligibility review", price_source_label: "Net certificate price", price_as_of_date: "2026-09-02", capacity_source_label: "Approved product datasheet" },
+      },
+      vic_deemed_veec: {
+        program_id: "vic_deemed_veec", label: "Victorian deemed VEECs", status: "applied", reason_codes: [], reason_messages: [],
+        certificate_quantity: 20, unit_price_aud_ex_gst: 70, rebate_aud_ex_gst: 1400,
+        formula: { rule_id: "vic_veu_part47_v25_2026_v1", operands: { victoria_region: "metropolitan", regional_factor: 0.98, inverter_apparent_power_kva_per_kw_ac: 1.25 }, rounding: "floor_after_multiplication" },
+        sources: { eligibility_source_label: "VEU Part 47 review", price_source_label: "Net certificate price", price_as_of_date: "2026-09-02", inverter_apparent_power_source_label: "Approved inverter datasheet" },
+      },
+    },
+    total_rebate_aud_ex_gst: 5300,
+    eligibility_guaranteed: false,
+    customer_facing_permission: false,
+  };
+}
+
+function rebateBreakdown(calculation: CiScenarioRebateCalculation): CiAnnualFinancialRebateBreakdown[] {
+  return Object.values(calculation.programs).map((program) => ({
+    program_id: program.program_id, label: program.label, status: program.status,
+    certificate_quantity: program.certificate_quantity, unit_price_aud_ex_gst: program.unit_price_aud_ex_gst,
+    rebate_aud_ex_gst: program.rebate_aud_ex_gst,
+  }));
+}
+
+const financeResult: CiAnnualFinancialComparisonResult = {
+  contract_version: "ci_annual_financial_comparison_v4",
   status: "ready",
   analysis_mode: "evidence_limited_internal_financial_comparison",
   project_id: "project-1",
+  source_tariff_replay_sha256: "d".repeat(64),
   profile: { profile_id: "llvt", display_label: "Approved LLVT profile", source_version: "test" },
-  assumptions: { currency: "AUD", tax_basis: "gst_exclusive", price_source: "workspace_device_profile", device_profile_sha256: "a".repeat(64), device_prices: { pv_cost_aud_per_kwp_dc: 530, battery_cost_aud_per_kwh: 413, inverter_cost_aud_per_kw_ac: 80 }, equipment_selection: { pv_product_id: "astronergy_astro_n7_600_630w", battery_product_id: "fox_ess_cq7_ci", inverter_product_id: "fox_ess_h3_plus_125kw" }, discount_rate: .08, annual_value_escalation_rate: .025, annual_value_degradation_rate: .005, annual_om_fraction_of_capex: .015, analysis_term_years: 15, replacement_events_aud: [] },
+  assumptions: { currency: "AUD", tax_basis: "gst_exclusive", price_source: "workspace_device_profile", device_profile_sha256: "a".repeat(64), device_prices: { pv_cost_aud_per_kwp_dc: 530, battery_cost_aud_per_kwh: 413, inverter_cost_aud_per_kw_ac: 80 }, equipment_selection: { pv_product_id: "astronergy_astro_n7_600_630w", battery_product_id: "fox_ess_cq7_ci", inverter_product_id: "fox_ess_h3_plus_125kw" }, rebate_profile_sha256: "b".repeat(64), rebate_ruleset_id: "au_ci_rebates_2026_v1", rebate_ruleset_sha256: "c".repeat(64), rebate_application_basis: "deducted_from_workspace_device_profile_gross_cost", discount_rate: .08, annual_value_escalation_rate: .025, annual_value_degradation_rate: .005, annual_om_fraction_of_capex: .015, analysis_term_years: 15, replacement_events_aud: [] },
   shortlist_source: { algorithm_id: "ci_all_tariff_scenarios_v1", available_scenario_count: 2, shortlist_count: 2 },
   financial_review_order: { algorithm_id: "ci_highest_npv_review_order_v1", basis: "Highest NPV", leader_scenario_id: "case-1", recommendation_permitted: false },
-  solutions: comparisonResult.scenarios.map((scenario, index) => ({ scenario_id: scenario.scenario_id, label: scenario.label, physical_review_rank: scenario.physical_review_rank, financial_review_rank: index + 1, pv_capacity_kwp_dc: scenario.authored_inputs.pv_capacity_kwp_dc, battery_capacity_kwh: scenario.authored_inputs.nominal_capacity_kwh, inverter_capacity_kw_ac: scenario.authored_inputs.pv_inverter_capacity_kw_ac, upfront_cost_aud_ex_gst: 210000 - index * 10000, capex_breakdown_aud_ex_gst: { pv_aud: 75000, battery_aud: 115000, inverter_aud: 20000 }, annual_om_cost_aud_ex_gst: 3150, first_year_value_aud_ex_gst: scenario.annual_tariff_value.first_year_value_ex_gst_aud, annual_cost_aud_ex_gst: scenario.annual_tariff_value.scenario_cost_ex_gst_aud, metrics: { net_present_value_aud: 90000 - index * 20000, payback_period_years: 6.2 + index, internal_rate_of_return: .14 - index * .01, lifetime_net_value_undiscounted_aud: 150000, annual_cashflows_aud: Array(15).fill(33000) }, customer_facing_permission: false, recommendation_permitted: false })),
+  solutions: comparisonResult.scenarios.map((scenario, index) => {
+    const grossUpfront = 210000 - index * 10000;
+    const calculation = rebateCalculation(scenario.scenario_id);
+    return { scenario_id: scenario.scenario_id, label: scenario.label, physical_review_rank: scenario.physical_review_rank, financial_review_rank: index + 1, pv_capacity_kwp_dc: scenario.authored_inputs.pv_capacity_kwp_dc, battery_capacity_kwh: scenario.authored_inputs.nominal_capacity_kwh, inverter_capacity_kw_ac: scenario.authored_inputs.pv_inverter_capacity_kw_ac, gross_upfront_cost_aud_ex_gst: grossUpfront, upfront_rebate_aud_ex_gst: calculation.total_rebate_aud_ex_gst, upfront_cost_aud_ex_gst: grossUpfront - calculation.total_rebate_aud_ex_gst, rebate_application_status: "applied_to_device_profile_gross_cost", rebate_breakdown: rebateBreakdown(calculation), rebate_calculation: calculation, capex_breakdown_aud_ex_gst: { pv_aud: 75000, battery_aud: 115000 - index * 10000, inverter_aud: 20000 }, annual_om_cost_aud_ex_gst: grossUpfront * .015, first_year_value_aud_ex_gst: scenario.annual_tariff_value.first_year_value_ex_gst_aud, annual_cost_aud_ex_gst: scenario.annual_tariff_value.scenario_cost_ex_gst_aud, metrics: { net_present_value_aud: 90000 - index * 20000, payback_period_years: 6.2 + index, internal_rate_of_return: .14 - index * .01, lifetime_net_value_undiscounted_aud: 150000, annual_cashflows_aud: Array(15).fill(33000) }, customer_facing_permission: false, recommendation_permitted: false };
+  }),
   currency_values_permitted: true,
   customer_facing_permission: false,
   recommendation_permitted: false,
   disclaimer: "Internal only.",
-} as CiAnnualFinancialComparisonResult;
+};
 
 afterEach(cleanup);
 
@@ -102,6 +149,15 @@ describe("Tariff replay result workspace", () => {
     await user.click(screen.getByRole("button", { name: /^Financial$/ }));
     expect(screen.getByRole("heading", { name: "Cost composition" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Annual cash flow" })).toBeTruthy();
+    expect(screen.getAllByText("Gross CAPEX").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Upfront rebates").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Net upfront cost").length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "Rebate calculation audit" })).toBeTruthy();
+    expect(screen.getByText("Applied to device-profile gross cost")).toBeTruthy();
+    expect(screen.getByText("Solar STCs")).toBeTruthy();
+    expect(screen.getByText("Battery STCs")).toBeTruthy();
+    expect(screen.getByText("Victorian deemed VEECs")).toBeTruthy();
+    expect(screen.getByText("$5,300.00")).toBeTruthy();
     expect(screen.getByText("0 · Investment")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Bills" }));

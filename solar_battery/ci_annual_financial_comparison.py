@@ -10,10 +10,18 @@ from solar_battery.ci_device_profile import (
 )
 from solar_battery.ci_project_feasibility import canonical_sha256
 from solar_battery.ci_projects import CiProjectError
+from solar_battery.ci_project_rebate_profile import (
+    rebate_calculation_profile_sha256,
+)
+from solar_battery.ci_rebate_calculation import calculate_ci_scenario_rebates
+from solar_battery.ci_rebate_rules import (
+    CI_REBATE_RULESET_ID,
+    ci_rebate_ruleset_sha256,
+)
 
 
 CI_ANNUAL_FINANCIAL_COMPARISON_CONTRACT_VERSION = (
-    "ci_annual_financial_comparison_v3"
+    "ci_annual_financial_comparison_v4"
 )
 CI_ANNUAL_FINANCIAL_REVIEW_ORDER_ID = "ci_highest_npv_review_order_v1"
 CI_ANNUAL_FINANCIAL_SELECTION_ID = "ci_analyst_selected_tariff_scenarios_v1"
@@ -25,6 +33,7 @@ def compare_ci_annual_financial_scenarios(
     tariff_replay_result: dict[str, Any],
     request: dict[str, Any],
     device_profile: dict[str, Any] | None = None,
+    rebate_profile: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     scenarios = _tariff_scenarios(tariff_replay_result)
     pricing_mode = str(request.get("pricing_mode", "manual_quotes"))
@@ -56,11 +65,17 @@ def compare_ci_annual_financial_scenarios(
             "Annual finance pricing mode is not supported.",
         )
     assumptions = _validated_assumptions(request, device_profile=validated_profile)
+    rebate_results = calculate_ci_scenario_rebates(
+        selected,
+        rebate_profile=rebate_profile,
+    )
     solutions = [
         _financial_solution(
             scenario,
             upfront_cost_aud=prices[str(scenario["scenario_id"])],
             assumptions=assumptions,
+            rebate_calculation=rebate_results[str(scenario["scenario_id"])],
+            apply_rebate_to_upfront=validated_profile is not None,
             capex_breakdown=(
                 _profile_capex_breakdown(
                     scenario,
@@ -127,6 +142,18 @@ def compare_ci_annual_financial_scenarios(
                 else None
             ),
             "equipment_selection": equipment_selection,
+            "rebate_profile_sha256": (
+                rebate_calculation_profile_sha256(rebate_profile)
+                if rebate_profile is not None
+                else None
+            ),
+            "rebate_ruleset_id": CI_REBATE_RULESET_ID,
+            "rebate_ruleset_sha256": ci_rebate_ruleset_sha256(),
+            "rebate_application_basis": (
+                "deducted_from_workspace_device_profile_gross_cost"
+                if validated_profile is not None
+                else "not_deducted_from_analyst_entered_manual_quote"
+            ),
             **assumptions,
             "replacement_events_aud": [],
         },
@@ -139,7 +166,7 @@ def compare_ci_annual_financial_scenarios(
             "algorithm_id": CI_ANNUAL_FINANCIAL_REVIEW_ORDER_ID,
             "basis": (
                 "Highest Python-calculated NPV, then shorter simple payback, "
-                "lower entered upfront price and the saved physical review order. "
+                "lower net upfront cost and the saved physical review order. "
                 "This is an internal financial review order, not a recommendation."
             ),
             "leader_scenario_id": ordered[0]["scenario_id"],
@@ -152,7 +179,9 @@ def compare_ci_annual_financial_scenarios(
         "disclaimer": (
             "Internal evidence-limited comparison only. NPV, IRR and payback "
             "depend on the saved Tariff replay, the saved ex-GST device price "
-            "catalog or entered quotations, and displayed finance assumptions. "
+            "catalog or entered quotations, any approved project rebate profile, "
+            "and displayed finance assumptions. Manual quotations are never "
+            "automatically reduced by modelled rebates. "
             "The financial review leader is not a customer recommendation."
         ),
     }
@@ -296,6 +325,8 @@ def _financial_solution(
     *,
     upfront_cost_aud: float,
     assumptions: dict[str, object],
+    rebate_calculation: dict[str, Any],
+    apply_rebate_to_upfront: bool,
     capex_breakdown: dict[str, float] | None,
 ) -> dict[str, object]:
     tariff_value = scenario.get("annual_tariff_value")
@@ -318,12 +349,23 @@ def _financial_solution(
             "ci_annual_financial_scenario_invalid",
             "A selected solution no longer has valid technical inputs.",
         )
+    calculated_rebate = _finite_number(
+        rebate_calculation.get("total_rebate_aud_ex_gst"),
+        message="The approved project rebate result is invalid.",
+    )
+    upfront_rebate = calculated_rebate if apply_rebate_to_upfront else 0.0
+    net_upfront_cost = round(upfront_cost_aud - upfront_rebate, 2)
+    if net_upfront_cost <= 0:
+        raise CiProjectError(
+            "ci_annual_financial_rebate_exceeds_cost",
+            "The approved upfront rebate must be lower than the gross solution cost.",
+        )
     annual_om = upfront_cost_aud * float(
         assumptions["annual_om_fraction_of_capex"]
     )
     metrics = calculate_metrics(
         {
-            "upfront_cost_aud": upfront_cost_aud,
+            "upfront_cost_aud": net_upfront_cost,
             "first_year_net_value_aud": first_year_value,
             "annual_om_cost_aud": annual_om,
             "replacement_events_aud": [],
@@ -352,7 +394,26 @@ def _financial_solution(
             authored.get("pv_inverter_capacity_kw_ac"),
             message="A selected inverter size is invalid.",
         ),
-        "upfront_cost_aud_ex_gst": upfront_cost_aud,
+        "upfront_cost_aud_ex_gst": net_upfront_cost,
+        "gross_upfront_cost_aud_ex_gst": upfront_cost_aud,
+        "upfront_rebate_aud_ex_gst": round(upfront_rebate, 2),
+        "rebate_application_status": (
+            "applied_to_device_profile_gross_cost"
+            if apply_rebate_to_upfront
+            else "not_applied_to_manual_quote"
+        ),
+        "rebate_breakdown": [
+            {
+                "program_id": item["program_id"],
+                "label": item["label"],
+                "status": item["status"],
+                "certificate_quantity": item["certificate_quantity"],
+                "unit_price_aud_ex_gst": item["unit_price_aud_ex_gst"],
+                "rebate_aud_ex_gst": item["rebate_aud_ex_gst"],
+            }
+            for item in rebate_calculation["programs"].values()
+        ],
+        "rebate_calculation": rebate_calculation,
         "capex_breakdown_aud_ex_gst": capex_breakdown,
         "annual_om_cost_aud_ex_gst": round(annual_om, 2),
         "first_year_value_aud_ex_gst": first_year_value,

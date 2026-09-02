@@ -6,7 +6,12 @@ export interface CiAnnualFinancialComparisonSolution {
   pv_capacity_kwp_dc: number;
   battery_capacity_kwh: number;
   inverter_capacity_kw_ac: number;
+  gross_upfront_cost_aud_ex_gst: number;
+  upfront_rebate_aud_ex_gst: number;
   upfront_cost_aud_ex_gst: number;
+  rebate_application_status: "applied_to_device_profile_gross_cost" | "not_applied_to_manual_quote";
+  rebate_breakdown: CiAnnualFinancialRebateBreakdown[];
+  rebate_calculation: CiScenarioRebateCalculation;
   capex_breakdown_aud_ex_gst: {
     pv_aud: number;
     battery_aud: number;
@@ -26,11 +31,48 @@ export interface CiAnnualFinancialComparisonSolution {
   recommendation_permitted: false;
 }
 
+export interface CiAnnualFinancialRebateBreakdown {
+  program_id: "solar_stc" | "battery_stc" | "vic_deemed_veec";
+  label: string;
+  status: "disabled" | "ineligible" | "applied";
+  certificate_quantity: number;
+  unit_price_aud_ex_gst: number | null;
+  rebate_aud_ex_gst: number;
+}
+
+export interface CiScenarioRebateProgramResult extends CiAnnualFinancialRebateBreakdown {
+  reason_codes: string[];
+  reason_messages: string[];
+  formula: {
+    rule_id: string;
+    operands: Record<string, unknown>;
+    rounding: string;
+  };
+  sources: Record<string, string | null>;
+}
+
+export interface CiScenarioRebateCalculation {
+  contract_version: "ci_scenario_rebate_calculation_v1";
+  scenario_id: string;
+  ruleset_id: "au_ci_rebates_2026_v1";
+  ruleset_sha256: string;
+  target_certificate_date: string | null;
+  programs: {
+    solar_stc: CiScenarioRebateProgramResult;
+    battery_stc: CiScenarioRebateProgramResult;
+    vic_deemed_veec: CiScenarioRebateProgramResult;
+  };
+  total_rebate_aud_ex_gst: number;
+  eligibility_guaranteed: false;
+  customer_facing_permission: false;
+}
+
 export interface CiAnnualFinancialComparisonResult {
-  contract_version: "ci_annual_financial_comparison_v3";
+  contract_version: "ci_annual_financial_comparison_v4";
   status: "ready";
   analysis_mode: "evidence_limited_internal_financial_comparison";
   project_id: string;
+  source_tariff_replay_sha256: string;
   profile: { profile_id: string; display_label: string; source_version: string };
   assumptions: {
     currency: "AUD";
@@ -43,6 +85,10 @@ export interface CiAnnualFinancialComparisonResult {
       inverter_cost_aud_per_kw_ac: number;
     } | null;
     equipment_selection: CiEquipmentSelection | null;
+    rebate_profile_sha256: string | null;
+    rebate_ruleset_id: "au_ci_rebates_2026_v1";
+    rebate_ruleset_sha256: string;
+    rebate_application_basis: "deducted_from_workspace_device_profile_gross_cost" | "not_deducted_from_analyst_entered_manual_quote";
     discount_rate: number;
     annual_value_escalation_rate: number;
     annual_value_degradation_rate: number;
@@ -72,7 +118,7 @@ export interface CiSavedAnnualFinancialState {
   contract_version: "ci_project_annual_financial_state_v1";
   status: "not_saved" | "ready" | "stale";
   saved_at: string | null;
-  stale_reasons: Array<"tariff_replay_changed" | "device_profile_changed" | "result_contract_unsupported" | "result_integrity_failed">;
+  stale_reasons: Array<"tariff_replay_changed" | "device_profile_changed" | "rebate_profile_changed" | "rebate_profile_approval_required" | "result_contract_unsupported" | "result_integrity_failed">;
   result: CiAnnualFinancialComparisonResult | null;
 }
 
@@ -89,10 +135,19 @@ export async function fetchCiSavedAnnualFinancialComparison(
   );
   if (!response.ok) throw new Error("Could not restore the annual financial comparison.");
   const payload = await response.json() as CiSavedAnnualFinancialState;
+  const supportedStaleReasons: CiSavedAnnualFinancialState["stale_reasons"] = [
+    "tariff_replay_changed",
+    "device_profile_changed",
+    "rebate_profile_changed",
+    "rebate_profile_approval_required",
+    "result_contract_unsupported",
+    "result_integrity_failed",
+  ];
   if (
     payload.contract_version !== "ci_project_annual_financial_state_v1" ||
     !["not_saved", "ready", "stale"].includes(payload.status) ||
     !Array.isArray(payload.stale_reasons) ||
+    payload.stale_reasons.some((reason) => !supportedStaleReasons.includes(reason)) ||
     (payload.status === "ready" && payload.result === null) ||
     (payload.status !== "ready" && payload.result !== null)
   ) throw new Error("Saved annual financial comparison returned an unsafe contract.");
@@ -150,15 +205,23 @@ export function assertCiAnnualFinancialComparison(
   const payload = value as CiAnnualFinancialComparisonResult;
   const solutionCount = payload.shortlist_source?.shortlist_count ?? Number.NaN;
   if (
-    payload.contract_version !== "ci_annual_financial_comparison_v3" ||
+    payload.contract_version !== "ci_annual_financial_comparison_v4" ||
     payload.status !== "ready" ||
     payload.analysis_mode !== "evidence_limited_internal_financial_comparison" ||
     payload.project_id !== projectId ||
+    !isSha256(payload.source_tariff_replay_sha256) ||
     payload.assumptions?.currency !== "AUD" ||
     payload.assumptions?.tax_basis !== "gst_exclusive" ||
     !["analyst_entered_total_solution_price", "workspace_device_profile"].includes(payload.assumptions?.price_source) ||
     (payload.assumptions?.price_source === "workspace_device_profile" && !validEquipmentSelection(payload.assumptions.equipment_selection)) ||
     (payload.assumptions?.price_source === "analyst_entered_total_solution_price" && payload.assumptions.equipment_selection !== null) ||
+    !isOptionalSha256(payload.assumptions?.rebate_profile_sha256) ||
+    payload.assumptions?.rebate_ruleset_id !== "au_ci_rebates_2026_v1" ||
+    !isSha256(payload.assumptions?.rebate_ruleset_sha256) ||
+    !["deducted_from_workspace_device_profile_gross_cost", "not_deducted_from_analyst_entered_manual_quote"].includes(payload.assumptions?.rebate_application_basis) ||
+    payload.assumptions.rebate_application_basis !== (payload.assumptions.price_source === "workspace_device_profile"
+      ? "deducted_from_workspace_device_profile_gross_cost"
+      : "not_deducted_from_analyst_entered_manual_quote") ||
     ![
       payload.assumptions.discount_rate,
       payload.assumptions.annual_value_escalation_rate,
@@ -189,6 +252,8 @@ export function assertCiAnnualFinancialComparison(
         item.pv_capacity_kwp_dc,
         item.battery_capacity_kwh,
         item.inverter_capacity_kw_ac,
+        item.gross_upfront_cost_aud_ex_gst,
+        item.upfront_rebate_aud_ex_gst,
         item.upfront_cost_aud_ex_gst,
         item.annual_om_cost_aud_ex_gst,
         item.first_year_value_aud_ex_gst,
@@ -197,6 +262,10 @@ export function assertCiAnnualFinancialComparison(
         item.metrics?.lifetime_net_value_undiscounted_aud,
       ].every(Number.isFinite) ||
       item.upfront_cost_aud_ex_gst <= 0 ||
+      item.gross_upfront_cost_aud_ex_gst <= 0 ||
+      item.upfront_rebate_aud_ex_gst < 0 ||
+      Math.abs(item.gross_upfront_cost_aud_ex_gst - item.upfront_rebate_aud_ex_gst - item.upfront_cost_aud_ex_gst) > 0.011 ||
+      !validRebateApplication(item, payload.assumptions.price_source, payload.assumptions.rebate_ruleset_sha256) ||
       (item.capex_breakdown_aud_ex_gst !== null && ![
         item.capex_breakdown_aud_ex_gst?.pv_aud,
         item.capex_breakdown_aud_ex_gst?.battery_aud,
@@ -218,6 +287,85 @@ export function assertCiAnnualFinancialComparison(
   }
   return payload;
 }
+
+function validRebateApplication(
+  item: CiAnnualFinancialComparisonSolution,
+  priceSource: CiAnnualFinancialComparisonResult["assumptions"]["price_source"],
+  rulesetSha256: string,
+) {
+  const expectedStatus = priceSource === "workspace_device_profile"
+    ? "applied_to_device_profile_gross_cost"
+    : "not_applied_to_manual_quote";
+  if (
+    item.rebate_application_status !== expectedStatus ||
+    !Array.isArray(item.rebate_breakdown) ||
+    item.rebate_breakdown.length !== 3 ||
+    !validRebateCalculation(item.rebate_calculation, item.scenario_id, rulesetSha256)
+  ) return false;
+  const breakdownTotal = item.rebate_breakdown.reduce((sum, entry) => sum + entry.rebate_aud_ex_gst, 0);
+  const breakdownIds = new Set(item.rebate_breakdown.map((entry) => entry.program_id));
+  if (breakdownIds.size !== 3 || !["solar_stc", "battery_stc", "vic_deemed_veec"].every((programId) => breakdownIds.has(programId as CiAnnualFinancialRebateBreakdown["program_id"]))) return false;
+  if (Math.abs(breakdownTotal - item.rebate_calculation.total_rebate_aud_ex_gst) > 0.011) return false;
+  if (priceSource === "workspace_device_profile") {
+    if (Math.abs(item.upfront_rebate_aud_ex_gst - breakdownTotal) > 0.011) return false;
+  } else if (item.upfront_rebate_aud_ex_gst !== 0) return false;
+  return item.rebate_breakdown.every((entry) => {
+    const audit = item.rebate_calculation.programs[entry.program_id];
+    return validRebateBreakdown(entry) &&
+      audit.status === entry.status &&
+      audit.certificate_quantity === entry.certificate_quantity &&
+      audit.unit_price_aud_ex_gst === entry.unit_price_aud_ex_gst &&
+      Math.abs(audit.rebate_aud_ex_gst - entry.rebate_aud_ex_gst) <= 0.011;
+  });
+}
+
+function validRebateCalculation(value: unknown, scenarioId: string, rulesetSha256: string): value is CiScenarioRebateCalculation {
+  const calculation = value as CiScenarioRebateCalculation;
+  if (
+    !calculation ||
+    calculation.contract_version !== "ci_scenario_rebate_calculation_v1" ||
+    calculation.scenario_id !== scenarioId ||
+    calculation.ruleset_id !== "au_ci_rebates_2026_v1" ||
+    calculation.ruleset_sha256 !== rulesetSha256 ||
+    (calculation.target_certificate_date !== null && !isIsoDate(calculation.target_certificate_date)) ||
+    calculation.eligibility_guaranteed !== false ||
+    calculation.customer_facing_permission !== false ||
+    !Number.isFinite(calculation.total_rebate_aud_ex_gst) ||
+    calculation.total_rebate_aud_ex_gst < 0 ||
+    !calculation.programs
+  ) return false;
+  const entries = Object.entries(calculation.programs);
+  const calculatedTotal = entries.reduce((sum, [, entry]) => sum + entry.rebate_aud_ex_gst, 0);
+  return Math.abs(calculatedTotal - calculation.total_rebate_aud_ex_gst) <= 0.011 && entries.length === 3 && entries.every(([programId, entry]) =>
+    ["solar_stc", "battery_stc", "vic_deemed_veec"].includes(programId) &&
+    entry.program_id === programId &&
+    validRebateBreakdown(entry) &&
+    Array.isArray(entry.reason_codes) && entry.reason_codes.every((reason) => typeof reason === "string" && reason.length > 0) &&
+    Array.isArray(entry.reason_messages) && entry.reason_messages.every((reason) => typeof reason === "string" && reason.length > 0) &&
+    entry.reason_codes.length === entry.reason_messages.length &&
+    typeof entry.formula?.rule_id === "string" && entry.formula.rule_id.length > 0 &&
+    typeof entry.formula?.rounding === "string" && entry.formula.rounding.length > 0 &&
+    isRecord(entry.formula?.operands) && isRecord(entry.sources)
+  );
+}
+
+function validRebateBreakdown(value: unknown): value is CiAnnualFinancialRebateBreakdown {
+  const entry = value as CiAnnualFinancialRebateBreakdown;
+  return Boolean(
+    entry &&
+    ["solar_stc", "battery_stc", "vic_deemed_veec"].includes(entry.program_id) &&
+    typeof entry.label === "string" && entry.label.length > 0 &&
+    ["disabled", "ineligible", "applied"].includes(entry.status) &&
+    Number.isInteger(entry.certificate_quantity) && entry.certificate_quantity >= 0 &&
+    (entry.unit_price_aud_ex_gst === null || (Number.isFinite(entry.unit_price_aud_ex_gst) && entry.unit_price_aud_ex_gst >= 0)) &&
+    Number.isFinite(entry.rebate_aud_ex_gst) && entry.rebate_aud_ex_gst >= 0
+  );
+}
+
+function isSha256(value: unknown) { return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value); }
+function isOptionalSha256(value: unknown) { return value === null || isSha256(value); }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isIsoDate(value: string) { return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)); }
 
 function validEquipmentSelection(value: unknown): value is CiEquipmentSelection {
   const selection = value as CiEquipmentSelection;

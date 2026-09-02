@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CiReadinessPage } from "./ci-readiness-page";
 import { CiProductShell } from "./ci-product-shell";
 import { CiWorkspaceProvider } from "./ci-workspace-context";
+import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
 
 const readiness = {
   contract_version: "ci_workspace_readiness_v3",
@@ -71,13 +72,41 @@ const deviceProfileFixture = {
   discount_rate: .08, annual_value_escalation_rate: .025, annual_value_degradation_rate: .005, annual_om_fraction_of_capex: .015, analysis_term_years: 15,
 };
 
+const rebateProfileFixture: CiProjectRebateProfile = {
+  contract_version: "ci_project_rebate_profile_v1",
+  target_certificate_date: "2026-09-02",
+  site_state_code: "",
+  site_postcode: "",
+  site_location_confirmed: false,
+  site_location_source_label: "",
+  stacking_confirmed: false,
+  programs: {
+    solar_stc: { enabled: false, eligibility_confirmed: false, eligibility_source_label: "", certificate_price_aud_ex_gst: 39, price_source_label: "", price_as_of_date: "2026-09-02", postcode_zone_rating: null, zone_source_label: "" },
+    battery_stc: { enabled: false, eligibility_confirmed: false, eligibility_source_label: "", certificate_price_aud_ex_gst: 39, price_source_label: "", price_as_of_date: "2026-09-02", certified_usable_capacity_fraction: null, capacity_source_label: "" },
+    vic_deemed_veec: { enabled: false, eligibility_confirmed: false, eligibility_source_label: "", certificate_price_aud_ex_gst: 70, price_source_label: "", price_as_of_date: "2026-09-02", victoria_region: null, inverter_apparent_power_kva_per_kw_ac: null, inverter_apparent_power_source_label: "" },
+  },
+};
+
+const rebateStateFixture: CiProjectRebateProfileState = {
+  contract_version: "ci_project_rebate_profile_state_v1",
+  status: "not_configured",
+  updated_at: null,
+  approved_at: null,
+  profile_sha256: null,
+  profile: null,
+  suggested_profile: rebateProfileFixture,
+  site_evidence: { detected_site_address: null, state_code: null, postcode: null },
+  blockers: [],
+  ruleset: { ruleset_id: "au_ci_rebates_2026_v1", ruleset_sha256: "b".repeat(64), official_sources: [{ source_id: "cer-stc", label: "Clean Energy Regulator · STCs", url: "https://cer.gov.au/", status: "authoritative" }] },
+};
+
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 function renderPage() {
   render(<QueryClientProvider client={new QueryClient()}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
 }
 
-function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null) {
+function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture) {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path.endsWith("/settings/device-profile")) {
@@ -91,6 +120,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
     if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(savedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: savedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
     if (path.endsWith("/design-feasibility")) return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/tariff-profile")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_profile_state_v1", status: "not_available", updated_at: null, approved_at: null, profile_sha256: null, profile: null, suggested_profile: null, evidence_basis: null, blockers: [{ code: "tariff_profile_evidence_required", message: "Upload and review bill evidence before approving a tariff profile." }] }), { status: 200 });
+    if (path.endsWith("/rebate-profile")) return new Response(JSON.stringify(rebateState), { status: 200 });
     if (path.endsWith("/tariff-replay")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/annual-financial-comparison")) return new Response(JSON.stringify({ contract_version: "ci_project_annual_financial_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/projects") && init?.method === "POST") return new Response(JSON.stringify({ contract_version: "ci_project_v1", ...project, project_id: "project-new", display_name: JSON.parse(String(init.body)).display_name }), { status: 201 });
@@ -198,10 +228,37 @@ describe("C&I project workspace", () => {
     const runButton = screen.getByRole("button", { name: "Run 0 scenarios" });
     expect(runButton.hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Review tariff profile in Evidence" })).toBeTruthy();
-    expect(screen.queryByText(/\$/)).toBeNull();
+    expect(screen.getByText("No rebate programs selected; Finance will use $0 upfront rebates.")).toBeTruthy();
 
     expect(screen.getByRole("button", { name: "Previous: Scenario Analysis" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Next:/ })).toBeNull();
+  });
+
+  it("keeps Finance visible but blocks a selected rebate program until its draft is approved", async () => {
+    const user = userEvent.setup();
+    const enabledProfile = {
+      ...rebateProfileFixture,
+      programs: {
+        ...rebateProfileFixture.programs,
+        solar_stc: { ...rebateProfileFixture.programs.solar_stc, enabled: true },
+      },
+    };
+    mockApi([project], null, {
+      ...rebateStateFixture,
+      status: "draft",
+      updated_at: "2026-09-02T00:00:00Z",
+      profile_sha256: "a".repeat(64),
+      profile: enabledProfile,
+      suggested_profile: enabledProfile,
+      blockers: [{ code: "solar_stc_price_source_required", message: "Solar STCs require a current price and source before approval." }],
+    });
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: /04 Finance Analysis/ }));
+    expect(await screen.findByText("Solar STCs require a current price and source before approval.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Review rebates in Solution Generator" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Run 0 scenarios" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("opens generated solutions in the Dispatch left-and-right workspace", async () => {

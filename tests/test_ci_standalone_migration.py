@@ -19,6 +19,7 @@ def test_standalone_migration_creates_only_ci_tables(tmp_path, monkeypatch) -> N
         "ci_project_evidence",
         "ci_project_annual_financial_results",
         "ci_project_feasibility_results",
+        "ci_project_rebate_profiles",
         "ci_project_site_material",
         "ci_project_tariff_replay_results",
         "ci_project_tariff_profiles",
@@ -52,5 +53,36 @@ def test_standalone_migration_creates_only_ci_tables(tmp_path, monkeypatch) -> N
         "created_at",
         "updated_at",
     }
+    rebate_profile_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("ci_project_rebate_profiles")
+    }
+    assert rebate_profile_columns == {
+        "project_id",
+        "workspace_id",
+        "owner_id",
+        "profile_contract_version",
+        "approval_status",
+        "site_evidence_sha256",
+        "ruleset_id",
+        "ruleset_sha256",
+        "profile_sha256",
+        "profile_json",
+        "calculation_profile_sha256",
+        "calculation_profile_json",
+        "approved_by_actor_id",
+        "approved_at",
+        "created_by_actor_id",
+        "updated_by_actor_id",
+        "created_at",
+        "updated_at",
+    }
+    annual_finance_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns(
+            "ci_project_annual_financial_results"
+        )
+    }
+    assert "rebate_profile_sha256" in annual_finance_columns
     assert not any(table.startswith("residential_") for table in tables)
     engine.dispose()

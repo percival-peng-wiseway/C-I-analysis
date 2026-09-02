@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from solar_battery.ci_rebate_rules import ci_rebate_ruleset_sha256
 from tests.durable_test_helpers import create_test_client, sqlite_url_for_path
 
 
@@ -243,6 +244,7 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
             "bill": {
                 "review_status": "analyst_confirmed",
                 "network_tariff_code": "TEST",
+                "site_address": "10 Collins Street Melbourne VIC 3000",
             },
             "nem12": {"full_tariff_analysis_ready": True},
         },
@@ -368,7 +370,7 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
         )
         assert response.status_code == 200, response.json()
         result = response.json()
-        assert result["contract_version"] == "ci_annual_financial_comparison_v3"
+        assert result["contract_version"] == "ci_annual_financial_comparison_v4"
         assert result["assumptions"] == {
             "currency": "AUD",
             "tax_basis": "gst_exclusive",
@@ -376,6 +378,12 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
             "device_profile_sha256": None,
             "device_prices": None,
             "equipment_selection": None,
+            "rebate_profile_sha256": None,
+            "rebate_ruleset_id": "au_ci_rebates_2026_v1",
+            "rebate_ruleset_sha256": ci_rebate_ruleset_sha256(),
+            "rebate_application_basis": (
+                "not_deducted_from_analyst_entered_manual_quote"
+            ),
             "discount_rate": 0.08,
             "annual_value_escalation_rate": 0.025,
             "annual_value_degradation_rate": 0.005,
@@ -390,6 +398,15 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
             75000.0,
             90000.0,
         ]
+        assert all(
+            item["gross_upfront_cost_aud_ex_gst"]
+            == item["upfront_cost_aud_ex_gst"]
+            and item["upfront_rebate_aud_ex_gst"] == 0
+            and item["rebate_application_status"]
+            == "not_applied_to_manual_quote"
+            for item in result["solutions"]
+        )
+        assert result["assumptions"]["rebate_profile_sha256"] is None
         assert all(len(item["metrics"]["annual_cashflows_aud"]) == 15 for item in result["solutions"])
         assert result["customer_facing_permission"] is False
         assert result["recommendation_permitted"] is False
@@ -412,3 +429,35 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
         )
         assert selected_one.status_code == 200
         assert selected_one.json()["shortlist_source"]["shortlist_count"] == 1
+
+        rebate_profile = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/rebate-profile"
+        ).json()["suggested_profile"]
+        rebate_profile["site_location_confirmed"] = True
+        rebate_profile["site_location_source_label"] = "Analyst-reviewed bill address"
+        rebate_profile["programs"]["solar_stc"].update(
+            {
+                "enabled": True,
+                "eligibility_confirmed": True,
+                "eligibility_source_label": "CER eligibility reviewed",
+                "price_source_label": "Current broker evidence",
+                "postcode_zone_rating": 1.382,
+                "zone_source_label": "CER postcode zone table",
+            }
+        )
+        draft_rebate = client.put(
+            f"/api/commercial-industrial/projects/{project['project_id']}/rebate-profile",
+            json={
+                "profile": rebate_profile,
+                "approve_for_calculation": False,
+            },
+        )
+        assert draft_rebate.status_code == 200
+        blocked_saved_finance = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
+        ).json()
+        assert blocked_saved_finance["status"] == "stale"
+        assert blocked_saved_finance["result"] is None
+        assert "rebate_profile_approval_required" in blocked_saved_finance[
+            "stale_reasons"
+        ]

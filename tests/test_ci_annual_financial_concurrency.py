@@ -40,8 +40,19 @@ def _assert_changed_input_is_not_saved(
     profiles: tuple[dict[str, object], ...],
     replay_states: tuple[dict[str, object], ...],
     device_states: tuple[dict[str, object], ...],
-) -> None:
+    rebate_states: tuple[dict[str, object], ...] = (
+        {"status": "not_configured", "profile": None},
+    ),
+    rebate_profiles: tuple[dict[str, object] | None, ...] = (None,),
+) -> list[dict[str, object]]:
     record_calls: list[dict[str, object]] = []
+    rebate_loader_calls: list[dict[str, object]] = []
+    rebate_loader = _sequence(*rebate_profiles)
+
+    def load_rebate_profile(*args, **kwargs):
+        rebate_loader_calls.append(dict(kwargs))
+        return rebate_loader(*args, **kwargs)
+
     monkeypatch.setattr(
         "api.ci_routes.approved_ci_project_tariff_calculation_profile",
         _sequence(*profiles),
@@ -53,6 +64,14 @@ def _assert_changed_input_is_not_saved(
     monkeypatch.setattr(
         "api.ci_routes.ci_device_profile_state",
         _sequence(*device_states),
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.ci_project_rebate_profile_state",
+        _sequence(*rebate_states),
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.approved_ci_project_rebate_calculation_profile",
+        load_rebate_profile,
     )
     monkeypatch.setattr(
         "api.ci_routes.require_ci_project",
@@ -84,6 +103,7 @@ def _assert_changed_input_is_not_saved(
         "ci_project_annual_financial_inputs_changed"
     )
     assert record_calls == []
+    return rebate_loader_calls
 
 
 def test_annual_finance_does_not_save_if_approved_tariff_changes_during_calculation(
@@ -135,3 +155,30 @@ def test_annual_finance_does_not_save_if_device_profile_changes_during_calculati
             {"status": "ready", "profile": {"revision": "device-b"}},
         ),
     )
+
+
+def test_annual_finance_does_not_save_if_rebate_profile_changes_during_calculation(
+    monkeypatch,
+) -> None:
+    tariff = {"revision": "tariff-a"}
+    replay = {"status": "ready", "result": {"revision": "replay-a"}}
+    device = {"status": "not_configured", "profile": None}
+
+    rebate_loader_calls = _assert_changed_input_is_not_saved(
+        monkeypatch,
+        pricing_mode="manual_quotes",
+        profiles=(tariff, tariff),
+        replay_states=(replay, replay),
+        device_states=(device,),
+        rebate_states=(
+            {"status": "approved", "profile": {"programs": {}}},
+            {"status": "approved", "profile": {"programs": {}}},
+        ),
+        rebate_profiles=(
+            {"revision": "rebate-a"},
+            {"revision": "rebate-b"},
+        ),
+    )
+    assert [
+        call.get("for_update", False) for call in rebate_loader_calls
+    ] == [False, True]
