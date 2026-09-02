@@ -8,6 +8,7 @@ import pytest
 
 from solar_battery.ci_device_profile import (
     CI_DEVICE_PROFILE_CONTRACT_VERSION,
+    CI_V3_DEVICE_PROFILE_CONTRACT_VERSION,
     CI_V2_DEVICE_PROFILE_CONTRACT_VERSION,
     ci_device_profile_state,
     device_profile_sha256,
@@ -35,6 +36,16 @@ def _v2_profile(**overrides: object) -> dict[str, object]:
     profile["contract_version"] = CI_V2_DEVICE_PROFILE_CONTRACT_VERSION
     profile.pop("solution_profiles")
     profile.pop("default_solution_profile_selection")
+    return profile
+
+
+def _v3_profile(**overrides: object) -> dict[str, object]:
+    profile = _profile(**overrides)
+    profile["contract_version"] = CI_V3_DEVICE_PROFILE_CONTRACT_VERSION
+    profile["solution_profiles"] = {
+        "solar_profiles": profile["solution_profiles"]["solar_profiles"][:1],
+        "battery_profiles": profile["solution_profiles"]["battery_profiles"][:1],
+    }
     return profile
 
 
@@ -79,6 +90,22 @@ def test_workspace_device_profile_rejects_invalid_prices(tmp_path) -> None:
         assert response.status_code == 422
 
 
+def test_workspace_device_profile_accepts_v4_evidence_libraries(tmp_path) -> None:
+    with create_test_client(
+        sqlite_url_for_path(tmp_path / "device-profile-v4.sqlite3")
+    ) as client:
+        response = client.put(
+            "/api/commercial-industrial/settings/device-profile",
+            json=suggested_ci_device_profile(),
+        )
+
+    assert response.status_code == 200, response.json()
+    saved = response.json()["profile"]
+    assert saved["contract_version"] == "ci_device_profile_v4"
+    assert len(saved["solution_profiles"]["inverter_profiles"]) == 6
+    assert saved["solution_profiles"]["battery_profiles"][1]["status"] == "draft"
+
+
 def test_workspace_device_profile_keeps_v2_default_for_legacy_clients(tmp_path) -> None:
     payload = _v2_profile()
     payload.pop("contract_version")
@@ -95,10 +122,10 @@ def test_workspace_device_profile_keeps_v2_default_for_legacy_clients(tmp_path) 
     )
 
 
-def test_suggested_v3_solution_profiles_are_explicit_screening_assumptions() -> None:
+def test_suggested_v4_solution_profiles_include_verified_and_draft_evidence() -> None:
     profile = validate_ci_device_profile(suggested_ci_device_profile())
 
-    assert profile["contract_version"] == "ci_device_profile_v3"
+    assert profile["contract_version"] == "ci_device_profile_v4"
     solar = profile["solution_profiles"]["solar_profiles"][0]
     battery = profile["solution_profiles"]["battery_profiles"][0]
     assert solar == {
@@ -128,6 +155,29 @@ def test_suggested_v3_solution_profiles_are_explicit_screening_assumptions() -> 
         "solar_profile_id": solar["profile_id"],
         "battery_profile_id": battery["profile_id"],
     }
+    longi = profile["solution_profiles"]["solar_profiles"][1]
+    assert longi["profile_id"] == "longi_hi_mo_x10_lr7_72hvh_650m_v1"
+    assert longi["status"] == "published"
+    assert longi["rated_power_w"] == 650.0
+    assert longi["annual_degradation_percent"] == 0.35
+    cq7 = profile["solution_profiles"]["battery_profiles"][1]
+    assert cq7["profile_id"] == "fox_ess_cq7_l14_v1"
+    assert cq7["status"] == "draft"
+    assert cq7["nominal_capacity_kwh_per_unit"] == 97.44
+    assert cq7["continuous_power_kw_per_unit"] == 64.51
+    assert cq7["coupling"] is None
+    assert cq7["standby_loss_percent_per_month"] is None
+    inverters = profile["solution_profiles"]["inverter_profiles"]
+    assert [item["rated_active_power_kw"] for item in inverters] == [
+        50.0,
+        60.0,
+        75.0,
+        80.0,
+        100.0,
+        125.0,
+    ]
+    assert inverters[-1]["maximum_reactive_power_kvar"] == 82.5
+    assert all(item["status"] == "draft" for item in inverters)
 
 
 def test_v2_upgrade_preserves_prices_catalog_and_finance_values() -> None:
@@ -173,7 +223,30 @@ def test_v2_upgrade_preserves_prices_catalog_and_finance_values() -> None:
     ]
 
 
-def test_integrity_valid_stored_v2_profile_is_read_as_v3(tmp_path) -> None:
+def test_v3_upgrade_adds_collected_profiles_without_replacing_saved_defaults() -> None:
+    profile = _v3_profile()
+    profile["solution_profiles"]["solar_profiles"][0]["name"] = "Saved solar assumptions"
+
+    normalized = validate_ci_device_profile(profile)
+
+    assert normalized["contract_version"] == "ci_device_profile_v4"
+    assert normalized["solution_profiles"]["solar_profiles"][0]["name"] == (
+        "Saved solar assumptions"
+    )
+    assert normalized["default_solution_profile_selection"] == {
+        "solar_profile_id": "generic_crystalline_pv_v1",
+        "battery_profile_id": "generic_lfp_ac_2h_v1",
+    }
+    assert normalized["solution_profiles"]["solar_profiles"][1]["profile_id"] == (
+        "longi_hi_mo_x10_lr7_72hvh_650m_v1"
+    )
+    assert normalized["solution_profiles"]["battery_profiles"][1]["profile_id"] == (
+        "fox_ess_cq7_l14_v1"
+    )
+    assert len(normalized["solution_profiles"]["inverter_profiles"]) == 6
+
+
+def test_integrity_valid_stored_v2_profile_is_read_as_v4(tmp_path) -> None:
     session_factory = create_sqlite_session_factory(
         sqlite_url_for_path(tmp_path / "stored-v2-profile.sqlite3")
     )
@@ -247,7 +320,7 @@ def test_v1_upgrade_preserves_legacy_price_and_finance_values() -> None:
         (("battery_profiles", 0, "source_date"), "2026-02-30"),
     ],
 )
-def test_v3_rejects_invalid_solution_profile_fields(
+def test_v4_rejects_invalid_solution_profile_fields(
     path: tuple[str, int, str], invalid_value: object
 ) -> None:
     profile = suggested_ci_device_profile()
@@ -259,7 +332,7 @@ def test_v3_rejects_invalid_solution_profile_fields(
     assert exc_info.value.code == "ci_device_profile_invalid"
 
 
-def test_v3_rejects_duplicate_profile_ids() -> None:
+def test_v4_rejects_duplicate_profile_ids() -> None:
     profile = suggested_ci_device_profile()
     profile["solution_profiles"]["battery_profiles"][0][
         "profile_id"
@@ -270,7 +343,7 @@ def test_v3_rejects_duplicate_profile_ids() -> None:
 
 
 @pytest.mark.parametrize("status", ["draft", "retired"])
-def test_v3_default_selection_must_reference_published_profiles(status: str) -> None:
+def test_v4_default_selection_must_reference_published_profiles(status: str) -> None:
     profile = copy.deepcopy(suggested_ci_device_profile())
     profile["solution_profiles"]["solar_profiles"][0]["status"] = status
 
@@ -278,11 +351,26 @@ def test_v3_default_selection_must_reference_published_profiles(status: str) -> 
         validate_ci_device_profile(profile)
 
 
-def test_v3_default_selection_rejects_unknown_profile_id() -> None:
+def test_v4_default_selection_rejects_unknown_profile_id() -> None:
     profile = suggested_ci_device_profile()
     profile["default_solution_profile_selection"][
         "battery_profile_id"
     ] = "unknown_battery_v1"
 
     with pytest.raises(CiProjectError, match="reference published profiles"):
+        validate_ci_device_profile(profile)
+
+
+def test_v4_allows_missing_battery_performance_only_while_draft() -> None:
+    profile = suggested_ci_device_profile()
+    cq7 = profile["solution_profiles"]["battery_profiles"][1]
+
+    normalized = validate_ci_device_profile(profile)
+    assert normalized["solution_profiles"]["battery_profiles"][1][
+        "power_conversion_efficiency_percent"
+    ] is None
+
+    cq7["status"] = "published"
+    cq7["coupling"] = "ac"
+    with pytest.raises(CiProjectError, match="power conversion efficiency"):
         validate_ci_device_profile(profile)

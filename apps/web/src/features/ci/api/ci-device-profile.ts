@@ -27,16 +27,38 @@ export interface CiBatterySolutionProfile {
   manufacturer: string;
   model: string;
   chemistry: string;
-  coupling: "ac" | "dc";
-  nominal_capacity_kwh_per_unit: number;
-  continuous_power_kw_per_unit: number;
-  round_trip_efficiency_percent: number;
-  power_conversion_efficiency_percent: number;
-  usable_depth_of_discharge_percent: number;
-  standby_loss_percent_per_month: number;
-  annual_capacity_degradation_percent: number;
-  minimum_units: number;
-  maximum_units: number;
+  coupling: "ac" | "dc" | null;
+  nominal_capacity_kwh_per_unit: number | null;
+  continuous_power_kw_per_unit: number | null;
+  round_trip_efficiency_percent: number | null;
+  power_conversion_efficiency_percent: number | null;
+  usable_depth_of_discharge_percent: number | null;
+  standby_loss_percent_per_month: number | null;
+  annual_capacity_degradation_percent: number | null;
+  minimum_units: number | null;
+  maximum_units: number | null;
+  source_type: CiSolutionProfileSourceType;
+  source_label: string;
+  source_date: string | null;
+}
+
+export interface CiInverterSolutionProfile {
+  profile_id: string;
+  version: number;
+  status: CiSolutionProfileStatus;
+  name: string;
+  manufacturer: string;
+  model: string;
+  rated_active_power_kw: number;
+  rated_apparent_power_kva: number;
+  maximum_reactive_power_kvar: number;
+  power_factor_leading_limit: number;
+  power_factor_lagging_limit: number;
+  pq_capability_curve_available: boolean;
+  reactive_power_at_zero_active_power: boolean;
+  night_reactive_capability: boolean;
+  european_efficiency_percent: number;
+  maximum_efficiency_percent: number;
   source_type: CiSolutionProfileSourceType;
   source_label: string;
   source_date: string | null;
@@ -48,7 +70,7 @@ export interface CiSolutionProfileSelection {
 }
 
 export interface CiDeviceProfile {
-  contract_version: "ci_device_profile_v3";
+  contract_version: "ci_device_profile_v4";
   profile_id: "workspace_device_profile";
   currency: "AUD";
   tax_basis: "gst_exclusive";
@@ -86,6 +108,7 @@ export interface CiDeviceProfile {
   solution_profiles: {
     solar_profiles: CiSolarSolutionProfile[];
     battery_profiles: CiBatterySolutionProfile[];
+    inverter_profiles: CiInverterSolutionProfile[];
   };
   default_solution_profile_selection: CiSolutionProfileSelection;
   discount_rate: number;
@@ -154,9 +177,10 @@ export function assertCiDeviceProfileState(value: unknown): CiDeviceProfileState
 
 function isProfile(value: unknown): value is CiDeviceProfile {
   const profile = value as CiDeviceProfile;
-  if (!profile || profile.contract_version !== "ci_device_profile_v3") return false;
+  if (!profile || profile.contract_version !== "ci_device_profile_v4") return false;
   const solarProfiles = profile.solution_profiles?.solar_profiles;
   const batteryProfiles = profile.solution_profiles?.battery_profiles;
+  const inverterProfiles = profile.solution_profiles?.inverter_profiles;
   if (
     profile.profile_id !== "workspace_device_profile" ||
     profile.currency !== "AUD" ||
@@ -164,9 +188,11 @@ function isProfile(value: unknown): value is CiDeviceProfile {
     !isExistingPricingAndFinance(profile) ||
     !Array.isArray(solarProfiles) || solarProfiles.length === 0 || solarProfiles.length > 50 ||
     !Array.isArray(batteryProfiles) || batteryProfiles.length === 0 || batteryProfiles.length > 50 ||
+    !Array.isArray(inverterProfiles) || inverterProfiles.length === 0 || inverterProfiles.length > 50 ||
     solarProfiles.some((item) => !isSolarSolutionProfile(item)) ||
     batteryProfiles.some((item) => !isBatterySolutionProfile(item)) ||
-    !hasUniqueProfileIds([...solarProfiles, ...batteryProfiles])
+    inverterProfiles.some((item) => !isInverterSolutionProfile(item)) ||
+    !hasUniqueProfileIds([...solarProfiles, ...batteryProfiles, ...inverterProfiles])
   ) return false;
 
   const defaults = profile.default_solution_profile_selection;
@@ -297,6 +323,7 @@ function isSolarSolutionProfile(value: unknown): value is CiSolarSolutionProfile
 
 function isBatterySolutionProfile(value: unknown): value is CiBatterySolutionProfile {
   const profile = value as CiBatterySolutionProfile;
+  const allowMissing = profile?.status === "draft";
   return Boolean(
     profile &&
     hasExactKeys(profile, ["profile_id", "version", "status", "name", "manufacturer", "model", "chemistry", "coupling", "nominal_capacity_kwh_per_unit", "continuous_power_kw_per_unit", "round_trip_efficiency_percent", "power_conversion_efficiency_percent", "usable_depth_of_discharge_percent", "standby_loss_percent_per_month", "annual_capacity_degradation_percent", "minimum_units", "maximum_units", "source_type", "source_label", "source_date"]) &&
@@ -304,20 +331,57 @@ function isBatterySolutionProfile(value: unknown): value is CiBatterySolutionPro
     isVersion(profile.version) &&
     isStatus(profile.status) &&
     [profile.name, profile.manufacturer, profile.model, profile.chemistry].every((item) => isLabel(item)) &&
-    ["ac", "dc"].includes(profile.coupling) &&
-    isPositiveFinite(profile.nominal_capacity_kwh_per_unit) &&
-    isPositiveFinite(profile.continuous_power_kw_per_unit) &&
-    isFiniteInRange(profile.round_trip_efficiency_percent, 1, 100) &&
-    isFiniteInRange(profile.power_conversion_efficiency_percent, 1, 100) &&
-    isFiniteInRange(profile.usable_depth_of_discharge_percent, 1, 100) &&
-    isFiniteInRange(profile.standby_loss_percent_per_month, 0, 100, true, false) &&
-    isFiniteInRange(profile.annual_capacity_degradation_percent, 0, 100, true, false) &&
-    Number.isInteger(profile.minimum_units) && profile.minimum_units >= 1 && profile.minimum_units <= 10_000 &&
-    Number.isInteger(profile.maximum_units) && profile.maximum_units >= profile.minimum_units && profile.maximum_units <= 10_000 &&
+    isDraftable(profile.coupling, allowMissing, (item) => item === "ac" || item === "dc") &&
+    isDraftable(profile.nominal_capacity_kwh_per_unit, allowMissing, isPositiveFinite) &&
+    isDraftable(profile.continuous_power_kw_per_unit, allowMissing, isPositiveFinite) &&
+    isDraftable(profile.round_trip_efficiency_percent, allowMissing, (item) => isFiniteInRange(item, 1, 100)) &&
+    isDraftable(profile.power_conversion_efficiency_percent, allowMissing, (item) => isFiniteInRange(item, 1, 100)) &&
+    isDraftable(profile.usable_depth_of_discharge_percent, allowMissing, (item) => isFiniteInRange(item, 1, 100)) &&
+    isDraftable(profile.standby_loss_percent_per_month, allowMissing, (item) => isFiniteInRange(item, 0, 100, true, false)) &&
+    isDraftable(profile.annual_capacity_degradation_percent, allowMissing, (item) => isFiniteInRange(item, 0, 100, true, false)) &&
+    isDraftable(profile.minimum_units, allowMissing, isProfileUnitCount) &&
+    isDraftable(profile.maximum_units, allowMissing, isProfileUnitCount) &&
+    (profile.minimum_units === null || profile.maximum_units === null || profile.maximum_units >= profile.minimum_units) &&
     isSourceType(profile.source_type) &&
     isLabel(profile.source_label) &&
     isSourceDate(profile.source_date)
   );
+}
+
+function isInverterSolutionProfile(value: unknown): value is CiInverterSolutionProfile {
+  const profile = value as CiInverterSolutionProfile;
+  return Boolean(
+    profile &&
+    hasExactKeys(profile, ["profile_id", "version", "status", "name", "manufacturer", "model", "rated_active_power_kw", "rated_apparent_power_kva", "maximum_reactive_power_kvar", "power_factor_leading_limit", "power_factor_lagging_limit", "pq_capability_curve_available", "reactive_power_at_zero_active_power", "night_reactive_capability", "european_efficiency_percent", "maximum_efficiency_percent", "source_type", "source_label", "source_date"]) &&
+    isIdentifier(profile.profile_id) &&
+    isVersion(profile.version) &&
+    isStatus(profile.status) &&
+    [profile.name, profile.manufacturer, profile.model].every((item) => isLabel(item)) &&
+    isPositiveFinite(profile.rated_active_power_kw) &&
+    isPositiveFinite(profile.rated_apparent_power_kva) &&
+    profile.rated_apparent_power_kva >= profile.rated_active_power_kw &&
+    isFiniteInRange(profile.maximum_reactive_power_kvar, 0, 1_000_000) &&
+    profile.maximum_reactive_power_kvar <= profile.rated_apparent_power_kva &&
+    isFiniteInRange(profile.power_factor_leading_limit, 0, 1) &&
+    isFiniteInRange(profile.power_factor_lagging_limit, 0, 1) &&
+    typeof profile.pq_capability_curve_available === "boolean" &&
+    typeof profile.reactive_power_at_zero_active_power === "boolean" &&
+    typeof profile.night_reactive_capability === "boolean" &&
+    isFiniteInRange(profile.european_efficiency_percent, 1, 100) &&
+    isFiniteInRange(profile.maximum_efficiency_percent, 1, 100) &&
+    profile.european_efficiency_percent <= profile.maximum_efficiency_percent &&
+    isSourceType(profile.source_type) &&
+    isLabel(profile.source_label) &&
+    isSourceDate(profile.source_date)
+  );
+}
+
+function isDraftable(value: unknown, allowMissing: boolean, validate: (candidate: unknown) => boolean) {
+  return value === null ? allowMissing : validate(value);
+}
+
+function isProfileUnitCount(value: unknown) {
+  return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 10_000;
 }
 
 function hasUniqueProfileIds(values: Array<{ profile_id: string }>) {

@@ -28,7 +28,7 @@ describe("CiSettingsPanel solution profile library", () => {
 
     renderSettings();
     expect(await screen.findByRole("heading", { name: "Solution profile library" })).toBeTruthy();
-    expect(screen.getByText("Performance assumptions are analyst inputs and are not manufacturer certification.")).toBeTruthy();
+    expect(screen.getByText(/Draft evidence is stored for completion/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Set ASTRO N7 reference as default solar profile" }).textContent).toBe("Default");
 
     await user.click(screen.getByRole("button", { name: "Add profile" }));
@@ -65,6 +65,19 @@ describe("CiSettingsPanel solution profile library", () => {
     await user.type(screen.getByLabelText("Analysis term"), "51");
     expect(screen.getByText(/within the allowed ranges/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save profile" })).toHaveProperty("disabled", true);
+  });
+
+  it("shows inverter reactive capability evidence without offering it as a generator default", async () => {
+    const user = userEvent.setup();
+    const profile = deviceProfile();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(readyState(profile)), { status: 200 })));
+
+    renderSettings();
+    await screen.findByRole("heading", { name: "Solution profile library" });
+    await user.click(screen.getByRole("tab", { name: "Inverter" }));
+    expect((screen.getByLabelText("Reactive support cap") as HTMLInputElement).value).toBe("82.5");
+    expect((screen.getByLabelText("Rated apparent power") as HTMLInputElement).value).toBe("137.5");
+    expect(screen.queryByRole("button", { name: /default inverter profile/ })).toBeNull();
   });
 
   it("locks profile edits while a saved snapshot is in flight", async () => {
@@ -105,7 +118,7 @@ function readyState(profile: CiDeviceProfile) {
 
 function deviceProfile(): CiDeviceProfile {
   return {
-    contract_version: "ci_device_profile_v3",
+    contract_version: "ci_device_profile_v4",
     profile_id: "workspace_device_profile",
     currency: "AUD",
     tax_basis: "gst_exclusive",
@@ -121,6 +134,7 @@ function deviceProfile(): CiDeviceProfile {
     solution_profiles: {
       solar_profiles: [{ profile_id: "astro_n7_default", version: 1, status: "published", name: "ASTRO N7 reference", manufacturer: "Astronergy", model: "ASTRO N7 630W", module_technology: "monocrystalline", rated_power_w: 630, module_efficiency_percent: 23.3, temperature_coefficient_percent_per_c: -0.29, annual_degradation_percent: 0.4, default_dc_ac_ratio: 1.15, source_type: "manufacturer_datasheet", source_label: "ASTRO N7 datasheet", source_date: "2026-06-01" }],
       battery_profiles: [{ profile_id: "fox_cq7_default", version: 1, status: "published", name: "CQ7 reference", manufacturer: "Fox ESS", model: "CQ7", chemistry: "LFP", coupling: "ac", nominal_capacity_kwh_per_unit: 7, continuous_power_kw_per_unit: 3.5, round_trip_efficiency_percent: 90, power_conversion_efficiency_percent: 97, usable_depth_of_discharge_percent: 90, standby_loss_percent_per_month: 0.5, annual_capacity_degradation_percent: 2, minimum_units: 1, maximum_units: 500, source_type: "manufacturer_datasheet", source_label: "CQ7 datasheet", source_date: "2026-06-01" }],
+      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "draft", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
     },
     default_solution_profile_selection: { solar_profile_id: "astro_n7_default", battery_profile_id: "fox_cq7_default" },
     discount_rate: 0.08,

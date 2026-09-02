@@ -9,13 +9,14 @@ import {
   saveCiDeviceProfile,
   type CiBatterySolutionProfile,
   type CiDeviceProfile,
+  type CiInverterSolutionProfile,
   type CiSolarSolutionProfile,
   type CiSolutionProfileSourceType,
   type CiSolutionProfileStatus,
 } from "@/features/ci/api/ci-device-profile";
 
 type SettingsSection = "solution_profiles" | "equipment_finance";
-type SolutionProfileKind = "solar" | "battery";
+type SolutionProfileKind = "solar" | "battery" | "inverter";
 
 export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -25,6 +26,7 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   const [profileKind, setProfileKind] = useState<SolutionProfileKind>("solar");
   const [selectedSolarId, setSelectedSolarId] = useState<string | null>(null);
   const [selectedBatteryId, setSelectedBatteryId] = useState<string | null>(null);
+  const [selectedInverterId, setSelectedInverterId] = useState<string | null>(null);
   const save = useMutation({
     mutationFn: (profile: CiDeviceProfile) => saveCiDeviceProfile(profile),
     onSuccess: (state) => {
@@ -40,6 +42,7 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
       setDraft(next);
       setSelectedSolarId(next.default_solution_profile_selection.solar_profile_id);
       setSelectedBatteryId(next.default_solution_profile_selection.battery_profile_id);
+      setSelectedInverterId(next.solution_profiles.inverter_profiles[0]?.profile_id ?? null);
     }
   }, [draft, profileQuery.data]);
 
@@ -73,11 +76,19 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
       setSelectedSolarId(profile.profile_id);
       return;
     }
-    if (draft.solution_profiles.battery_profiles.length >= 50) return;
-    const source = draft.solution_profiles.battery_profiles.find((item) => item.profile_id === draft.default_solution_profile_selection.battery_profile_id) ?? draft.solution_profiles.battery_profiles[0];
-    const profile: CiBatterySolutionProfile = { ...structuredClone(source), profile_id: stableProfileId("battery", draft.solution_profiles.battery_profiles), version: 1, status: "draft", name: "New battery profile", source_type: "analyst_assumption", source_label: "Analyst-entered draft assumptions", source_date: null };
-    setDraft((current) => current ? { ...current, solution_profiles: { ...current.solution_profiles, battery_profiles: [...current.solution_profiles.battery_profiles, profile] } } : current);
-    setSelectedBatteryId(profile.profile_id);
+    if (kind === "battery") {
+      if (draft.solution_profiles.battery_profiles.length >= 50) return;
+      const source = draft.solution_profiles.battery_profiles.find((item) => item.profile_id === draft.default_solution_profile_selection.battery_profile_id) ?? draft.solution_profiles.battery_profiles[0];
+      const profile: CiBatterySolutionProfile = { ...structuredClone(source), profile_id: stableProfileId("battery", draft.solution_profiles.battery_profiles), version: 1, status: "draft", name: "New battery profile", source_type: "analyst_assumption", source_label: "Analyst-entered draft assumptions", source_date: null };
+      setDraft((current) => current ? { ...current, solution_profiles: { ...current.solution_profiles, battery_profiles: [...current.solution_profiles.battery_profiles, profile] } } : current);
+      setSelectedBatteryId(profile.profile_id);
+      return;
+    }
+    if (draft.solution_profiles.inverter_profiles.length >= 50) return;
+    const source = draft.solution_profiles.inverter_profiles[0];
+    const profile: CiInverterSolutionProfile = { ...structuredClone(source), profile_id: stableProfileId("inverter", draft.solution_profiles.inverter_profiles), version: 1, status: "draft", name: "New inverter profile", source_type: "analyst_assumption", source_label: "Analyst-entered draft assumptions", source_date: null };
+    setDraft((current) => current ? { ...current, solution_profiles: { ...current.solution_profiles, inverter_profiles: [...current.solution_profiles.inverter_profiles, profile] } } : current);
+    setSelectedInverterId(profile.profile_id);
   };
 
   const updateSolarProfile = (profile: CiSolarSolutionProfile) => setDraft((current) => current ? {
@@ -87,6 +98,10 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   const updateBatteryProfile = (profile: CiBatterySolutionProfile) => setDraft((current) => current ? {
     ...current,
     solution_profiles: { ...current.solution_profiles, battery_profiles: current.solution_profiles.battery_profiles.map((item) => item.profile_id === profile.profile_id ? profile : item) },
+  } : current);
+  const updateInverterProfile = (profile: CiInverterSolutionProfile) => setDraft((current) => current ? {
+    ...current,
+    solution_profiles: { ...current.solution_profiles, inverter_profiles: current.solution_profiles.inverter_profiles.map((item) => item.profile_id === profile.profile_id ? profile : item) },
   } : current);
 
   const validationMessage = draft ? validateDraft(draft) : "Device profile is not available.";
@@ -121,11 +136,14 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
                     onDefaultSolar={(solar_profile_id) => setDraft((current) => current ? { ...current, default_solution_profile_selection: { ...current.default_solution_profile_selection, solar_profile_id } } : current)}
                     onKindChange={setProfileKind}
                     onSelectBattery={setSelectedBatteryId}
+                    onSelectInverter={setSelectedInverterId}
                     onSelectSolar={setSelectedSolarId}
                     onUpdateBattery={updateBatteryProfile}
+                    onUpdateInverter={updateInverterProfile}
                     onUpdateSolar={updateSolarProfile}
                     profiles={draft.solution_profiles}
                     selectedBatteryId={selectedBatteryId}
+                    selectedInverterId={selectedInverterId}
                     selectedSolarId={selectedSolarId}
                   />
                 ) : (
@@ -155,7 +173,7 @@ function SettingsTab({ active, label, onClick }: { active: boolean; label: strin
   return <button aria-selected={active} className={`border-b-2 px-3 py-3 text-sm font-semibold ${active ? "border-cyan-600 text-cyan-900" : "border-transparent text-slate-500 hover:text-slate-800"}`} onClick={onClick} role="tab" type="button">{label}</button>;
 }
 
-function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd, onDefaultBattery, onDefaultSolar, onKindChange, onSelectBattery, onSelectSolar, onUpdateBattery, onUpdateSolar, profiles, selectedBatteryId, selectedSolarId }: {
+function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd, onDefaultBattery, onDefaultSolar, onKindChange, onSelectBattery, onSelectInverter, onSelectSolar, onUpdateBattery, onUpdateInverter, onUpdateSolar, profiles, selectedBatteryId, selectedInverterId, selectedSolarId }: {
   defaultBatteryId: string;
   defaultSolarId: string;
   kind: SolutionProfileKind;
@@ -164,23 +182,28 @@ function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd
   onDefaultSolar: (profileId: string) => void;
   onKindChange: (kind: SolutionProfileKind) => void;
   onSelectBattery: (profileId: string) => void;
+  onSelectInverter: (profileId: string) => void;
   onSelectSolar: (profileId: string) => void;
   onUpdateBattery: (profile: CiBatterySolutionProfile) => void;
+  onUpdateInverter: (profile: CiInverterSolutionProfile) => void;
   onUpdateSolar: (profile: CiSolarSolutionProfile) => void;
   profiles: CiDeviceProfile["solution_profiles"];
   selectedBatteryId: string | null;
+  selectedInverterId: string | null;
   selectedSolarId: string | null;
 }) {
   const selectedSolar = profiles.solar_profiles.find((item) => item.profile_id === selectedSolarId) ?? profiles.solar_profiles[0];
   const selectedBattery = profiles.battery_profiles.find((item) => item.profile_id === selectedBatteryId) ?? profiles.battery_profiles[0];
+  const selectedInverter = profiles.inverter_profiles.find((item) => item.profile_id === selectedInverterId) ?? profiles.inverter_profiles[0];
   return (
     <section aria-labelledby="solution-profiles-title" className="space-y-5">
-      <div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Library className="size-5" /></span><div><h3 className="font-semibold text-slate-950" id="solution-profiles-title">Solution profile library</h3><p className="mt-1 text-xs leading-5 text-slate-500">Only Published profiles can be selected as generator defaults. Drafts can be saved and retired profiles remain available for audit history.</p></div></div>
-      <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950">Performance assumptions are analyst inputs and are not manufacturer certification.</p>
+      <div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Library className="size-5" /></span><div><h3 className="font-semibold text-slate-950" id="solution-profiles-title">Solution profile library</h3><p className="mt-1 text-xs leading-5 text-slate-500">Only Published solar and battery profiles can be selected as generator defaults. Drafts can be saved and retired profiles remain available for audit history.</p></div></div>
+      <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950">Draft evidence is stored for completion but is excluded from solution generation and reactive-support claims.</p>
 
-      <div aria-label="Solution profile types" className="grid grid-cols-2 rounded-lg bg-slate-100 p-1" role="tablist">
+      <div aria-label="Solution profile types" className="grid grid-cols-3 rounded-lg bg-slate-100 p-1" role="tablist">
         <ProfileKindTab active={kind === "solar"} icon={SunMedium} label="Solar" onClick={() => onKindChange("solar")} />
         <ProfileKindTab active={kind === "battery"} icon={BatteryCharging} label="Battery" onClick={() => onKindChange("battery")} />
+        <ProfileKindTab active={kind === "inverter"} icon={Zap} label="Inverter" onClick={() => onKindChange("inverter")} />
       </div>
 
       {kind === "solar" ? (
@@ -196,7 +219,7 @@ function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd
           />
           {selectedSolar ? <SolarProfileEditor isDefault={selectedSolar.profile_id === defaultSolarId} onDefault={() => onDefaultSolar(selectedSolar.profile_id)} onUpdate={onUpdateSolar} profile={selectedSolar} /> : null}
         </>
-      ) : (
+      ) : kind === "battery" ? (
         <>
           <ProfileList
             defaultId={defaultBatteryId}
@@ -209,6 +232,18 @@ function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd
           />
           {selectedBattery ? <BatteryProfileEditor isDefault={selectedBattery.profile_id === defaultBatteryId} onDefault={() => onDefaultBattery(selectedBattery.profile_id)} onUpdate={onUpdateBattery} profile={selectedBattery} /> : null}
         </>
+      ) : (
+        <>
+          <ProfileList
+            defaultId={null}
+            kind="inverter"
+            onAdd={() => onAdd("inverter")}
+            onSelect={onSelectInverter}
+            profiles={profiles.inverter_profiles}
+            selectedId={selectedInverter?.profile_id ?? null}
+          />
+          {selectedInverter ? <InverterProfileEditor onUpdate={onUpdateInverter} profile={selectedInverter} /> : null}
+        </>
       )}
     </section>
   );
@@ -219,12 +254,12 @@ function ProfileKindTab({ active, icon: Icon, label, onClick }: { active: boolea
 }
 
 function ProfileList({ defaultId, kind, onAdd, onDefault, onSelect, profiles, selectedId }: {
-  defaultId: string;
+  defaultId: string | null;
   kind: SolutionProfileKind;
   onAdd: () => void;
-  onDefault: (profileId: string) => void;
+  onDefault?: (profileId: string) => void;
   onSelect: (profileId: string) => void;
-  profiles: Array<CiSolarSolutionProfile | CiBatterySolutionProfile>;
+  profiles: Array<CiSolarSolutionProfile | CiBatterySolutionProfile | CiInverterSolutionProfile>;
   selectedId: string | null;
 }) {
   return (
@@ -237,7 +272,7 @@ function ProfileList({ defaultId, kind, onAdd, onDefault, onSelect, profiles, se
           return (
             <article className={`rounded-xl border p-3 ${selected ? "border-cyan-300 bg-cyan-50/50" : "border-slate-200 bg-white"}`} key={profile.profile_id}>
               <button aria-label={`Edit ${kind} profile ${profile.name}`} className="w-full text-left" onClick={() => onSelect(profile.profile_id)} type="button"><span className="flex items-start justify-between gap-2"><span><strong className="block text-sm text-slate-950">{profile.name}</strong><small className="mt-1 block text-xs text-slate-500">{profile.manufacturer} · {profile.model}</small></span><StatusBadge status={profile.status} /></span><span className="mt-3 block text-[10px] text-slate-400">{profile.profile_id} · v{profile.version}</span></button>
-              <button aria-label={`Set ${profile.name} as default ${kind} profile`} className={`mt-3 w-full rounded-md border px-2 py-1.5 text-xs font-semibold ${isDefault ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 text-slate-600 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"}`} disabled={profile.status !== "published" || isDefault} onClick={() => onDefault(profile.profile_id)} type="button">{isDefault ? "Default" : profile.status === "published" ? "Set as default" : "Publish to use"}</button>
+              {onDefault ? <button aria-label={`Set ${profile.name} as default ${kind} profile`} className={`mt-3 w-full rounded-md border px-2 py-1.5 text-xs font-semibold ${isDefault ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 text-slate-600 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"}`} disabled={profile.status !== "published" || isDefault} onClick={() => onDefault(profile.profile_id)} type="button">{isDefault ? "Default" : profile.status === "published" ? "Set as default" : "Publish to use"}</button> : null}
             </article>
           );
         })}
@@ -269,31 +304,54 @@ function SolarProfileEditor({ isDefault, onDefault, onUpdate, profile }: { isDef
 }
 
 function BatteryProfileEditor({ isDefault, onDefault, onUpdate, profile }: { isDefault: boolean; onDefault: () => void; onUpdate: (profile: CiBatterySolutionProfile) => void; profile: CiBatterySolutionProfile }) {
+  const missingFields = batteryMissingFields(profile);
   return (
     <ProfileEditorShell isDefault={isDefault} kind="battery" onDefault={onDefault} onStatusChange={(status) => onUpdate({ ...profile, status })} onVersionChange={(version) => onUpdate({ ...profile, version })} profile={profile}>
+      {missingFields.length ? <p className="col-span-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Draft only — confirm before publishing: {missingFields.join(", ")}.</p> : null}
       <TextProfileField label="Name" onChange={(name) => onUpdate({ ...profile, name })} value={profile.name} />
       <TextProfileField label="Manufacturer" onChange={(manufacturer) => onUpdate({ ...profile, manufacturer })} value={profile.manufacturer} />
       <TextProfileField label="Model" onChange={(model) => onUpdate({ ...profile, model })} value={profile.model} />
       <TextProfileField label="Chemistry" onChange={(chemistry) => onUpdate({ ...profile, chemistry })} value={profile.chemistry} />
-      <label className="grid gap-1 text-xs font-medium text-slate-600"><span>Coupling</span><select aria-label="Coupling" className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm" onChange={(event) => onUpdate({ ...profile, coupling: event.target.value as "ac" | "dc" })} value={profile.coupling}><option value="ac">AC</option><option value="dc">DC</option></select></label>
-      <NumberProfileField label="Nominal capacity per unit" onChange={(nominal_capacity_kwh_per_unit) => onUpdate({ ...profile, nominal_capacity_kwh_per_unit })} suffix="kWh" value={profile.nominal_capacity_kwh_per_unit} />
-      <NumberProfileField label="Continuous power per unit" onChange={(continuous_power_kw_per_unit) => onUpdate({ ...profile, continuous_power_kw_per_unit })} suffix="kW" value={profile.continuous_power_kw_per_unit} />
-      <NumberProfileField label="Round-trip efficiency" onChange={(round_trip_efficiency_percent) => onUpdate({ ...profile, round_trip_efficiency_percent })} suffix="%" value={profile.round_trip_efficiency_percent} />
-      <NumberProfileField label="Power conversion efficiency" onChange={(power_conversion_efficiency_percent) => onUpdate({ ...profile, power_conversion_efficiency_percent })} suffix="%" value={profile.power_conversion_efficiency_percent} />
-      <NumberProfileField label="Usable depth of discharge" onChange={(usable_depth_of_discharge_percent) => onUpdate({ ...profile, usable_depth_of_discharge_percent })} suffix="%" value={profile.usable_depth_of_discharge_percent} />
-      <NumberProfileField label="Standby loss" onChange={(standby_loss_percent_per_month) => onUpdate({ ...profile, standby_loss_percent_per_month })} suffix="% / month" value={profile.standby_loss_percent_per_month} />
-      <NumberProfileField label="Annual capacity degradation" onChange={(annual_capacity_degradation_percent) => onUpdate({ ...profile, annual_capacity_degradation_percent })} suffix="% / yr" value={profile.annual_capacity_degradation_percent} />
-      <NumberProfileField integer label="Minimum units" onChange={(minimum_units) => onUpdate({ ...profile, minimum_units })} value={profile.minimum_units} />
-      <NumberProfileField integer label="Maximum units" onChange={(maximum_units) => onUpdate({ ...profile, maximum_units })} value={profile.maximum_units} />
+      <label className="grid gap-1 text-xs font-medium text-slate-600"><span>Coupling</span><select aria-label="Coupling" className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm" onChange={(event) => onUpdate({ ...profile, coupling: event.target.value ? event.target.value as "ac" | "dc" : null })} value={profile.coupling ?? ""}><option value="">Needs confirmation</option><option value="ac">AC</option><option value="dc">DC</option></select></label>
+      <NullableNumberProfileField label="Nominal capacity per unit" onChange={(nominal_capacity_kwh_per_unit) => onUpdate({ ...profile, nominal_capacity_kwh_per_unit })} suffix="kWh" value={profile.nominal_capacity_kwh_per_unit} />
+      <NullableNumberProfileField label="Continuous power per unit" onChange={(continuous_power_kw_per_unit) => onUpdate({ ...profile, continuous_power_kw_per_unit })} suffix="kW" value={profile.continuous_power_kw_per_unit} />
+      <NullableNumberProfileField label="Round-trip efficiency" onChange={(round_trip_efficiency_percent) => onUpdate({ ...profile, round_trip_efficiency_percent })} suffix="%" value={profile.round_trip_efficiency_percent} />
+      <NullableNumberProfileField label="Power conversion efficiency" onChange={(power_conversion_efficiency_percent) => onUpdate({ ...profile, power_conversion_efficiency_percent })} suffix="%" value={profile.power_conversion_efficiency_percent} />
+      <NullableNumberProfileField label="Usable depth of discharge" onChange={(usable_depth_of_discharge_percent) => onUpdate({ ...profile, usable_depth_of_discharge_percent })} suffix="%" value={profile.usable_depth_of_discharge_percent} />
+      <NullableNumberProfileField label="Standby loss" onChange={(standby_loss_percent_per_month) => onUpdate({ ...profile, standby_loss_percent_per_month })} suffix="% / month" value={profile.standby_loss_percent_per_month} />
+      <NullableNumberProfileField label="Annual capacity degradation" onChange={(annual_capacity_degradation_percent) => onUpdate({ ...profile, annual_capacity_degradation_percent })} suffix="% / yr" value={profile.annual_capacity_degradation_percent} />
+      <NullableNumberProfileField integer label="Minimum units" onChange={(minimum_units) => onUpdate({ ...profile, minimum_units })} value={profile.minimum_units} />
+      <NullableNumberProfileField integer label="Maximum units" onChange={(maximum_units) => onUpdate({ ...profile, maximum_units })} value={profile.maximum_units} />
       <SourceFields onUpdate={(source) => onUpdate({ ...profile, ...source })} profile={profile} />
     </ProfileEditorShell>
   );
 }
 
-function ProfileEditorShell({ children, isDefault, kind, onDefault, onStatusChange, onVersionChange, profile }: { children: ReactNode; isDefault: boolean; kind: SolutionProfileKind; onDefault: () => void; onStatusChange: (status: CiSolutionProfileStatus) => void; onVersionChange: (version: number) => void; profile: CiSolarSolutionProfile | CiBatterySolutionProfile }) {
+function InverterProfileEditor({ onUpdate, profile }: { onUpdate: (profile: CiInverterSolutionProfile) => void; profile: CiInverterSolutionProfile }) {
+  return (
+    <ProfileEditorShell isDefault={false} kind="inverter" onStatusChange={(status) => onUpdate({ ...profile, status })} onVersionChange={(version) => onUpdate({ ...profile, version })} profile={profile}>
+      <TextProfileField label="Name" onChange={(name) => onUpdate({ ...profile, name })} value={profile.name} />
+      <TextProfileField label="Manufacturer" onChange={(manufacturer) => onUpdate({ ...profile, manufacturer })} value={profile.manufacturer} />
+      <TextProfileField label="Model" onChange={(model) => onUpdate({ ...profile, model })} value={profile.model} />
+      <NumberProfileField label="Rated active power" onChange={(rated_active_power_kw) => onUpdate({ ...profile, rated_active_power_kw })} suffix="kW" value={profile.rated_active_power_kw} />
+      <NumberProfileField label="Rated apparent power" onChange={(rated_apparent_power_kva) => onUpdate({ ...profile, rated_apparent_power_kva })} suffix="kVA" value={profile.rated_apparent_power_kva} />
+      <NumberProfileField label="Reactive support cap" onChange={(maximum_reactive_power_kvar) => onUpdate({ ...profile, maximum_reactive_power_kvar })} suffix="kvar" value={profile.maximum_reactive_power_kvar} />
+      <NumberProfileField label="Leading power factor limit" onChange={(power_factor_leading_limit) => onUpdate({ ...profile, power_factor_leading_limit })} value={profile.power_factor_leading_limit} />
+      <NumberProfileField label="Lagging power factor limit" onChange={(power_factor_lagging_limit) => onUpdate({ ...profile, power_factor_lagging_limit })} value={profile.power_factor_lagging_limit} />
+      <BooleanProfileField label="P–Q capability curve available" onChange={(pq_capability_curve_available) => onUpdate({ ...profile, pq_capability_curve_available })} value={profile.pq_capability_curve_available} />
+      <BooleanProfileField label="Reactive power at zero active power" onChange={(reactive_power_at_zero_active_power) => onUpdate({ ...profile, reactive_power_at_zero_active_power })} value={profile.reactive_power_at_zero_active_power} />
+      <BooleanProfileField label="Night reactive capability" onChange={(night_reactive_capability) => onUpdate({ ...profile, night_reactive_capability })} value={profile.night_reactive_capability} />
+      <NumberProfileField label="European efficiency" onChange={(european_efficiency_percent) => onUpdate({ ...profile, european_efficiency_percent })} suffix="%" value={profile.european_efficiency_percent} />
+      <NumberProfileField label="Maximum efficiency" onChange={(maximum_efficiency_percent) => onUpdate({ ...profile, maximum_efficiency_percent })} suffix="%" value={profile.maximum_efficiency_percent} />
+      <SourceFields onUpdate={(source) => onUpdate({ ...profile, ...source })} profile={profile} />
+    </ProfileEditorShell>
+  );
+}
+
+function ProfileEditorShell({ children, isDefault, kind, onDefault, onStatusChange, onVersionChange, profile }: { children: ReactNode; isDefault: boolean; kind: SolutionProfileKind; onDefault?: () => void; onStatusChange: (status: CiSolutionProfileStatus) => void; onVersionChange: (version: number) => void; profile: CiSolarSolutionProfile | CiBatterySolutionProfile | CiInverterSolutionProfile }) {
   return (
     <section aria-label={`Edit ${kind} profile`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h4 className="font-semibold text-slate-950">Edit {kind} profile</h4><p className="mt-1 text-xs text-slate-500">The profile ID is stable. Increase the version when publishing revised assumptions.</p></div><Button disabled={profile.status !== "published" || isDefault} onClick={onDefault} type="button" variant="outline">{isDefault ? "Current default" : "Set as default"}</Button></div>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h4 className="font-semibold text-slate-950">Edit {kind} profile</h4><p className="mt-1 text-xs text-slate-500">The profile ID is stable. Increase the version when publishing revised assumptions.</p></div>{onDefault ? <Button disabled={profile.status !== "published" || isDefault} onClick={onDefault} type="button" variant="outline">{isDefault ? "Current default" : "Set as default"}</Button> : null}</div>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1 text-xs font-medium text-slate-600"><span>Profile ID</span><input aria-label="Profile ID" className="rounded-md border border-slate-200 bg-slate-100 px-2.5 py-2 text-sm text-slate-600" readOnly value={profile.profile_id} /></label>
         <NumberProfileField integer label="Version" onChange={onVersionChange} value={profile.version} />
@@ -314,6 +372,30 @@ function TextProfileField({ label, onChange, optional = false, value }: { label:
 
 function NumberProfileField({ integer = false, label, onChange, suffix, value }: { integer?: boolean; label: string; onChange: (value: number) => void; suffix?: string; value: number }) {
   return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><span className="relative"><input aria-label={label} className={`w-full rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums ${suffix ? "pr-20" : ""}`} onChange={(event) => onChange(integer ? Math.round(Number(event.target.value)) : Number(event.target.value))} step={integer ? "1" : "any"} type="number" value={value} />{suffix ? <span className="absolute right-2.5 top-2 text-xs text-slate-400">{suffix}</span> : null}</span></label>;
+}
+
+function NullableNumberProfileField({ integer = false, label, onChange, suffix, value }: { integer?: boolean; label: string; onChange: (value: number | null) => void; suffix?: string; value: number | null }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><span className="relative"><input aria-label={label} className={`w-full rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums ${suffix ? "pr-20" : ""}`} onChange={(event) => { const raw = event.target.value; onChange(raw === "" ? null : integer ? Math.round(Number(raw)) : Number(raw)); }} placeholder="Required to publish" step={integer ? "1" : "any"} type="number" value={value ?? ""} />{suffix ? <span className="absolute right-2.5 top-2 text-xs text-slate-400">{suffix}</span> : null}</span></label>;
+}
+
+function BooleanProfileField({ label, onChange, value }: { label: string; onChange: (value: boolean) => void; value: boolean }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><select aria-label={label} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm" onChange={(event) => onChange(event.target.value === "yes")} value={value ? "yes" : "no"}><option value="yes">Yes</option><option value="no">No</option></select></label>;
+}
+
+function batteryMissingFields(profile: CiBatterySolutionProfile) {
+  const fields: Array<[keyof CiBatterySolutionProfile, string]> = [
+    ["coupling", "AC or DC coupling basis"],
+    ["nominal_capacity_kwh_per_unit", "nominal capacity"],
+    ["continuous_power_kw_per_unit", "continuous power"],
+    ["round_trip_efficiency_percent", "round-trip efficiency"],
+    ["power_conversion_efficiency_percent", "PCS conversion efficiency"],
+    ["usable_depth_of_discharge_percent", "usable depth of discharge"],
+    ["standby_loss_percent_per_month", "standby loss"],
+    ["annual_capacity_degradation_percent", "annual capacity degradation"],
+    ["minimum_units", "minimum units"],
+    ["maximum_units", "maximum units"],
+  ];
+  return fields.filter(([key]) => profile[key] === null).map(([, label]) => label);
 }
 
 function EquipmentAndFinance({ draft, onBatteryPrice, onDraftChange, onInverterPrice, onPvPrice }: { draft: CiDeviceProfile; onBatteryPrice: (index: number, field: "capital_cost_aud" | "replacement_cost_aud" | "annual_om_aud", value: number) => void; onDraftChange: Dispatch<SetStateAction<CiDeviceProfile | null>>; onInverterPrice: (index: number, field: "capital_cost_aud" | "replacement_cost_aud" | "annual_om_aud", value: number) => void; onPvPrice: (field: "capital_cost_aud_per_kwp_dc" | "replacement_cost_aud_per_kwp_dc" | "annual_om_aud", value: number) => void }) {
@@ -353,9 +435,11 @@ function nullable(value: string) {
 function validateDraft(profile: CiDeviceProfile) {
   const solarProfiles = profile.solution_profiles.solar_profiles;
   const batteryProfiles = profile.solution_profiles.battery_profiles;
-  if (!solarProfiles.every(validSolarProfile) || !batteryProfiles.every(validBatteryProfile)) return "Complete every profile field with valid performance values before saving.";
-  if (solarProfiles.length > 50 || batteryProfiles.length > 50) return "Each profile library can contain at most 50 profiles.";
-  if (new Set([...solarProfiles, ...batteryProfiles].map((item) => item.profile_id)).size !== solarProfiles.length + batteryProfiles.length) return "Profile IDs must be globally unique.";
+  const inverterProfiles = profile.solution_profiles.inverter_profiles;
+  if (!solarProfiles.every(validSolarProfile) || !batteryProfiles.every(validBatteryProfile) || !inverterProfiles.every(validInverterProfile)) return "Complete every Published or Retired profile with valid performance values. Draft battery profiles may keep unknown fields blank.";
+  if (solarProfiles.length > 50 || batteryProfiles.length > 50 || inverterProfiles.length > 50) return "Each profile library can contain at most 50 profiles.";
+  const allProfiles = [...solarProfiles, ...batteryProfiles, ...inverterProfiles];
+  if (new Set(allProfiles.map((item) => item.profile_id)).size !== allProfiles.length) return "Profile IDs must be globally unique.";
   if (!solarProfiles.some((item) => item.profile_id === profile.default_solution_profile_selection.solar_profile_id && item.status === "published")) return "Choose a Published solar profile as the default.";
   if (!batteryProfiles.some((item) => item.profile_id === profile.default_solution_profile_selection.battery_profile_id && item.status === "published")) return "Choose a Published battery profile as the default.";
   const pv = profile.equipment_catalog.pv_products[0];
@@ -390,5 +474,15 @@ function validSolarProfile(profile: CiSolarSolutionProfile) {
 }
 
 function validBatteryProfile(profile: CiBatterySolutionProfile) {
-  return Boolean(profile.profile_id && profile.name.trim() && profile.manufacturer.trim() && profile.model.trim() && profile.chemistry.trim() && profile.source_label.trim() && Number.isInteger(profile.version) && profile.version >= 1 && profile.version <= 10_000 && profile.nominal_capacity_kwh_per_unit > 0 && profile.continuous_power_kw_per_unit > 0 && profile.round_trip_efficiency_percent >= 1 && profile.round_trip_efficiency_percent <= 100 && profile.power_conversion_efficiency_percent >= 1 && profile.power_conversion_efficiency_percent <= 100 && profile.usable_depth_of_discharge_percent >= 1 && profile.usable_depth_of_discharge_percent <= 100 && profile.standby_loss_percent_per_month >= 0 && profile.standby_loss_percent_per_month < 100 && profile.annual_capacity_degradation_percent >= 0 && profile.annual_capacity_degradation_percent < 100 && Number.isInteger(profile.minimum_units) && profile.minimum_units >= 1 && profile.minimum_units <= 10_000 && Number.isInteger(profile.maximum_units) && profile.maximum_units >= profile.minimum_units && profile.maximum_units <= 10_000);
+  const common = Boolean(profile.profile_id && profile.name.trim() && profile.manufacturer.trim() && profile.model.trim() && profile.chemistry.trim() && profile.source_label.trim() && Number.isInteger(profile.version) && profile.version >= 1 && profile.version <= 10_000);
+  if (!common) return false;
+  const allowMissing = profile.status === "draft";
+  const validOrMissing = (value: number | null, validate: (candidate: number) => boolean) => value === null ? allowMissing : validate(value);
+  const unitsValid = validOrMissing(profile.minimum_units, (value) => Number.isInteger(value) && value >= 1 && value <= 10_000) && validOrMissing(profile.maximum_units, (value) => Number.isInteger(value) && value >= 1 && value <= 10_000);
+  const unitOrderValid = profile.minimum_units === null || profile.maximum_units === null || profile.maximum_units >= profile.minimum_units;
+  return Boolean((profile.coupling === null ? allowMissing : ["ac", "dc"].includes(profile.coupling)) && validOrMissing(profile.nominal_capacity_kwh_per_unit, (value) => value > 0) && validOrMissing(profile.continuous_power_kw_per_unit, (value) => value > 0) && validOrMissing(profile.round_trip_efficiency_percent, (value) => value >= 1 && value <= 100) && validOrMissing(profile.power_conversion_efficiency_percent, (value) => value >= 1 && value <= 100) && validOrMissing(profile.usable_depth_of_discharge_percent, (value) => value >= 1 && value <= 100) && validOrMissing(profile.standby_loss_percent_per_month, (value) => value >= 0 && value < 100) && validOrMissing(profile.annual_capacity_degradation_percent, (value) => value >= 0 && value < 100) && unitsValid && unitOrderValid);
+}
+
+function validInverterProfile(profile: CiInverterSolutionProfile) {
+  return Boolean(profile.profile_id && profile.name.trim() && profile.manufacturer.trim() && profile.model.trim() && profile.source_label.trim() && Number.isInteger(profile.version) && profile.version >= 1 && profile.version <= 10_000 && profile.rated_active_power_kw > 0 && profile.rated_apparent_power_kva >= profile.rated_active_power_kw && profile.maximum_reactive_power_kvar >= 0 && profile.maximum_reactive_power_kvar <= profile.rated_apparent_power_kva && profile.power_factor_leading_limit >= 0 && profile.power_factor_leading_limit <= 1 && profile.power_factor_lagging_limit >= 0 && profile.power_factor_lagging_limit <= 1 && profile.european_efficiency_percent >= 1 && profile.european_efficiency_percent <= 100 && profile.maximum_efficiency_percent >= profile.european_efficiency_percent && profile.maximum_efficiency_percent <= 100);
 }

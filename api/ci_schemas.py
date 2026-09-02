@@ -61,9 +61,11 @@ class CiProjectRebateProfileSaveRequest(BaseModel):
 
 
 class CiDeviceProfileRequest(BaseModel):
-    contract_version: Literal["ci_device_profile_v2", "ci_device_profile_v3"] = (
-        "ci_device_profile_v2"
-    )
+    contract_version: Literal[
+        "ci_device_profile_v2",
+        "ci_device_profile_v3",
+        "ci_device_profile_v4",
+    ] = "ci_device_profile_v2"
     profile_id: Literal["workspace_device_profile"] = "workspace_device_profile"
     currency: Literal["AUD"] = "AUD"
     tax_basis: Literal["gst_exclusive"] = "gst_exclusive"

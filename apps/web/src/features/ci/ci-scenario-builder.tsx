@@ -23,6 +23,18 @@ import type {
 import type { CiScenarioInput } from "@/features/ci/api/ci-scenarios";
 
 type NumericRange = { minimum: string; maximum: string; step: string };
+type CompleteBatterySolutionProfile = CiBatterySolutionProfile & {
+  coupling: "ac";
+  nominal_capacity_kwh_per_unit: number;
+  continuous_power_kw_per_unit: number;
+  round_trip_efficiency_percent: number;
+  power_conversion_efficiency_percent: number;
+  usable_depth_of_discharge_percent: number;
+  standby_loss_percent_per_month: number;
+  annual_capacity_degradation_percent: number;
+  minimum_units: number;
+  maximum_units: number;
+};
 type SiteFactorsForm = {
   resource_source: CiSolutionGenerationRequest["site_factors"]["resource_source"];
   resource_label: string;
@@ -99,7 +111,7 @@ export function CiScenarioBuilder({
     [deviceProfile],
   );
   const publishedBattery = useMemo(
-    () => deviceProfile.solution_profiles.battery_profiles.filter((profile) => profile.status === "published" && profile.coupling === "ac"),
+    () => deviceProfile.solution_profiles.battery_profiles.filter(isCompletePublishedAcBatteryProfile),
     [deviceProfile],
   );
   const restored = restoreBuilderState(
@@ -301,8 +313,8 @@ function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, r
 function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles, range }: {
   onProfileChange: (profileId: string) => void;
   onRangeChange: (range: NumericRange) => void;
-  profile: CiBatterySolutionProfile | null;
-  profiles: CiBatterySolutionProfile[];
+  profile: CompleteBatterySolutionProfile | null;
+  profiles: CompleteBatterySolutionProfile[];
   range: NumericRange;
 }) {
   return (
@@ -378,8 +390,22 @@ function MissingProfile() {
   return <p className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-4 text-center text-xs text-amber-900">No published profile is available.</p>;
 }
 
+function isCompletePublishedAcBatteryProfile(profile: CiBatterySolutionProfile): profile is CompleteBatterySolutionProfile {
+  return profile.status === "published" && profile.coupling === "ac" && [
+    profile.nominal_capacity_kwh_per_unit,
+    profile.continuous_power_kw_per_unit,
+    profile.round_trip_efficiency_percent,
+    profile.power_conversion_efficiency_percent,
+    profile.usable_depth_of_discharge_percent,
+    profile.standby_loss_percent_per_month,
+    profile.annual_capacity_degradation_percent,
+    profile.minimum_units,
+    profile.maximum_units,
+  ].every((value) => typeof value === "number" && Number.isFinite(value));
+}
+
 function buildGenerationRequest({ batteryProfile, batteryRange, connection, pvRange, site, solarProfile }: {
-  batteryProfile: CiBatterySolutionProfile | null;
+  batteryProfile: CompleteBatterySolutionProfile | null;
   batteryRange: NumericRange;
   connection: ConnectionOptionsForm;
   pvRange: NumericRange;
@@ -448,7 +474,7 @@ function restoreBuilderState(
   solutions: CiScenarioInput[] | undefined,
   deviceProfile: CiDeviceProfile,
   publishedSolar: CiSolarSolutionProfile[],
-  publishedBattery: CiBatterySolutionProfile[],
+  publishedBattery: CompleteBatterySolutionProfile[],
 ): RestoredBuilderState {
   const defaults: RestoredBuilderState = {
     pvRange: defaultPvRange(),

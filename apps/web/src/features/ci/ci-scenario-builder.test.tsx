@@ -104,7 +104,7 @@ describe("CiScenarioBuilder", () => {
 });
 
 const deviceProfile: CiDeviceProfile = {
-  contract_version: "ci_device_profile_v3",
+  contract_version: "ci_device_profile_v4",
   profile_id: "workspace_device_profile",
   currency: "AUD",
   tax_basis: "gst_exclusive",
@@ -183,6 +183,7 @@ const deviceProfile: CiDeviceProfile = {
       source_label: "Generic screening assumption",
       source_date: null,
     }],
+      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "draft", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
   },
   default_solution_profile_selection: {
     solar_profile_id: "generic_crystalline_pv_v1",

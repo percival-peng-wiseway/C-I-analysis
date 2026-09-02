@@ -21,7 +21,7 @@ from tests.durable_test_helpers import (
 
 def _device_profile(*, solar_status: str = "published") -> dict[str, object]:
     return {
-        "contract_version": "ci_device_profile_v3",
+        "contract_version": "ci_device_profile_v4",
         "solution_profiles": {
             "solar_profiles": [
                 {
@@ -49,6 +49,14 @@ def _device_profile(*, solar_status: str = "published") -> dict[str, object]:
                     "power_conversion_efficiency_percent": 98.0,
                     "usable_depth_of_discharge_percent": 90.0,
                     "source_label": "Synthetic published profile",
+                }
+            ],
+            "inverter_profiles": [
+                {
+                    "profile_id": "inverter-125",
+                    "status": "draft",
+                    "rated_active_power_kw": 125.0,
+                    "maximum_reactive_power_kvar": 82.5,
                 }
             ],
         },
