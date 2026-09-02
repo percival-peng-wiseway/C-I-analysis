@@ -3,6 +3,7 @@ import { BadgeDollarSign, Check, CircleAlert, FileCheck2, MapPin, ShieldCheck } 
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { ciDesignPricePreviewQueryKey } from "@/features/ci/api/ci-design-price-preview";
 import {
   ciSolarStcZoneRatings,
   ciProjectRebateProfileQueryKey,
@@ -69,6 +70,7 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
         setLastAction(variables.approve ? "approve" : "draft");
       }
       void queryClient.invalidateQueries({ queryKey: ["ci-project-annual-financial-comparison", variables.targetProjectId] });
+      void queryClient.invalidateQueries({ queryKey: ciDesignPricePreviewQueryKey(variables.targetProjectId) });
     },
   });
 
@@ -182,8 +184,7 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
         {save.error instanceof Error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{save.error.message}</p> : null}
         {save.isSuccess && !isDirty ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />{lastAction === "approve" ? "Rebate profile approved for Finance." : "Rebate draft saved. Finance will use it only after approval."}</p> : null}
 
-        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 pt-5">
-          <div className="max-w-2xl text-xs leading-5 text-slate-500"><p>Ruleset: {state.data.ruleset.ruleset_id}. Official sources and calculation operands are retained by the backend for audit.</p><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{state.data.ruleset.official_sources.map((source) => <a className="font-medium text-cyan-800 underline decoration-cyan-300 underline-offset-2" href={source.url} key={source.source_id} rel="noreferrer" target="_blank">{source.label}{source.status === "proposal_not_enabled" ? " · proposal not enabled" : ""}</a>)}</div></div>
+        <div className="flex flex-wrap items-center justify-end gap-4 border-t border-slate-200 pt-5">
           <div className="flex gap-2">
             <Button disabled={save.isPending} onClick={() => { setLastAction("draft"); save.mutate({ approve: false, profile: draft, targetProjectId: projectId }); }} type="button" variant="outline">{save.isPending && lastAction === "draft" ? "Saving…" : "Save draft"}</Button>
             <Button disabled={save.isPending || obviousApprovalGaps.length > 0} onClick={() => { setLastAction("approve"); save.mutate({ approve: true, profile: draft, targetProjectId: projectId }); }} type="button"><FileCheck2 className="size-4" />{save.isPending && lastAction === "approve" ? "Approving…" : "Save & use in Finance"}</Button>

@@ -6,6 +6,7 @@ import pytest
 
 from solar_battery.ci_annual_financial_comparison import (
     compare_ci_annual_financial_scenarios,
+    preview_ci_design_candidate_prices,
 )
 from solar_battery.ci_device_profile import suggested_ci_device_profile
 from solar_battery.ci_project_feasibility import canonical_sha256
@@ -419,4 +420,38 @@ def test_no_approved_profile_is_zero_and_manual_quote_is_never_reduced() -> None
     )
     assert device["annual_om_cost_aud_ex_gst"] == round(
         device["gross_upfront_cost_aud_ex_gst"] * 0.015, 2
+    )
+
+
+def test_design_price_preview_lists_every_candidate_and_returns_net_capex() -> None:
+    authored = _scenario()["authored_inputs"]
+    candidates = [
+        {**authored, "scenario_id": "scenario-1", "label": "Option 1"},
+        {
+            **authored,
+            "scenario_id": "scenario-2",
+            "label": "Option 2",
+            "pv_capacity_kwp_dc": 120.0,
+        },
+    ]
+    result = preview_ci_design_candidate_prices(
+        candidates=candidates,
+        device_profile=suggested_ci_device_profile(),
+        rebate_profile=None,
+    )
+
+    assert result["contract_version"] == "ci_design_price_preview_v1"
+    assert result["candidate_count"] == 2
+    assert [item["scenario_id"] for item in result["solutions"]] == [
+        "scenario-1",
+        "scenario-2",
+    ]
+    assert all(
+        item["gross_capex_aud_ex_gst"]
+        - item["upfront_rebate_aud_ex_gst"]
+        == item["net_capex_aud_ex_gst"]
+        for item in result["solutions"]
+    )
+    assert result["quotation_override_basis"].startswith(
+        "Entered quotation replaces modelled Net CAPEX"
     )

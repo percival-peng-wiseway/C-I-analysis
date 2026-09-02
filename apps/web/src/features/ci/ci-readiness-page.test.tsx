@@ -119,6 +119,32 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
     if (path.endsWith("/site-material")) return new Response(JSON.stringify({ contract_version: "ci_project_site_material_v1", photos: [] }), { status: 200 });
     if (path.endsWith("/evidence-intake")) return new Response(JSON.stringify({ contract_version: "ci_project_evidence_state_v1", status: "not_saved", evidence: null }), { status: 200 });
     if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(savedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: savedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
+    if (path.endsWith("/design-price-preview") && savedDesign) return new Response(JSON.stringify({
+      contract_version: "ci_design_price_preview_v1",
+      project_id: path.includes("project-2") ? "project-2" : "project-1",
+      status: "ready",
+      pricing_basis: "workspace_device_profile_less_approved_rebates",
+      device_profile_sha256: "c".repeat(64),
+      rebate_profile_sha256: null,
+      equipment_selection: deviceProfileFixture.default_equipment_selection,
+      candidate_count: savedDesign.candidate_count,
+      solutions: savedDesign.candidates.map((candidate, index) => ({
+        scenario_id: candidate.scenario_id,
+        label: `Option ${index + 1}`,
+        pv_capacity_kwp_dc: candidate.pv_capacity_kwp_dc,
+        battery_capacity_kwh: candidate.nominal_capacity_kwh,
+        inverter_capacity_kw_ac: candidate.pv_inverter_capacity_kw_ac,
+        gross_capex_aud_ex_gst: 100_000 + index * 10_000,
+        upfront_rebate_aud_ex_gst: 10_000,
+        net_capex_aud_ex_gst: 90_000 + index * 10_000,
+        capex_breakdown_aud_ex_gst: { pv_aud: 50_000 + index * 10_000, battery_aud: 40_000, inverter_aud: 10_000 },
+        rebate_calculation: { scenario_id: candidate.scenario_id, customer_facing_permission: false },
+      })),
+      quotation_override_basis: "Entered quotation replaces modelled Net CAPEX.",
+      currency_values_permitted: true,
+      customer_facing_permission: false,
+      recommendation_permitted: false,
+    }), { status: 200 });
     if (path.endsWith("/design-feasibility")) return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/tariff-profile")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_profile_state_v1", status: "not_available", updated_at: null, approved_at: null, profile_sha256: null, profile: null, suggested_profile: null, evidence_basis: null, blockers: [{ code: "tariff_profile_evidence_required", message: "Upload and review bill evidence before approving a tariff profile." }] }), { status: 200 });
     if (path.endsWith("/rebate-profile")) return new Response(JSON.stringify(rebateState), { status: 200 });
@@ -226,7 +252,7 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("Upload and review bill evidence before approving a tariff profile.")).toBeTruthy();
     expect(screen.getByText("365 consecutive-day annual interval")).toBeTruthy();
     expect(screen.getByText("Upload at least 365 consecutive complete days of interval data.")).toBeTruthy();
-    const runButton = screen.getByRole("button", { name: "Run 0 scenarios" });
+    const runButton = screen.getByRole("button", { name: "Start analysis · 03 + 04" });
     expect(runButton.hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Review tariff profile in Evidence" })).toBeTruthy();
     expect(screen.getByText("No rebate programs selected; Finance will use $0 upfront rebates.")).toBeTruthy();
@@ -259,7 +285,7 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: /04 Finance Analysis/ }));
     expect(await screen.findByText("Solar STCs require a current price and source before approval.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Review rebates in Solution Generator" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Run 0 scenarios" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Start analysis · 03 + 04" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("opens generated solutions in the Dispatch left-and-right workspace", async () => {
@@ -275,6 +301,26 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
     expect(screen.getByText("Solution 1")).toBeTruthy();
     expect(screen.getByText("Solution 2")).toBeTruthy();
+  });
+
+  it("lists every feasible Net CAPEX quotation before the PCS section at the bottom", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    mockApi([readyProject], generatedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: /02 Solution Generator/ }));
+    const quoteHeading = await screen.findByRole("heading", { name: "Feasible solutions & Net CAPEX quotations" });
+    expect(screen.getByText("2 feasible")).toBeTruthy();
+    expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
+    expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("100000");
+    const pcsHeading = screen.getByRole("heading", { name: "PCS & connection constraints" });
+    expect(Boolean(quoteHeading.compareDocumentPosition(pcsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 2"));
+    await user.type(screen.getByLabelText("Quoted Net CAPEX for Solution 2"), "123456");
+    expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("123456");
+    expect(screen.getByRole("button", { name: "Start analysis · run 03 + 04" }).hasAttribute("disabled")).toBe(false);
   });
 
 });

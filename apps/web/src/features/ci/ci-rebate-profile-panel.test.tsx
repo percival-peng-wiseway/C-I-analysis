@@ -17,7 +17,8 @@ describe("CiRebateProfilePanel", () => {
 
     expect(await screen.findByRole("heading", { name: "Rebates & certificates" })).toBeTruthy();
     expect(screen.getByText("No rebates selected")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Clean Energy Regulator · STCs" }).getAttribute("href")).toBe("https://cer.gov.au/");
+    expect(screen.queryByText(/Ruleset:/)).toBeNull();
+    expect(screen.queryByRole("link", { name: "Clean Energy Regulator · STCs" })).toBeNull();
     expect(screen.queryByLabelText("Postcode zone rating")).toBeNull();
 
     await userEvent.click(screen.getByLabelText("Enable Solar STCs"));

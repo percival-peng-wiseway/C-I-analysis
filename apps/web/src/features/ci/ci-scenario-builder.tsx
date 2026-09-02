@@ -90,6 +90,7 @@ const defaultConnectionOptions = (): ConnectionOptionsForm => ({
 });
 
 export function CiScenarioBuilder({
+  beforeConnectionConstraints,
   deviceProfile,
   error,
   initialContext,
@@ -98,6 +99,7 @@ export function CiScenarioBuilder({
   onSubmit,
   siteAddress,
 }: {
+  beforeConnectionConstraints?: ReactNode;
   deviceProfile: CiDeviceProfile;
   error: string | null;
   initialContext?: CiDesignContext;
@@ -223,6 +225,8 @@ export function CiScenarioBuilder({
             <p className="mt-3 text-xs leading-5 text-slate-500">Add, edit, publish or retire reusable profiles in Settings. The saved project keeps the exact selected profile snapshot so later library edits cannot silently change this design.</p>
           )}
         </WorkflowSection>
+
+        {beforeConnectionConstraints}
 
         <WorkflowSection
           description="Connection limits are project assumptions, not equipment certification or network approval."

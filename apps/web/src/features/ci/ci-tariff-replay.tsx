@@ -27,6 +27,7 @@ import {
 import {
   ciSavedFeasibilityQueryKey,
   fetchCiSavedFeasibility,
+  runCiDesignFeasibility,
 } from "@/features/ci/api/ci-design-feasibility";
 import {
   ciSavedDesignQueryKey,
@@ -130,16 +131,28 @@ export function CiTariffReplay({
   const runReplay = useMutation({
     mutationFn: async () => {
       if (tariffProfile.data?.status !== "approved") throw new Error("Approve this project's tariff profile before calculating.");
-      if (!equipmentSelection) throw new Error("Select the supported PV, battery and hybrid inverter / PCS before calculating.");
+      const savedManualPrices = finance.data?.status === "ready" && finance.data.result?.assumptions.price_source === "analyst_entered_total_solution_price"
+        ? finance.data.result.solutions.map((solution) => ({ scenarioId: solution.scenario_id, upfrontCostAudExGst: solution.upfront_cost_aud_ex_gst }))
+        : null;
+      if (!savedManualPrices && !equipmentSelection) throw new Error("Select the supported PV, battery and hybrid inverter / PCS before calculating.");
+      const feasibilityResult = await runCiDesignFeasibility(project.project_id);
       const tariffResult = await runCiProjectTariffReplay(project.project_id);
       const financeResult = await compareCiAnnualFinancialScenarios({
         projectId: project.project_id,
-        pricingMode: "device_profile",
-        equipmentSelection,
+        pricingMode: savedManualPrices ? "manual_quotes" : "device_profile",
+        prices: savedManualPrices ?? undefined,
+        equipmentSelection: savedManualPrices ? undefined : equipmentSelection ?? undefined,
       });
-      return { tariffResult, financeResult };
+      return { feasibilityResult, tariffResult, financeResult };
     },
-    onSuccess: ({ financeResult, tariffResult }) => {
+    onSuccess: ({ feasibilityResult, financeResult, tariffResult }) => {
+      queryClient.setQueryData(ciSavedFeasibilityQueryKey(project.project_id), {
+        contract_version: "ci_project_feasibility_state_v1",
+        status: "ready",
+        saved_at: new Date().toISOString(),
+        stale_reasons: [],
+        result: feasibilityResult,
+      });
       queryClient.setQueryData(ciProjectTariffReplayQueryKey(project.project_id), {
         contract_version: "ci_project_tariff_replay_state_v1",
         status: "ready",
@@ -185,6 +198,7 @@ export function CiTariffReplay({
   const dispatchReady = dispatch.data.status === "ready";
   const designReady = Boolean(design.data && design.data.candidate_count > 0);
   const savedDeviceProfile = deviceProfile.data.status === "ready" ? deviceProfile.data.profile : null;
+  const hasSavedManualQuotes = finance.data.status === "ready" && finance.data.result?.assumptions.price_source === "analyst_entered_total_solution_price";
   const tariffApproved = tariffProfile.data?.status === "approved";
   const enabledRebateCount = countEnabledRebates(rebateProfile.data);
   const rebateReady = enabledRebateCount === 0 || rebateProfile.data.status === "approved";
@@ -199,7 +213,7 @@ export function CiTariffReplay({
     : tariffProfile.data?.blockers.map((blocker) => blocker.message).join(" ") || (tariffApproved ? `Approved: ${profileLabel ?? "project tariff"}.` : "Review and approve the project tariff profile in Evidence.");
   const checks = [
     { label: "Solution space saved", ready: designReady },
-    { label: "Dispatch completed", ready: dispatchReady },
+    { detail: dispatchReady ? "The saved result will be recalculated." : "03 will run before tariff and Finance.", label: "03 Dispatch ready to run", ready: designReady },
     { label: "Bill reviewed", ready: billApproved },
     { label: "Tariff code identified", ready: tariffIdentified },
     { label: "E1 / B1 / Q1 / K1 aligned", ready: intervalReady },
@@ -213,7 +227,7 @@ export function CiTariffReplay({
     { detail: tariffDetail, label: "Project tariff profile approved", ready: tariffApproved },
     { detail: rebateDetail, label: "Rebate plan resolved", ready: rebateReady },
     { label: "Equipment & finance profile saved", ready: Boolean(savedDeviceProfile) },
-    { label: "Equipment selected", ready: Boolean(equipmentSelection) },
+    { detail: hasSavedManualQuotes ? "The saved custom Net CAPEX quotations will be reused." : undefined, label: "Equipment selected or quotations saved", ready: Boolean(equipmentSelection) || hasSavedManualQuotes },
   ];
   const canRun = checks.every((item) => item.ready);
   const savedResult = runReplay.data?.tariffResult ?? replay.data.result;
@@ -596,7 +610,7 @@ function TariffBasis({ evidenceCode, profileLabel, result, scenario }: { evidenc
 }
 
 function FinanceRunHeader({ canRun, count, hasResult, onRun, pending }: { canRun: boolean; count: number; hasResult: boolean; onRun: () => void; pending: boolean }) {
-  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1></div></div><Button disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Calculating tariff and finance…" : hasResult ? "Re-run tariff + finance" : `Run ${count} scenarios`}</Button></header>;
+  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates 03 Dispatch, then 04 tariff and Finance for all {count} solutions.</p></div></div><Button disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Running 03 + 04…" : hasResult ? "Re-run 03 + 04" : "Start analysis · 03 + 04"}</Button></header>;
 }
 
 function ReplayLoading() { return <section className="grid min-h-[420px] place-items-center rounded-xl border border-slate-200 bg-white"><div className="text-center"><RefreshCw className="mx-auto size-6 animate-spin text-cyan-700" /><h2 className="mt-4 font-semibold text-slate-950">Loading tariff replay</h2><p className="mt-1 text-sm text-slate-500">Checking project evidence and completed scenarios.</p></div></section>; }

@@ -26,6 +26,110 @@ CI_ANNUAL_FINANCIAL_COMPARISON_CONTRACT_VERSION = (
 CI_ANNUAL_FINANCIAL_REVIEW_ORDER_ID = "ci_highest_npv_review_order_v1"
 CI_ANNUAL_FINANCIAL_SELECTION_ID = "ci_analyst_selected_tariff_scenarios_v1"
 CI_ANNUAL_FINANCIAL_ALL_SCENARIOS_ID = "ci_all_tariff_scenarios_v1"
+CI_DESIGN_PRICE_PREVIEW_CONTRACT_VERSION = "ci_design_price_preview_v1"
+
+
+def preview_ci_design_candidate_prices(
+    *,
+    candidates: list[dict[str, Any]],
+    device_profile: dict[str, Any],
+    rebate_profile: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    if not 1 <= len(candidates) <= 200:
+        raise CiProjectError(
+            "ci_design_price_preview_invalid",
+            "A saved solution space with 1 to 200 candidates is required.",
+        )
+    validated_profile = _validated_device_profile(device_profile)
+    equipment_selection = _validated_equipment_selection(
+        validated_profile.get("default_equipment_selection"),
+        profile=validated_profile,
+    )
+    scenarios = [
+        {
+            "scenario_id": candidate.get("scenario_id"),
+            "label": candidate.get("label"),
+            "authored_inputs": candidate,
+        }
+        for candidate in candidates
+    ]
+    scenario_ids = [item.get("scenario_id") for item in scenarios]
+    if (
+        any(not isinstance(item, str) or not item for item in scenario_ids)
+        or len(set(scenario_ids)) != len(scenario_ids)
+    ):
+        raise CiProjectError(
+            "ci_design_price_preview_invalid",
+            "Saved solution IDs must be present and unique before pricing.",
+        )
+    rebates = calculate_ci_scenario_rebates(
+        scenarios,
+        rebate_profile=rebate_profile,
+    )
+    solutions = []
+    for scenario in scenarios:
+        scenario_id = str(scenario["scenario_id"])
+        capex_breakdown = _profile_capex_breakdown(
+            scenario,
+            profile=validated_profile,
+            equipment_selection=equipment_selection,
+        )
+        gross_capex = round(sum(capex_breakdown.values()), 2)
+        rebate_calculation = rebates[scenario_id]
+        upfront_rebate = _finite_number(
+            rebate_calculation.get("total_rebate_aud_ex_gst"),
+            message="The approved project rebate result is invalid.",
+        )
+        net_capex = round(gross_capex - upfront_rebate, 2)
+        if net_capex <= 0:
+            raise CiProjectError(
+                "ci_annual_financial_rebate_exceeds_cost",
+                "The approved upfront rebate must be lower than the gross solution cost.",
+            )
+        authored = scenario["authored_inputs"]
+        solutions.append(
+            {
+                "scenario_id": scenario_id,
+                "label": str(scenario.get("label") or scenario_id),
+                "pv_capacity_kwp_dc": _finite_number(
+                    authored.get("pv_capacity_kwp_dc"),
+                    message="A selected PV size is invalid.",
+                ),
+                "battery_capacity_kwh": _finite_number(
+                    authored.get("nominal_capacity_kwh"),
+                    message="A selected battery size is invalid.",
+                ),
+                "inverter_capacity_kw_ac": _finite_number(
+                    authored.get("pv_inverter_capacity_kw_ac"),
+                    message="A selected inverter size is invalid.",
+                ),
+                "gross_capex_aud_ex_gst": gross_capex,
+                "upfront_rebate_aud_ex_gst": round(upfront_rebate, 2),
+                "net_capex_aud_ex_gst": net_capex,
+                "capex_breakdown_aud_ex_gst": capex_breakdown,
+                "rebate_calculation": rebate_calculation,
+            }
+        )
+    return {
+        "contract_version": CI_DESIGN_PRICE_PREVIEW_CONTRACT_VERSION,
+        "status": "ready",
+        "pricing_basis": "workspace_device_profile_less_approved_rebates",
+        "device_profile_sha256": device_profile_sha256(validated_profile),
+        "rebate_profile_sha256": (
+            rebate_calculation_profile_sha256(rebate_profile)
+            if rebate_profile is not None
+            else None
+        ),
+        "equipment_selection": equipment_selection,
+        "candidate_count": len(solutions),
+        "solutions": solutions,
+        "quotation_override_basis": (
+            "Entered quotation replaces modelled Net CAPEX and is not reduced by rebates again."
+        ),
+        "currency_values_permitted": True,
+        "customer_facing_permission": False,
+        "recommendation_permitted": False,
+    }
 
 
 def compare_ci_annual_financial_scenarios(
@@ -211,10 +315,10 @@ def _tariff_scenarios(
 def _validated_selection(
     value: object, *, scenarios: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
-    if not isinstance(value, list) or not 1 <= len(value) <= 10:
+    if not isinstance(value, list) or not 1 <= len(value) <= 200:
         raise CiProjectError(
             "ci_annual_financial_prices_invalid",
-            "Select and enter a valid total price for 1 to 10 solutions.",
+            "Select and enter a valid total price for 1 to 200 solutions.",
         )
     scenario_by_id = {
         str(item.get("scenario_id")): item
@@ -227,7 +331,7 @@ def _validated_selection(
         if not isinstance(item, dict):
             raise CiProjectError(
                 "ci_annual_financial_prices_invalid",
-                "Select and enter a valid total price for 1 to 10 solutions.",
+                "Select and enter a valid total price for 1 to 200 solutions.",
             )
         scenario_id = str(item.get("scenario_id", ""))
         try:
@@ -235,7 +339,7 @@ def _validated_selection(
         except (KeyError, TypeError, ValueError) as exc:
             raise CiProjectError(
                 "ci_annual_financial_prices_invalid",
-                "Select and enter a valid total price for 1 to 10 solutions.",
+                "Select and enter a valid total price for 1 to 200 solutions.",
             ) from exc
         scenario = scenario_by_id.get(scenario_id)
         if (

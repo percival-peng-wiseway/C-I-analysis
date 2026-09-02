@@ -35,6 +35,7 @@ from solar_battery.ci_annual_financial_demo import (
 )
 from solar_battery.ci_annual_financial_comparison import (
     compare_ci_annual_financial_scenarios,
+    preview_ci_design_candidate_prices,
 )
 from solar_battery.ci_annual_financial_simulation import (
     simulate_ci_annual_financial_scenario,
@@ -791,6 +792,64 @@ def get_ci_design_candidates(
         if isinstance(exc, CiProjectError):
             raise _project_http_error(exc) from exc
         raise _analysis_http_error(exc) from exc
+
+
+@router.get(
+    "/commercial-industrial/projects/{project_id}/design-price-preview"
+)
+def get_ci_design_price_preview(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    """Price every saved feasible design using approved project assumptions."""
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            project = require_ci_project(session, project_id=project_id, actor=actor)
+            if project.setup_status != "ready":
+                raise CiProjectError(
+                    "ci_project_setup_required",
+                    "Complete Evidence before pricing the generated solutions.",
+                )
+            candidates = saved_ci_design_candidates(
+                session, project_id=project_id, actor=actor
+            )
+            if candidates is None:
+                raise CiProjectError(
+                    "ci_project_design_required",
+                    "Generate the solution space before calculating Net CAPEX.",
+                )
+            device_state = ci_device_profile_state(session, actor=actor)
+            if device_state["status"] != "ready":
+                raise CiProjectError(
+                    "ci_device_profile_required",
+                    "Save the workspace Device profile in Settings before calculating Net CAPEX.",
+                )
+            rebate_state = ci_project_rebate_profile_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            if _rebate_profile_blocks_finance(rebate_state):
+                raise CiProjectError(
+                    "ci_project_rebate_profile_required",
+                    "Review and approve the enabled project rebate programs before calculating Net CAPEX.",
+                )
+            rebate_profile = approved_ci_project_rebate_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            result = preview_ci_design_candidate_prices(
+                candidates=candidates,
+                device_profile=device_state["profile"],
+                rebate_profile=rebate_profile,
+            )
+        result["project_id"] = str(project_id)
+        return result
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
 
 
 @router.post(
