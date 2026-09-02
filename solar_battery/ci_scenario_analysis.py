@@ -1211,12 +1211,15 @@ def _optimizer_import_rate(
     return (retail + network + regulated + environmental) / 100
 
 
-def _optimizer_export_credit(profile: dict[str, Any]) -> float:
-    rates = profile["rates"]
-    return (
-        float(rates["aemo_ancillary_c_per_kwh"])
-        + float(rates["aemo_participant_c_per_kwh"])
-    ) * float(profile["factors"]["dlf"]) / 100
+def _optimizer_export_credit(_profile: dict[str, Any]) -> float:
+    """Match dispatch to the approved tariff replay's zero export value.
+
+    The current C&I tariff contract records B1 exports but has no approved
+    feed-in or export-credit rate. AEMO import charges are avoided when onsite
+    PV reduces imports; they are not revenue earned by excess exports.
+    """
+
+    return 0.0
 
 
 def _optimizer_snapshot(

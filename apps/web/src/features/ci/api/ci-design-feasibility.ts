@@ -113,7 +113,7 @@ export interface CiFeasibilityScenario {
   initial_soc_kwh: number | null;
   final_soc_kwh: number | null;
   peak_day: {
-    algorithm_id: "ci_pre_tariff_peak_day_envelope_v1";
+    algorithm_id: "ci_pre_tariff_peak_day_envelope_v2";
     date: string;
     baseline_peak_kw: number;
     pv_only_peak_kw: number;
@@ -122,6 +122,7 @@ export interface CiFeasibilityScenario {
     peak_reduction_kw: number;
     peak_reduction_percent: number;
     points: CiFeasibilityPeakPoint[];
+    grid_charging_permitted: false;
     billing_demand_interpretation_permitted: false;
   };
   customer_facing_permission: false;
@@ -129,7 +130,7 @@ export interface CiFeasibilityScenario {
 }
 
 export interface CiDesignFeasibilityResult {
-  contract_version: "ci_design_feasibility_v4";
+  contract_version: "ci_design_feasibility_v5";
   status: "ready";
   analysis_mode: "pre_tariff_physical_feasibility";
   customer_facing_permission: false;
@@ -235,7 +236,7 @@ export async function fetchCiIntervalActivity(
 export function assertCiDesignFeasibility(value: unknown): CiDesignFeasibilityResult {
   const payload = value as CiDesignFeasibilityResult;
   if (
-    payload.contract_version !== "ci_design_feasibility_v4" ||
+    payload.contract_version !== "ci_design_feasibility_v5" ||
     payload.status !== "ready" ||
     payload.analysis_mode !== "pre_tariff_physical_feasibility" ||
     payload.customer_facing_permission !== false ||
@@ -268,8 +269,9 @@ export function assertCiDesignFeasibility(value: unknown): CiDesignFeasibilityRe
       scenario.customer_facing_permission !== false ||
       scenario.recommendation_permitted !== false ||
       scenario.energy_dispatch_algorithm_id !== "ci_pre_tariff_pv_self_consumption_v1" ||
-      scenario.peak_day?.algorithm_id !== "ci_pre_tariff_peak_day_envelope_v1" ||
+      scenario.peak_day?.algorithm_id !== "ci_pre_tariff_peak_day_envelope_v2" ||
       scenario.peak_day.date !== payload.baseline.peak_date ||
+      scenario.peak_day.grid_charging_permitted !== false ||
       scenario.peak_day.billing_demand_interpretation_permitted !== false ||
       ![
         scenario.peak_day.baseline_peak_kw,

@@ -26,10 +26,10 @@ from solar_battery.models import BatteryPreset, CleanedInterval
 from solar_battery.solar_profile import solar_shape
 
 
-CI_DESIGN_FEASIBILITY_CONTRACT_VERSION = "ci_design_feasibility_v4"
+CI_DESIGN_FEASIBILITY_CONTRACT_VERSION = "ci_design_feasibility_v5"
 CI_INTERVAL_ACTIVITY_CONTRACT_VERSION = "ci_interval_activity_v1"
 CI_ENERGY_DISPATCH_ID = "ci_pre_tariff_pv_self_consumption_v1"
-CI_PEAK_DAY_ENVELOPE_ID = "ci_pre_tariff_peak_day_envelope_v1"
+CI_PEAK_DAY_ENVELOPE_ID = "ci_pre_tariff_peak_day_envelope_v2"
 CI_PHYSICAL_REVIEW_ORDER_ID = "ci_pre_tariff_physical_review_order_v2"
 PEAK_THRESHOLD_COUNT = 51
 
@@ -535,15 +535,10 @@ def _peak_day_envelope(
                         )
                     )
                 else:
-                    grid_headroom = (
-                        max(0.0, threshold - remaining_kw) * hours
-                        if scenario.allow_grid_charging
-                        else 0.0
-                    )
                     intents.append(
                         BatteryDispatchEnergyInput(
                             source_interval=row,
-                            charge_available_kwh=pv_surplus + grid_headroom,
+                            charge_available_kwh=pv_surplus,
                         )
                     )
             candidate = build_energy_only_battery_dispatch_result(
@@ -554,6 +549,7 @@ def _peak_day_envelope(
                     gate_status=StrategyGateStatus.REVIEW_ONLY,
                     assumptions=(
                         "Selected measured peak-day physical envelope.",
+                        "Grid charging is excluded without an approved tariff time basis.",
                         "No tariff demand window or billing semantics.",
                     ),
                 ),
@@ -629,6 +625,7 @@ def _peak_day_envelope(
             6,
         ),
         "points": points,
+        "grid_charging_permitted": False,
         "billing_demand_interpretation_permitted": False,
     }
 

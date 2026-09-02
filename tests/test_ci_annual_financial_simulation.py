@@ -120,7 +120,7 @@ def _physical_result(_upload, *, profile, scenarios):
 
 def _feasibility_result(scenarios: list[dict[str, object]]) -> dict[str, object]:
     return {
-        "contract_version": "ci_design_feasibility_v4",
+        "contract_version": "ci_design_feasibility_v5",
         "status": "ready",
         "analysis_mode": "pre_tariff_physical_feasibility",
         "customer_facing_permission": False,

@@ -8,6 +8,7 @@ from solar_battery.ci_scenario_analysis import (
     CiScenarioAnalysisError,
     _build_periods,
     _dispatch_review_projection,
+    _optimizer_export_credit,
     _validated_scenarios,
     analyze_ci_physical_scenarios,
     analyze_ci_three_case_comparison,
@@ -97,6 +98,14 @@ def _profile() -> dict[str, object]:
             "incentive_demand_aud_per_kva_month": 2.0,
         },
     }
+
+
+def test_optimizer_does_not_invent_export_revenue_from_import_charges() -> None:
+    profile = _profile()
+    profile["rates"]["aemo_ancillary_c_per_kwh"] = 1.5
+    profile["rates"]["aemo_participant_c_per_kwh"] = 2.5
+
+    assert _optimizer_export_credit(profile) == 0.0
 
 
 def _streams() -> dict[str, dict[date, list[float]]]:

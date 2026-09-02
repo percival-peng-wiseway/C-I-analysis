@@ -323,7 +323,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         captured_feasibility["interval_bytes"] = interval_bytes
         captured_feasibility["scenarios"] = scenarios
         return {
-            "contract_version": "ci_design_feasibility_v4",
+            "contract_version": "ci_design_feasibility_v5",
             "status": "ready",
             "analysis_mode": "pre_tariff_physical_feasibility",
             "customer_facing_permission": False,
@@ -504,7 +504,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
             f"/api/commercial-industrial/projects/{project['project_id']}/design-feasibility"
         )
         assert feasibility_result.status_code == 200
-        assert feasibility_result.json()["contract_version"] == "ci_design_feasibility_v4"
+        assert feasibility_result.json()["contract_version"] == "ci_design_feasibility_v5"
         assert captured_feasibility == {
             "interval_bytes": b"synthetic",
             "scenarios": [_scenario()],

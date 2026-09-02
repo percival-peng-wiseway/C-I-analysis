@@ -59,11 +59,12 @@ def test_wide_active_series_fails_closed_for_kva_only_or_missing_rows() -> None:
 
 def test_design_feasibility_returns_energy_and_peak_day_physics_without_tariff() -> None:
     scenario = _scenario()
+    scenario["allow_grid_charging"] = True
     result = analyze_ci_design_feasibility(
         _wide_bytes(), scenarios=[scenario]
     )
 
-    assert result["contract_version"] == "ci_design_feasibility_v4"
+    assert result["contract_version"] == "ci_design_feasibility_v5"
     assert result["analysis_mode"] == "pre_tariff_physical_feasibility"
     assert result["customer_facing_permission"] is False
     assert result["recommendation_permitted"] is False
@@ -102,8 +103,14 @@ def test_design_feasibility_returns_energy_and_peak_day_physics_without_tariff()
     assert evaluated["peak_day"]["date"] == result["baseline"]["peak_date"]
     assert evaluated["peak_day"]["baseline_peak_kw"] == 120.0
     assert evaluated["peak_day"]["achieved_peak_kw"] < 120.0
+    assert evaluated["peak_day"]["algorithm_id"] == "ci_pre_tariff_peak_day_envelope_v2"
+    assert evaluated["peak_day"]["grid_charging_permitted"] is False
     assert evaluated["peak_day"]["billing_demand_interpretation_permitted"] is False
     assert len(evaluated["peak_day"]["points"]) == 48
+    assert all(
+        point["pv_battery_import_kw"] <= point["pv_only_import_kw"] + 1e-6
+        for point in evaluated["peak_day"]["points"]
+    )
     assert all("aud" not in str(key).lower() for key in evaluated)
 
 
