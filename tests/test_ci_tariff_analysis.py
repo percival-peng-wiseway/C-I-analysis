@@ -152,6 +152,28 @@ def test_ci_analysis_accepts_one_cent_invoice_gst_rounding_difference() -> None:
     assert checks["total_inc_gst_aud"]["passed"] is True
 
 
+def test_bill_period_reconciliation_includes_a_signed_one_time_adjustment() -> None:
+    nem12 = _nem12_bytes()
+    profile = _profile(nem12)
+    profile["additional_bill_adjustment_aud"] = -5.0
+    profile["expected_reconciliation"].update(
+        {
+            "category_additional_charges_aud": -5.0,
+            "subtotal_ex_gst_aud": -5.0,
+            "gst_aud": -0.5,
+            "total_inc_gst_aud": -5.5,
+        }
+    )
+
+    result = analyze_ci_nem12(nem12, profile=profile)
+
+    reconciliation = result["bill_reconciliation"]
+    assert reconciliation["charge_categories"]["additional_charges"] == -5.0
+    assert reconciliation["calculated_subtotal_ex_gst_aud"] == -5.0
+    assert reconciliation["calculated_gst_aud"] == -0.5
+    assert reconciliation["calculated_total_inc_gst_aud"] == -5.5
+
+
 def test_ci_analysis_allows_a_separate_optimizer_analysis_period(
     tmp_path,
 ) -> None:

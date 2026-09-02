@@ -26,7 +26,7 @@ export function CiGettingStarted({ readiness }: { readiness: CiWorkspaceReadines
           <Badge variant={evidenceReady ? "secondary" : "warning"}>{evidenceReady ? "Evidence configured" : "Evidence required"}</Badge>
         </div>
         <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-          Pricing can be prepared now. Physical and tariff analysis opens only when the private evidence directory contains a validated profile.
+          Pricing can be prepared now. Each project's tariff and finance analysis opens after its bill and NEM12 evidence are saved and its tariff working copy is reviewed and approved.
         </p>
       </div>
 
@@ -41,8 +41,8 @@ export function CiGettingStarted({ readiness }: { readiness: CiWorkspaceReadines
         </summary>
         <div className="border-t border-border p-5">
           <div className="grid gap-3 lg:grid-cols-4">
-            <GuideStep icon={FileKey2} number="01" title="Mount private evidence">
-              Put <code>active-tariff-profile.json</code> in a private directory and start Docker with <code>CI_EVIDENCE_ROOT</code> pointing to that directory.
+            <GuideStep icon={FileKey2} number="01" title="Save project evidence">
+              Create a project, then upload its bill and matched NEM12 in Evidence. Source files remain private and the detected tariff facts remain separate from calculation inputs.
             </GuideStep>
             <GuideStep icon={FileSpreadsheet} number="02" title="Upload matched NEM12">
               Setup accepts either standard NEM12 with E1 or the 30-minute wide export containing NMI, ReadingDateTime and kW/kVA. Formal kVA, power-factor, export, tariff and finance analysis still requires the exact profile-bound five-minute NEM12 with aligned E1, B1, Q1 and K1 streams under 25 MB.
@@ -56,7 +56,7 @@ export function CiGettingStarted({ readiness }: { readiness: CiWorkspaceReadines
           </div>
           <div className="mt-4 grid gap-3 lg:grid-cols-2">
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
-              <div className="flex items-start gap-3"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><div><strong>Why analysis can remain locked</strong><p className="mt-1 leading-6 text-amber-900/80">The profile validates tariff structure, rates, evidence identity, periods and bill reconciliation. A blank or guessed tariff is intentionally rejected.</p></div></div>
+              <div className="flex items-start gap-3"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><div><strong>Why analysis can remain locked</strong><p className="mt-1 leading-6 text-amber-900/80">The project tariff validates structure, rates, evidence identity, periods and bill reconciliation. A blank or unreconciled tariff is intentionally rejected.</p></div></div>
             </div>
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
               <div className="flex items-start gap-3"><BadgeCheck className="mt-0.5 size-4 shrink-0" /><div><strong>What is safe to configure now</strong><p className="mt-1 leading-6 text-emerald-900/80">The component and pricing catalog is independent of the private NEM12 upload and can be prepared before the evidence gate opens.</p></div></div>

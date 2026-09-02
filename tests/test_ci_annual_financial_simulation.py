@@ -147,7 +147,10 @@ def _feasibility_result(scenarios: list[dict[str, object]]) -> dict[str, object]
 def test_project_annual_finance_compares_pv_only_with_battery_and_projects_cashflow(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("api.ci_routes.load_ci_tariff_profile", lambda: {})
+    monkeypatch.setattr(
+        "api.ci_routes.approved_ci_project_tariff_calculation_profile",
+        lambda *_args, **_kwargs: {},
+    )
     monkeypatch.setattr(
         "api.ci_routes.inspect_ci_evidence_pair",
         lambda _bill, _nem12, **_kwargs: {
@@ -228,7 +231,10 @@ def test_project_annual_finance_compares_pv_only_with_battery_and_projects_cashf
 def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_npv(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("api.ci_routes.load_ci_tariff_profile", lambda: {})
+    monkeypatch.setattr(
+        "api.ci_routes.approved_ci_project_tariff_calculation_profile",
+        lambda *_args, **_kwargs: {},
+    )
     monkeypatch.setattr(
         "api.ci_routes.inspect_ci_evidence_pair",
         lambda _bill, _nem12, **_kwargs: {
@@ -297,6 +303,21 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
             f"/api/commercial-industrial/projects/{project['project_id']}/tariff-replay"
         )
         assert tariff.status_code == 200, tariff.json()
+        not_yet_calculated = client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
+        ).json()
+        assert not_yet_calculated["status"] == "not_saved"
+        calculated = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison",
+            json={
+                "pricing_mode": "device_profile",
+                "prices": [],
+                "equipment_selection": _device_profile()[
+                    "default_equipment_selection"
+                ],
+            },
+        )
+        assert calculated.status_code == 200, calculated.json()
         automatic = client.get(
             f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
         ).json()

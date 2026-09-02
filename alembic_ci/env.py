@@ -27,6 +27,7 @@ for table_name in (
     "ci_project_evidence",
     "ci_project_feasibility_results",
     "ci_project_tariff_replay_results",
+    "ci_project_tariff_profiles",
     "ci_project_annual_financial_results",
     "ci_device_profiles",
     "ci_project_site_material",

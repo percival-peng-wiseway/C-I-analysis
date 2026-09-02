@@ -210,6 +210,45 @@ class CiProjectTariffReplayResultModel(Base):
     )
 
 
+class CiProjectTariffProfileModel(Base):
+    __tablename__ = "ci_project_tariff_profiles"
+    __table_args__ = (
+        Index(
+            "ix_ci_project_tariff_profiles_scope_updated",
+            "workspace_id",
+            "owner_id",
+            "updated_at",
+        ),
+    )
+
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ci_projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    profile_contract_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_bill_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_interval_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_tariff_facts_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    calculation_profile_sha256: Mapped[str | None] = mapped_column(String(64))
+    calculation_profile_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    approved_by_actor_id: Mapped[str | None] = mapped_column(String(120))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
 class CiProjectAnnualFinancialResultModel(Base):
     __tablename__ = "ci_project_annual_financial_results"
     __table_args__ = (

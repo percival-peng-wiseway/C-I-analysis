@@ -94,82 +94,15 @@ def analyze_ci_nem12(
     profile: dict[str, Any],
 ) -> dict[str, object]:
     parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
-
-    streams: dict[str, dict[date, list[float]]] = parsed["streams"]
-    bill_start = date.fromisoformat(profile["billing_period"]["start_date"])
-    bill_end = date.fromisoformat(profile["billing_period"]["end_date"])
-    rolling_start = date.fromisoformat(profile["rolling_period"]["start_date"])
-    rolling_end = date.fromisoformat(profile["rolling_period"]["end_date"])
-    required_dates = _date_range(rolling_start, rolling_end)
-    analysis_period = profile.get("analysis_period", profile["rolling_period"])
-    analysis_dates = _date_range(
-        date.fromisoformat(analysis_period["start_date"]),
-        date.fromisoformat(analysis_period["end_date"]),
-    )
-    bill_dates = _date_range(bill_start, bill_end)
-    if any(
-        day not in streams[stream_id]
-        for day in set(required_dates + bill_dates + analysis_dates)
-        for stream_id in _REQUIRED_STREAMS
-    ):
-        raise CiTariffAnalysisError("coverage_incomplete")
-
-    import_kwh = sum(sum(streams["E1"][day]) for day in bill_dates)
-    export_kwh = sum(sum(streams["B1"][day]) for day in bill_dates)
-
-    retail_peak_kwh = _energy_in_window(
-        streams["E1"],
-        bill_dates,
-        profile["retail_energy_window"],
-        timezone_name=profile["timezone_name"],
-    )
-    network_peak_kwh = _energy_in_window(
-        streams["E1"],
-        bill_dates,
-        profile["network_energy_window"],
-        timezone_name=profile["timezone_name"],
-    )
-    retail_off_peak_kwh = import_kwh - retail_peak_kwh
-    network_off_peak_kwh = import_kwh - network_peak_kwh
-
-    demand_intervals = _build_demand_intervals(
-        streams["E1"], streams["Q1"], timezone_name=profile["timezone_name"]
-    )
-    rolling_candidates = _demand_in_window(
-        demand_intervals,
-        required_dates,
-        profile["rolling_demand_window"],
-    )
-    incentive_candidates = _demand_in_window(
-        demand_intervals,
-        bill_dates,
-        profile["incentive_demand_window"],
-    )
-    bill_candidates = [
-        row for row in demand_intervals if bill_start <= row["meter_date"] <= bill_end
-    ]
-    if not rolling_candidates or not incentive_candidates or not bill_candidates:
-        raise CiTariffAnalysisError("coverage_incomplete")
-
-    rolling_peak = max(rolling_candidates, key=lambda row: row["kva"])
-    incentive_peak = max(incentive_candidates, key=lambda row: row["kva"])
-    bill_peak = max(bill_candidates, key=lambda row: row["kva"])
-    chargeable_rolling_kva = max(
-        rolling_peak["kva"], float(profile["minimum_chargeable_rolling_kva"])
-    )
-
-    quantities = {
-        "import_kwh": import_kwh,
-        "export_kwh": export_kwh,
-        "retail_peak_kwh": retail_peak_kwh,
-        "retail_off_peak_kwh": retail_off_peak_kwh,
-        "network_peak_kwh": network_peak_kwh,
-        "network_off_peak_kwh": network_off_peak_kwh,
-        "rolling_demand_kva": chargeable_rolling_kva,
-        "incentive_demand_kva": incentive_peak["kva"],
-        "billing_period_max_kva": bill_peak["kva"],
-        "billing_period_max_power_factor": bill_peak["power_factor"],
-    }
+    facts = _ci_tariff_metered_facts(parsed, profile)
+    streams = facts["streams"]
+    bill_start = facts["bill_start"]
+    bill_end = facts["bill_end"]
+    rolling_peak = facts["rolling_peak"]
+    incentive_peak = facts["incentive_peak"]
+    bill_peak = facts["bill_peak"]
+    quantities = facts["quantities"]
+    chargeable_rolling_kva = quantities["rolling_demand_kva"]
     charges = calculate_ci_tariff_charges(quantities, profile)
     checks = _reconciliation_checks(quantities, charges, profile)
     if not all(check["passed"] for check in checks):
@@ -248,6 +181,114 @@ def analyze_ci_nem12(
             "Reactive import Q1 is paired with active import E1 for 15-minute kVA.",
             "Results are internal review only and do not grant tariff eligibility or customer-facing permission.",
         ],
+    }
+
+
+def bind_ci_tariff_profile_to_nem12(
+    upload_bytes: bytes,
+    *,
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a server-reconciled calculation profile for one evidence pair.
+
+    The editable project tariff never owns source hashes, metered quantities or
+    expected reconciliation.  Those fields are rebuilt here from the current
+    saved NEM12 immediately before an analyst-approved profile can be used.
+    """
+    parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
+    facts = _ci_tariff_metered_facts(parsed, profile)
+    quantities = facts["quantities"]
+    charges = calculate_ci_tariff_charges(quantities, profile)
+    bound = json.loads(json.dumps(profile, sort_keys=True, allow_nan=False))
+    bound["expected_reconciliation"] = {
+        **quantities,
+        **{
+            f"category_{key}_aud": value
+            for key, value in charges["categories"].items()
+        },
+        "subtotal_ex_gst_aud": charges["subtotal_ex_gst_aud"],
+        "gst_aud": charges["gst_aud"],
+        "total_inc_gst_aud": charges["total_inc_gst_aud"],
+    }
+    _validate_profile(bound)
+    return bound
+
+
+def _ci_tariff_metered_facts(
+    parsed: dict[str, Any], profile: dict[str, Any]
+) -> dict[str, Any]:
+    streams: dict[str, dict[date, list[float]]] = parsed["streams"]
+    bill_start = date.fromisoformat(profile["billing_period"]["start_date"])
+    bill_end = date.fromisoformat(profile["billing_period"]["end_date"])
+    rolling_start = date.fromisoformat(profile["rolling_period"]["start_date"])
+    rolling_end = date.fromisoformat(profile["rolling_period"]["end_date"])
+    required_dates = _date_range(rolling_start, rolling_end)
+    analysis_period = profile.get("analysis_period", profile["rolling_period"])
+    analysis_dates = _date_range(
+        date.fromisoformat(analysis_period["start_date"]),
+        date.fromisoformat(analysis_period["end_date"]),
+    )
+    bill_dates = _date_range(bill_start, bill_end)
+    if any(
+        day not in streams[stream_id]
+        for day in set(required_dates + bill_dates + analysis_dates)
+        for stream_id in _REQUIRED_STREAMS
+    ):
+        raise CiTariffAnalysisError("coverage_incomplete")
+
+    import_kwh = sum(sum(streams["E1"][day]) for day in bill_dates)
+    export_kwh = sum(sum(streams["B1"][day]) for day in bill_dates)
+    retail_peak_kwh = _energy_in_window(
+        streams["E1"],
+        bill_dates,
+        profile["retail_energy_window"],
+        timezone_name=profile["timezone_name"],
+    )
+    network_peak_kwh = _energy_in_window(
+        streams["E1"],
+        bill_dates,
+        profile["network_energy_window"],
+        timezone_name=profile["timezone_name"],
+    )
+    demand_intervals = _build_demand_intervals(
+        streams["E1"], streams["Q1"], timezone_name=profile["timezone_name"]
+    )
+    rolling_candidates = _demand_in_window(
+        demand_intervals, required_dates, profile["rolling_demand_window"]
+    )
+    incentive_candidates = _demand_in_window(
+        demand_intervals, bill_dates, profile["incentive_demand_window"]
+    )
+    bill_candidates = [
+        row for row in demand_intervals if bill_start <= row["meter_date"] <= bill_end
+    ]
+    if not rolling_candidates or not incentive_candidates or not bill_candidates:
+        raise CiTariffAnalysisError("coverage_incomplete")
+    rolling_peak = max(rolling_candidates, key=lambda row: row["kva"])
+    incentive_peak = max(incentive_candidates, key=lambda row: row["kva"])
+    bill_peak = max(bill_candidates, key=lambda row: row["kva"])
+    quantities = {
+        "import_kwh": import_kwh,
+        "export_kwh": export_kwh,
+        "retail_peak_kwh": retail_peak_kwh,
+        "retail_off_peak_kwh": import_kwh - retail_peak_kwh,
+        "network_peak_kwh": network_peak_kwh,
+        "network_off_peak_kwh": import_kwh - network_peak_kwh,
+        "rolling_demand_kva": max(
+            rolling_peak["kva"], float(profile["minimum_chargeable_rolling_kva"])
+        ),
+        "incentive_demand_kva": incentive_peak["kva"],
+        "billing_period_max_kva": bill_peak["kva"],
+        "billing_period_max_power_factor": bill_peak["power_factor"],
+    }
+    return {
+        "streams": streams,
+        "bill_start": bill_start,
+        "bill_end": bill_end,
+        "rolling_peak": rolling_peak,
+        "incentive_peak": incentive_peak,
+        "bill_peak": bill_peak,
+        "quantities": quantities,
     }
 
 
@@ -455,6 +496,7 @@ def calculate_ci_tariff_charges(
     *,
     days: int | None = None,
     rate_overrides: dict[str, float] | None = None,
+    include_bill_adjustment: bool = True,
 ) -> dict[str, Any]:
     rates = {**profile["rates"], **(rate_overrides or {})}
     factors = profile["factors"]
@@ -470,8 +512,6 @@ def calculate_ci_tariff_charges(
     dlf = Decimal(str(factors["dlf"]))
     mlf = Decimal(str(factors["mlf"]))
     import_kwh = Decimal(str(quantities["import_kwh"]))
-    export_kwh = Decimal(str(quantities["export_kwh"]))
-    net_kwh = import_kwh - export_kwh
 
     raw_lines = {
         "energy_charges": [
@@ -499,11 +539,11 @@ def calculate_ci_tariff_charges(
             / 100,
         ],
         "regulated_charges": [
-            net_kwh
+            import_kwh
             * Decimal(str(rates["aemo_ancillary_c_per_kwh"]))
             / 100
             * dlf,
-            net_kwh
+            import_kwh
             * Decimal(str(rates["aemo_participant_c_per_kwh"]))
             / 100
             * dlf,
@@ -521,7 +561,11 @@ def calculate_ci_tariff_charges(
             Decimal(days) * Decimal(str(rates["metering_aud_per_day"])),
             Decimal(days) * Decimal(str(rates["value_added_c_per_day"])) / 100,
         ],
-        "additional_charges": [],
+        "additional_charges": (
+            [Decimal(str(profile.get("additional_bill_adjustment_aud", 0.0)))]
+            if include_bill_adjustment
+            else []
+        ),
     }
     categories = {
         category: sum((_money(value) for value in lines), Decimal("0.00"))
@@ -598,7 +642,7 @@ def _validate_profile(payload: dict[str, Any]) -> None:
         ):
             if not isinstance(payload[key], str) or not payload[key].strip():
                 raise ValueError(key)
-        if payload["network_tariff_code"] != "LLVT2":
+        if len(payload["network_tariff_code"]) > 64:
             raise ValueError("network tariff code")
         for hash_key in ("source_bill_sha256", "expected_nem12_sha256"):
             if len(payload[hash_key]) != 64:
@@ -693,6 +737,16 @@ def _validate_profile(payload: dict[str, Any]) -> None:
             for value in numeric_values
         ):
             raise ValueError("numeric values")
+        additional_bill_adjustment = payload.get(
+            "additional_bill_adjustment_aud", 0.0
+        )
+        if (
+            isinstance(additional_bill_adjustment, bool)
+            or not isinstance(additional_bill_adjustment, int | float)
+            or not math.isfinite(float(additional_bill_adjustment))
+            or abs(float(additional_bill_adjustment)) > 1_000_000
+        ):
+            raise ValueError("additional bill adjustment")
         if float(payload["gst_rate"]) != 0.10:
             raise ValueError("gst rate")
         annual_model = payload.get("annual_financial_model")

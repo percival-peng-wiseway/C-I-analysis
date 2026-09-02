@@ -1466,10 +1466,18 @@ def _annual_tariff_value(
     days = (rolling_end - rolling_start).days + 1
     overrides = {"incentive_demand_aud_per_kva_month": incentive_rate}
     baseline = calculate_ci_tariff_charges(
-        baseline_quantities, profile, days=days, rate_overrides=overrides
+        baseline_quantities,
+        profile,
+        days=days,
+        rate_overrides=overrides,
+        include_bill_adjustment=False,
     )
     scenario = calculate_ci_tariff_charges(
-        scenario_quantities, profile, days=days, rate_overrides=overrides
+        scenario_quantities,
+        profile,
+        days=days,
+        rate_overrides=overrides,
+        include_bill_adjustment=False,
     )
     baseline_categories = {
         key: round(float(value), 2)

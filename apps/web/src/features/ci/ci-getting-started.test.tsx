@@ -19,9 +19,9 @@ describe("C&I getting started", () => {
     );
 
     expect(html).toContain("How to use this workspace");
-    expect(html).toContain("CI_EVIDENCE_ROOT");
-    expect(html).toContain("active-tariff-profile.json");
+    expect(html).toContain("Save project evidence");
+    expect(html).toContain("tariff working copy");
     expect(html).toContain("Component &amp; pricing catalog");
-    expect(html).toContain("A blank or guessed tariff is intentionally rejected");
+    expect(html).toContain("A blank or unreconciled tariff is intentionally rejected");
   });
 });

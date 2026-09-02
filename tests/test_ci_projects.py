@@ -394,7 +394,10 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
             "report_preview": {"download_available": False},
         }
 
-    monkeypatch.setattr("api.ci_routes.load_ci_tariff_profile", lambda: {"profile_id": "test"})
+    monkeypatch.setattr(
+        "api.ci_routes.approved_ci_project_tariff_calculation_profile",
+        lambda *_args, **_kwargs: {"profile_id": "test"},
+    )
     monkeypatch.setattr(
         "api.ci_routes.analyze_ci_physical_scenarios", tariff_replay
     )

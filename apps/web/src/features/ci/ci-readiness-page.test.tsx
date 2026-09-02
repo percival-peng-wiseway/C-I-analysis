@@ -90,6 +90,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
     if (path.endsWith("/evidence-intake")) return new Response(JSON.stringify({ contract_version: "ci_project_evidence_state_v1", status: "not_saved", evidence: null }), { status: 200 });
     if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(savedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: savedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
     if (path.endsWith("/design-feasibility")) return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+    if (path.endsWith("/tariff-profile")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_profile_state_v1", status: "not_available", updated_at: null, approved_at: null, profile_sha256: null, profile: null, suggested_profile: null, evidence_basis: null, blockers: [{ code: "tariff_profile_evidence_required", message: "Upload and review bill evidence before approving a tariff profile." }] }), { status: 200 });
     if (path.endsWith("/tariff-replay")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/annual-financial-comparison")) return new Response(JSON.stringify({ contract_version: "ci_project_annual_financial_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/projects") && init?.method === "POST") return new Response(JSON.stringify({ contract_version: "ci_project_v1", ...project, project_id: "project-new", display_name: JSON.parse(String(init.body)).display_name }), { status: 201 });
@@ -191,6 +192,12 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: /04 Finance Analysis/ }));
     expect(await screen.findByRole("heading", { name: "Annual bill reconstruction" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Tariff replay needs project inputs" })).toBeTruthy();
+    expect(screen.getByText("Upload and review bill evidence before approving a tariff profile.")).toBeTruthy();
+    expect(screen.getByText("365 consecutive-day annual interval")).toBeTruthy();
+    expect(screen.getByText("Upload at least 365 consecutive complete days of interval data.")).toBeTruthy();
+    const runButton = screen.getByRole("button", { name: "Run 0 scenarios" });
+    expect(runButton.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Review tariff profile in Evidence" })).toBeTruthy();
     expect(screen.queryByText(/\$/)).toBeNull();
 
     expect(screen.getByRole("button", { name: "Previous: Scenario Analysis" })).toBeTruthy();

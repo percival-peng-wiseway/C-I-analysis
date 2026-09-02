@@ -54,8 +54,6 @@ export function CiReadinessPage() {
   if (!activeProject) {
     return <PageState title="Select a project" description="Choose a project from the left or create a new project to open the four-module workflow." />;
   }
-  const profileReady = readiness.data.availability === "evidence_limited";
-
   return (
     <main className="premium-page ci-workbench-page min-h-screen bg-background p-4 sm:p-6 xl:p-8">
       <div className="premium-content mx-auto flex w-full max-w-[1460px] flex-col gap-6">
@@ -85,8 +83,7 @@ export function CiReadinessPage() {
         ) : (
           <CiTariffReplay
             key={activeProject.project_id}
-            profileLabel={readiness.data.active_profile_label}
-            profileReady={profileReady}
+            onConfigureTariff={() => workspace.setStage("evidence")}
             project={activeProject}
           />
         )}

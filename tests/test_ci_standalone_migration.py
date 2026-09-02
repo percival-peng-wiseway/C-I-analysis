@@ -21,11 +21,36 @@ def test_standalone_migration_creates_only_ci_tables(tmp_path, monkeypatch) -> N
         "ci_project_feasibility_results",
         "ci_project_site_material",
         "ci_project_tariff_replay_results",
+        "ci_project_tariff_profiles",
         "ci_projects",
     }
     project_columns = {
         column["name"] for column in inspect(engine).get_columns("ci_projects")
     }
     assert "design_context_json" in project_columns
+    tariff_profile_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("ci_project_tariff_profiles")
+    }
+    assert tariff_profile_columns == {
+        "project_id",
+        "workspace_id",
+        "owner_id",
+        "profile_contract_version",
+        "approval_status",
+        "source_bill_sha256",
+        "source_interval_sha256",
+        "source_tariff_facts_sha256",
+        "profile_sha256",
+        "profile_json",
+        "calculation_profile_sha256",
+        "calculation_profile_json",
+        "approved_by_actor_id",
+        "approved_at",
+        "created_by_actor_id",
+        "updated_by_actor_id",
+        "created_at",
+        "updated_at",
+    }
     assert not any(table.startswith("residential_") for table in tables)
     engine.dispose()

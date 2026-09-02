@@ -52,6 +52,10 @@ import {
   type CiDeviceProfile,
   type CiEquipmentSelection,
 } from "@/features/ci/api/ci-device-profile";
+import {
+  ciProjectTariffProfileQueryKey,
+  fetchCiProjectTariffProfile,
+} from "@/features/ci/api/ci-tariff-profile";
 import { CiPortfolioReturnChart } from "@/features/ci/ci-annual-financial-workspace";
 
 type ReplayTab = "summary" | "bills" | "financial" | "demand" | "interval" | "assumptions";
@@ -66,12 +70,10 @@ const tabs: Array<{ id: ReplayTab; label: string }> = [
 ];
 
 export function CiTariffReplay({
-  profileLabel,
-  profileReady,
+  onConfigureTariff,
   project,
 }: {
-  profileLabel: string | null;
-  profileReady: boolean;
+  onConfigureTariff: () => void;
   project: CiProject;
 }) {
   const queryClient = useQueryClient();
@@ -98,6 +100,11 @@ export function CiTariffReplay({
     retry: false,
   });
   const deviceProfile = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
+  const tariffProfile = useQuery({
+    queryKey: ciProjectTariffProfileQueryKey(project.project_id),
+    queryFn: () => fetchCiProjectTariffProfile(project.project_id),
+    retry: false,
+  });
   const [equipmentSelection, setEquipmentSelection] = useState<CiEquipmentSelection | null>(null);
 
   useEffect(() => {
@@ -108,6 +115,7 @@ export function CiTariffReplay({
 
   const runReplay = useMutation({
     mutationFn: async () => {
+      if (tariffProfile.data?.status !== "approved") throw new Error("Approve this project's tariff profile before calculating.");
       if (!equipmentSelection) throw new Error("Select the supported PV, battery and hybrid inverter / PCS before calculating.");
       const tariffResult = await runCiProjectTariffReplay(project.project_id);
       const financeResult = await compareCiAnnualFinancialScenarios({
@@ -135,7 +143,7 @@ export function CiTariffReplay({
     },
   });
 
-  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending) {
+  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending) {
     return <ReplayLoading />;
   }
   if (evidence.isError || design.isError || dispatch.isError || replay.isError || finance.isError || deviceProfile.isError) {
@@ -148,20 +156,37 @@ export function CiTariffReplay({
   );
   const tariffIdentified = Boolean(inspection?.bill.network_tariff_code);
   const intervalReady = inspection?.nem12.full_tariff_analysis_ready === true;
+  const annualIntervalReady = inspection?.annual_bill_estimate?.status === "estimated";
   const dispatchReady = dispatch.data.status === "ready";
   const designReady = Boolean(design.data && design.data.candidate_count > 0);
+  const savedDeviceProfile = deviceProfile.data.status === "ready" ? deviceProfile.data.profile : null;
+  const tariffApproved = tariffProfile.data?.status === "approved";
+  const profileLabel = tariffProfile.data?.profile?.display_label ?? tariffProfile.data?.suggested_profile?.display_label ?? null;
+  const tariffDetail = tariffProfile.isError
+    ? "The project tariff profile could not be loaded."
+    : tariffProfile.data?.blockers.map((blocker) => blocker.message).join(" ") || (tariffApproved ? `Approved: ${profileLabel ?? "project tariff"}.` : "Review and approve the project tariff profile in Evidence.");
   const checks = [
     { label: "Solution space saved", ready: designReady },
     { label: "Dispatch completed", ready: dispatchReady },
     { label: "Bill reviewed", ready: billApproved },
     { label: "Tariff code identified", ready: tariffIdentified },
     { label: "E1 / B1 / Q1 / K1 aligned", ready: intervalReady },
+    {
+      detail: annualIntervalReady
+        ? `${inspection?.annual_bill_estimate?.coverage_start} to ${inspection?.annual_bill_estimate?.coverage_end}`
+        : inspection?.annual_bill_estimate?.warning ?? "Upload at least 365 consecutive complete days of interval data.",
+      label: "365 consecutive-day annual interval",
+      ready: annualIntervalReady,
+    },
+    { detail: tariffDetail, label: "Project tariff profile approved", ready: tariffApproved },
+    { label: "Equipment & finance profile saved", ready: Boolean(savedDeviceProfile) },
+    { label: "Equipment selected", ready: Boolean(equipmentSelection) },
   ];
-  const projectInputsReady = checks.every((item) => item.ready);
-  const savedDeviceProfile = deviceProfile.data.status === "ready" ? deviceProfile.data.profile : null;
-  const canRun = projectInputsReady && profileReady && Boolean(savedDeviceProfile && equipmentSelection);
-  const result = runReplay.data?.tariffResult ?? replay.data.result;
-  const financeResult = runReplay.data?.financeResult ?? (finance.data.status === "ready" ? finance.data.result : null);
+  const canRun = checks.every((item) => item.ready);
+  const savedResult = runReplay.data?.tariffResult ?? replay.data.result;
+  const savedFinanceResult = runReplay.data?.financeResult ?? (finance.data.status === "ready" ? finance.data.result : null);
+  const result = tariffApproved ? savedResult : null;
+  const financeResult = tariffApproved ? savedFinanceResult : null;
   const error = runReplay.error instanceof Error ? runReplay.error.message : null;
 
   return (
@@ -175,12 +200,10 @@ export function CiTariffReplay({
             <h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1>
           </div>
         </div>
-        {profileReady ? (
-          <Button disabled={!canRun || runReplay.isPending} onClick={() => runReplay.mutate()} type="button">
-            {runReplay.isPending ? <RefreshCw className="size-4 animate-spin" /> : result ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
-            {runReplay.isPending ? "Calculating tariff and finance…" : result ? "Re-run tariff + finance" : `Run ${design.data?.candidate_count ?? 0} scenarios`}
-          </Button>
-        ) : null}
+        <Button disabled={!canRun || runReplay.isPending} onClick={() => runReplay.mutate()} type="button">
+          {runReplay.isPending ? <RefreshCw className="size-4 animate-spin" /> : result ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
+          {runReplay.isPending ? "Calculating tariff and finance…" : result ? "Re-run tariff + finance" : `Run ${design.data?.candidate_count ?? 0} scenarios`}
+        </Button>
       </header>
 
       {error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p> : null}
@@ -190,9 +213,9 @@ export function CiTariffReplay({
       <EquipmentSelectionPanel onChange={setEquipmentSelection} profile={savedDeviceProfile} selection={equipmentSelection} />
 
       {result ? (
-        financeResult ? <CiTariffReplayResult evidenceCode={inspection?.bill.network_tariff_code ?? "Not recorded"} financeResult={financeResult} profileLabel={profileLabel} result={result} /> : <ReplayReadyState canRun={canRun} checks={checks} design={design.data} profileConnected={profileReady} profileLabel={profileLabel} projectInputsReady={projectInputsReady} />
+        financeResult ? <CiTariffReplayResult evidenceCode={inspection?.bill.network_tariff_code ?? "Not recorded"} financeResult={financeResult} profileLabel={profileLabel} result={result} /> : <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed />
       ) : (
-        <ReplayReadyState canRun={canRun} checks={checks} design={design.data} profileConnected={profileReady} profileLabel={profileLabel} projectInputsReady={projectInputsReady} />
+        <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed={false} />
       )}
     </section>
   );
@@ -356,18 +379,17 @@ function ReplayReadyState({
   canRun,
   checks,
   design,
-  profileConnected,
+  onConfigureTariff,
   profileLabel,
-  projectInputsReady,
+  replayed,
 }: {
   canRun: boolean;
-  checks: Array<{ label: string; ready: boolean }>;
+  checks: Array<{ detail?: string; label: string; ready: boolean }>;
   design: CiDesignCandidateResult | null;
-  profileConnected: boolean;
+  onConfigureTariff: () => void;
   profileLabel: string | null;
-  projectInputsReady: boolean;
+  replayed: boolean;
 }) {
-  const templateReady = projectInputsReady && !profileConnected;
   return (
     <section className="grid overflow-hidden rounded-xl border border-slate-200 bg-white xl:grid-cols-[330px_minmax(0,1fr)]">
       <aside className="border-b border-slate-200 bg-slate-50/70 p-4 xl:border-b-0 xl:border-r">
@@ -375,7 +397,7 @@ function ReplayReadyState({
         <div className="mt-3 max-h-[560px] space-y-2 overflow-y-auto pr-1">
           {design?.candidates.length ? design.candidates.map((scenario, index) => (
             <div className="rounded-lg border border-slate-200 bg-white p-3" key={scenario.scenario_id}>
-              <div className="flex items-center justify-between gap-2"><strong className="text-xs text-slate-900">Solution {index + 1}</strong><span className="text-[11px] text-slate-400">Not replayed</span></div>
+              <div className="flex items-center justify-between gap-2"><strong className="text-xs text-slate-900">Solution {index + 1}</strong><span className="text-[11px] text-slate-400">{replayed ? "Replayed · finance pending" : "Not replayed"}</span></div>
               <p className="mt-1 text-xs tabular-nums leading-5 text-slate-600">{numberLabel(scenario.pv_capacity_kwp_dc)} kWp PV · {numberLabel(scenario.nominal_capacity_kwh)} kWh battery · {numberLabel(scenario.pv_inverter_capacity_kw_ac)} kW hybrid inverter / PCS</p>
             </div>
           )) : <p className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">No saved solutions yet.</p>}
@@ -383,20 +405,21 @@ function ReplayReadyState({
       </aside>
       <div className="p-6 sm:p-8">
         <div className="mx-auto max-w-3xl">
-          <span className={`grid size-14 place-items-center rounded-2xl ${canRun || templateReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-            {canRun || templateReady ? <FileCheck2 className="size-6" /> : <CircleAlert className="size-6" />}
+          <span className={`grid size-14 place-items-center rounded-2xl ${canRun ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+            {canRun ? <FileCheck2 className="size-6" /> : <CircleAlert className="size-6" />}
           </span>
-          <h2 className="mt-5 text-xl font-semibold text-slate-950">{canRun ? `Ready to reconstruct ${design?.candidate_count ?? 0} annual bills` : templateReady ? "Tariff replay template ready" : "Tariff replay needs project inputs"}</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-500">{canRun ? `Python will apply ${profileLabel ?? "the active tariff profile"} to every interval and rebuild annual charge categories for each scenario.` : templateReady ? "The project evidence and Dispatch scenarios are ready. This page now provides the complete review structure; formal tariff-window calculations can be connected later without changing the workflow." : "Complete the missing project items below. No tariff, demand-charge or customer-dollar value is inferred while the evidence gate is incomplete."}</p>
+          <h2 className="mt-5 text-xl font-semibold text-slate-950">{canRun ? `Ready to reconstruct ${design?.candidate_count ?? 0} annual bills` : "Tariff replay needs project inputs"}</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-500">{canRun ? `Python will apply ${profileLabel ?? "the approved project tariff profile"} to every interval and rebuild annual charge categories for each scenario.` : "Complete the missing project items below. No tariff, demand-charge or customer-dollar value is inferred while the evidence gate is incomplete."}</p>
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             {checks.map((item) => (
-              <div className={`flex items-center gap-3 rounded-xl border p-3 text-sm ${item.ready ? "border-emerald-200 bg-emerald-50/60 text-emerald-950" : "border-slate-200 bg-slate-50 text-slate-600"}`} key={item.label}>
+              <div className={`flex items-start gap-3 rounded-xl border p-3 text-sm ${item.ready ? "border-emerald-200 bg-emerald-50/60 text-emerald-950" : "border-slate-200 bg-slate-50 text-slate-600"}`} key={item.label}>
                 <span className={`grid size-6 shrink-0 place-items-center rounded-full ${item.ready ? "bg-emerald-600 text-white" : "bg-white text-slate-400"}`}>{item.ready ? <Check className="size-3.5" /> : <Clock3 className="size-3.5" />}</span>
-                <span className="min-w-0 flex-1">{item.label}</span>
+                <span className="min-w-0 flex-1"><span className="block">{item.label}</span>{item.detail ? <span className="mt-1 block text-xs leading-5 text-slate-500">{item.detail}</span> : null}</span>
                 <span className={`text-[10px] font-semibold uppercase tracking-wide ${item.ready ? "text-emerald-700" : "text-slate-400"}`}>{item.ready ? "Ready" : "Required"}</span>
               </div>
             ))}
           </div>
+          {!checks.find((item) => item.label === "Project tariff profile approved")?.ready ? <Button className="mt-4" onClick={onConfigureTariff} type="button" variant="outline">Review tariff profile in Evidence</Button> : null}
           <div className="mt-7 grid gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 sm:grid-cols-3">
             <ProcessStep icon={Activity} label="1. Interval replay" text="Apply scenario grid import and export to each metered interval." />
             <ProcessStep icon={Gauge} label="2. Billing demand" text="Recalculate chargeable kVA inside approved billing windows." />

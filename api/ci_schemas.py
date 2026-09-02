@@ -4,7 +4,7 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CiFinancialAssumptionsRequest(BaseModel):
@@ -44,6 +44,13 @@ class CiInternalReportRequest(BaseModel):
 
 class CiProjectCreateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=255)
+
+
+class CiProjectTariffProfileSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: dict[str, object]
+    approve_for_calculation: bool = False
 
 
 class CiDeviceProfileRequest(BaseModel):

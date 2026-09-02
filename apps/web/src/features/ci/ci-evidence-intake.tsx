@@ -14,10 +14,20 @@ import {
   type CiEvidenceIntakeResult,
   type CiProjectEvidenceState,
 } from "@/features/ci/api/ci-evidence-intake";
+import {
+  ciProjectTariffProfileQueryKey,
+  fetchCiProjectTariffProfile,
+  saveCiProjectTariffProfile,
+  type CiProjectTariffProfile,
+  type CiProjectTariffProfileState,
+} from "@/features/ci/api/ci-tariff-profile";
+import { ciAnnualFinancialComparisonQueryKey } from "@/features/ci/api/ci-annual-financial-comparison";
+import { ciProjectTariffReplayQueryKey } from "@/features/ci/api/ci-scenarios";
 import { CiAnnualDemandHeatmap } from "@/features/ci/ci-annual-demand-heatmap";
 import { CiBillBreakdown } from "@/features/ci/ci-bill-breakdown";
 import { CiNem12LoadProfile } from "@/features/ci/ci-nem12-load-profile";
 import { CiTariffAnnualEstimate } from "@/features/ci/ci-tariff-annual-estimate";
+import { CiTariffProfileDialog } from "@/features/ci/ci-tariff-profile-dialog";
 
 export function CiEvidenceIntake({
   onReady,
@@ -34,15 +44,22 @@ export function CiEvidenceIntake({
   const [manualTariffCode, setManualTariffCode] = useState("");
   const [replacing, setReplacing] = useState(false);
   const [billBreakdownOpen, setBillBreakdownOpen] = useState(false);
+  const [tariffProfileOpen, setTariffProfileOpen] = useState(false);
   const savedEvidence = useQuery({
     queryKey: ciProjectEvidenceQueryKey(projectId),
     queryFn: () => fetchCiProjectEvidence(projectId),
+  });
+  const tariffProfile = useQuery({
+    queryKey: ciProjectTariffProfileQueryKey(projectId),
+    queryFn: () => fetchCiProjectTariffProfile(projectId),
+    retry: false,
   });
   const inspection = useMutation({
     mutationFn: ({ billFile, billReview, nem12File }: { billFile: File; billReview?: CiBillReviewInput; nem12File: File }) => inspectCiEvidencePair(projectId, billFile, nem12File, undefined, billReview),
     onSuccess: async (result) => {
       setReplacing(false);
       await queryClient.invalidateQueries({ queryKey: ciProjectEvidenceQueryKey(projectId) });
+      await queryClient.invalidateQueries({ queryKey: ciProjectTariffProfileQueryKey(projectId) });
       setBill(null);
       setNem12(null);
       if (result.intake_status === "ready_for_profile_review") onReady();
@@ -56,7 +73,19 @@ export function CiEvidenceIntake({
         ...current,
         evidence: { ...current.evidence, saved_at: new Date().toISOString(), inspection: result },
       } : current);
+      await queryClient.invalidateQueries({ queryKey: ciProjectTariffProfileQueryKey(projectId) });
       if (result.intake_status === "ready_for_profile_review") onReady();
+    },
+  });
+  const saveTariffProfile = useMutation({
+    mutationFn: ({ approveForCalculation, profile }: { approveForCalculation: boolean; profile: CiProjectTariffProfile }) => saveCiProjectTariffProfile(projectId, { approveForCalculation, profile }),
+    onSuccess: async (state) => {
+      queryClient.setQueryData<CiProjectTariffProfileState>(ciProjectTariffProfileQueryKey(projectId), state);
+      setTariffProfileOpen(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ciProjectTariffReplayQueryKey(projectId) }),
+        queryClient.invalidateQueries({ queryKey: ciAnnualFinancialComparisonQueryKey(projectId) }),
+      ]);
     },
   });
   const resetResult = () => inspection.reset();
@@ -72,6 +101,10 @@ export function CiEvidenceIntake({
   const tariffSummaryAvailable = result?.contract_version === "ci_evidence_intake_v9" || result?.contract_version === "ci_evidence_intake_v10";
   const detectedChargeGroups = tariffSummaryAvailable ? result.detected_tariff : undefined;
   const annualBillReadiness = tariffSummaryAvailable ? result.annual_bill_estimate : undefined;
+  const projectTariffState = tariffProfile.data ?? null;
+  const tariffCard = tariffProfile.isPending
+    ? { status: "Loading", eyebrow: "Tariff profile", label: "Checking saved project state" }
+    : tariffCardPresentation(projectTariffState, Boolean(result), detectedTariffCode);
 
   return (
     <section className="scroll-mt-20 space-y-4" id="evidence-intake">
@@ -96,18 +129,21 @@ export function CiEvidenceIntake({
           onChange={(file) => { setNem12(file); if (file) setReplacing(true); resetResult(); }}
           savedName={savedNem12Name}
         />
-        <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
-          <EvidenceCardHeader icon={ReceiptText} ready={Boolean(detectedTariffCode)} status={detectedTariffCode ? "Detected" : result ? "Manual input" : "From bill"} />
-          <h3 className="mt-4 text-sm font-semibold text-slate-950">Tariff</h3>
-          <div className="mt-auto pt-4">
-            {detectedTariffCode ? (
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2"><span className="block text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Network tariff</span><strong className="mt-1 block text-sm text-emerald-950">{detectedTariffCode}</strong></div>
-            ) : result ? (
-              <label className="grid gap-1 text-xs font-medium text-slate-700"><span>Tariff code</span><input aria-label="Manual tariff code" className="rounded-md border border-amber-300 bg-amber-50/40 px-3 py-2 text-sm uppercase" onChange={(event) => setManualTariffCode(event.target.value)} placeholder="Enter if not detected" value={manualTariffCode} /><span className="font-normal text-slate-500">Confirm it in the bill review below.</span></label>
-            ) : (
-              <p className="rounded-lg border border-dashed border-slate-300 px-3 py-3 text-xs leading-5 text-slate-500">Upload and inspect the bill. Manual entry appears only if no tariff is found.</p>
-            )}
-          </div>
+        <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-2">
+          <button aria-haspopup="dialog" aria-label="Open tariff profile" className="flex flex-1 flex-col rounded-lg p-2 text-left transition hover:bg-cyan-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-600 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70" disabled={tariffProfile.isPending} onClick={() => setTariffProfileOpen(true)} type="button">
+            <EvidenceCardHeader icon={ReceiptText} ready={projectTariffState?.status === "approved"} status={tariffCard.status} />
+            <h3 className="mt-4 text-sm font-semibold text-slate-950">Tariff</h3>
+            <div className="mt-auto w-full pt-4">
+              <div className={`rounded-lg border px-3 py-2 ${projectTariffState?.status === "approved" ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-slate-50"}`}>
+                <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500">{tariffCard.eyebrow}</span>
+                <strong className="mt-1 block text-sm text-slate-950">{tariffCard.label}</strong>
+                <span className="mt-1 block text-[11px] text-cyan-800">Review rates and calculation approval</span>
+              </div>
+            </div>
+          </button>
+          {!detectedTariffCode && result ? (
+            <label className="mx-2 mb-2 mt-1 grid gap-1 text-xs font-medium text-slate-700"><span>Tariff code</span><input aria-label="Manual tariff code" className="rounded-md border border-amber-300 bg-amber-50/40 px-3 py-2 text-sm uppercase" onChange={(event) => setManualTariffCode(event.target.value)} placeholder="Enter if not detected" value={manualTariffCode} /><span className="font-normal text-slate-500">Confirm it in the bill review below.</span></label>
+          ) : null}
         </article>
         <article className="flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-4">
           <EvidenceCardHeader icon={MapPin} ready={Boolean(detectedSiteAddress)} status={detectedSiteAddress ? "Detected" : result ? "Unavailable" : "From bill"} />
@@ -187,6 +223,16 @@ export function CiEvidenceIntake({
       ) : null}
 
       <CiTariffAnnualEstimate detectedTariff={detectedChargeGroups} estimate={annualBillReadiness} tariffCode={detectedTariffCode || null} />
+
+      <CiTariffProfileDialog
+        busy={saveTariffProfile.isPending}
+        detectedTariffCode={detectedTariffCode || manualTariffCode}
+        error={saveTariffProfile.error instanceof Error ? saveTariffProfile.error.message : tariffProfile.error instanceof Error ? tariffProfile.error.message : null}
+        onClose={() => { if (!saveTariffProfile.isPending) { setTariffProfileOpen(false); saveTariffProfile.reset(); } }}
+        onSave={(profile, approveForCalculation) => saveTariffProfile.mutate({ approveForCalculation, profile })}
+        open={tariffProfileOpen}
+        state={projectTariffState}
+      />
     </section>
   );
 }
@@ -287,6 +333,18 @@ function EvidenceFileCard({ accept, description, file, icon, inputLabel, label, 
 function EvidenceCardHeader({ icon: Icon, ready, status }: { icon: LucideIcon; ready: boolean; status: string }) {
   const statusClass = ready ? "bg-emerald-50 text-emerald-700" : status === "Selected" || status.includes("selected") ? "bg-cyan-50 text-cyan-700" : "bg-amber-50 text-amber-700";
   return <div className="flex items-center justify-between gap-3"><span className={`grid size-9 place-items-center rounded-lg ${ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}><Icon className="size-4" /></span><span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${statusClass}`}>{status}</span></div>;
+}
+
+function tariffCardPresentation(state: CiProjectTariffProfileState | null, hasInspection: boolean, detectedTariffCode: string) {
+  if (state?.status === "stale" && state.profile) return { status: "Re-approval required", eyebrow: "Saved profile", label: state.profile.display_label };
+  const hasReapprovalBlocker = state?.status === "draft" && state.blockers.some((blocker) => /re.?approval|changed|stale/i.test(`${blocker.code} ${blocker.message}`));
+  if (state?.status === "approved" && state.profile) return { status: "Approved", eyebrow: "Approved calculation profile", label: state.profile.display_label };
+  if (hasReapprovalBlocker && state?.profile) return { status: "Re-approval required", eyebrow: "Saved profile", label: state.profile.display_label };
+  if (state?.status === "draft" && state.profile) return { status: "Draft", eyebrow: "Saved draft", label: state.profile.display_label };
+  if (state?.suggested_profile) return { status: "Detected", eyebrow: "Detected suggestion", label: state.suggested_profile.display_label };
+  if (detectedTariffCode) return { status: "Detected", eyebrow: "Network tariff", label: detectedTariffCode };
+  if (hasInspection) return { status: "Not available", eyebrow: "Tariff profile", label: "Review bill evidence or import JSON" };
+  return { status: "From bill", eyebrow: "Tariff profile", label: "Upload and inspect the bill" };
 }
 
 function Fact({ label, value }: { label: string; value: string }) {

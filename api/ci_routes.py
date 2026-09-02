@@ -21,6 +21,7 @@ from api.ci_schemas import (
     CiPricingCatalogPublishRequest,
     CiPricingCatalogReplaceRequest,
     CiProjectCreateRequest,
+    CiProjectTariffProfileSaveRequest,
 )
 from api.dependencies import (
     get_durable_session_factory,
@@ -54,6 +55,7 @@ from solar_battery.ci_design_context import (
 )
 from solar_battery.ci_device_profile import (
     ci_device_profile_state,
+    device_profile_sha256,
     save_ci_device_profile,
 )
 from solar_battery.ci_financial_solutions import (
@@ -126,6 +128,11 @@ from solar_battery.ci_scenario_analysis import (
     analyze_ci_physical_scenarios,
     analyze_ci_three_case_comparison,
     validate_ci_design_candidates,
+)
+from solar_battery.ci_project_tariff_profile import (
+    approved_ci_project_tariff_calculation_profile,
+    ci_project_tariff_profile_state,
+    save_ci_project_tariff_profile,
 )
 from solar_battery.ci_solution_generator import generate_ci_solutions
 from solar_battery.ci_tariff_analysis import (
@@ -209,6 +216,65 @@ def post_ci_project(
                     session, display_name=payload.display_name, actor=actor
                 )
         return {"contract_version": "ci_project_v1", **project}
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.get("/commercial-industrial/projects/{project_id}/tariff-profile")
+def get_ci_project_tariff_profile(
+    project_id: UUID,
+    response: Response,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        with session_factory() as session:
+            return ci_project_tariff_profile_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.put("/commercial-industrial/projects/{project_id}/tariff-profile")
+def put_ci_project_tariff_profile(
+    project_id: UUID,
+    payload: CiProjectTariffProfileSaveRequest,
+    response: Response,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        bill_bytes: bytes | None = None
+        interval_bytes: bytes | None = None
+        if payload.approve_for_calculation:
+            with session_factory() as session:
+                bill, interval = load_ci_project_evidence_sources(
+                    session,
+                    object_store,
+                    project_id=project_id,
+                    actor=actor,
+                )
+                bill_bytes = bill.data
+                interval_bytes = interval.data
+        with session_factory() as session:
+            with session.begin():
+                return save_ci_project_tariff_profile(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    profile=payload.profile,
+                    approve_for_calculation=payload.approve_for_calculation,
+                    bill_bytes=bill_bytes,
+                    interval_bytes=interval_bytes,
+                )
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 
@@ -804,11 +870,12 @@ def get_ci_project_tariff_replay(
     """Restore the latest tariff replay when its evidence is still current."""
     actor = identity_provider.current()
     try:
-        try:
-            active_profile = load_ci_tariff_profile()
-        except CiTariffAnalysisError:
-            active_profile = None
         with session_factory() as session:
+            active_profile = approved_ci_project_tariff_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
             return ci_tariff_replay_state(
                 session,
                 project_id=project_id,
@@ -887,7 +954,17 @@ def post_ci_project_tariff_replay(
             )
             expected_interval_sha256 = hashlib.sha256(interval.data).hexdigest()
             expected_design_sha256 = design_candidates_sha256(candidates)
-        profile = load_ci_tariff_profile()
+        with session_factory() as session:
+            profile = approved_ci_project_tariff_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+        if profile is None:
+            raise CiProjectError(
+                "ci_project_tariff_profile_required",
+                "Review and approve the project tariff table before running Finance Analysis.",
+            )
         expected_profile_sha256 = tariff_profile_sha256(profile)
         result = analyze_ci_physical_scenarios(
             interval.data,
@@ -896,6 +973,18 @@ def post_ci_project_tariff_replay(
         )
         with session_factory() as session:
             with session.begin():
+                current_profile = approved_ci_project_tariff_calculation_profile(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                )
+                if current_profile is None or tariff_profile_sha256(
+                    current_profile
+                ) != expected_profile_sha256:
+                    raise CiProjectError(
+                        "ci_project_tariff_profile_changed",
+                        "The approved tariff changed while replay was running. Run it again.",
+                    )
                 record_ci_tariff_replay_result(
                     session,
                     project_id=project_id,
@@ -903,29 +992,9 @@ def post_ci_project_tariff_replay(
                     expected_interval_sha256=expected_interval_sha256,
                     expected_design_candidates_sha256=expected_design_sha256,
                     expected_tariff_profile_sha256=expected_profile_sha256,
-                    active_tariff_profile=profile,
+                    active_tariff_profile=current_profile,
                     result=result,
                 )
-        with session_factory() as session:
-            device_profile_state = ci_device_profile_state(session, actor=actor)
-        if device_profile_state["status"] == "ready":
-            device_profile = device_profile_state["profile"]
-            finance_result = compare_ci_annual_financial_scenarios(
-                tariff_replay_result=result,
-                request={"pricing_mode": "device_profile", "prices": []},
-                device_profile=device_profile,
-            )
-            finance_result["project_id"] = str(project_id)
-            with session_factory() as session:
-                with session.begin():
-                    record_ci_annual_financial_result(
-                        session,
-                        project_id=project_id,
-                        actor=actor,
-                        expected_tariff_replay_result_sha256=canonical_sha256(result),
-                        active_tariff_replay_result=result,
-                        result=finance_result,
-                    )
         return result
     except (CiEvidenceIntakeError, CiProjectError) as exc:
         if isinstance(exc, CiProjectError):
@@ -952,8 +1021,17 @@ async def post_ci_annual_financial_simulation(
     upload_bytes = await file.read(MAX_CI_NEM12_UPLOAD_BYTES + 1)
     try:
         request = CiAnnualFinancialSimulationRequest.model_validate_json(payload)
-        profile = load_ci_tariff_profile()
         with session_factory() as session:
+            profile = approved_ci_project_tariff_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            if profile is None:
+                raise CiProjectError(
+                    "ci_project_tariff_profile_required",
+                    "Review and approve the project tariff table before running Finance Analysis.",
+                )
             result = simulate_ci_annual_financial_scenario(
                 session,
                 project_id=project_id,
@@ -996,11 +1074,12 @@ def get_ci_annual_financial_comparison(
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
-        try:
-            profile = load_ci_tariff_profile()
-        except CiTariffAnalysisError:
-            profile = None
         with session_factory() as session:
+            profile = approved_ci_project_tariff_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
             device_state = ci_device_profile_state(session, actor=actor)
             tariff_state = ci_tariff_replay_state(
                 session,
@@ -1039,8 +1118,17 @@ def post_ci_annual_financial_comparison(
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
-        profile = load_ci_tariff_profile()
         with session_factory() as session:
+            profile = approved_ci_project_tariff_calculation_profile(
+                session,
+                project_id=project_id,
+                actor=actor,
+            )
+            if profile is None:
+                raise CiProjectError(
+                    "ci_project_tariff_profile_required",
+                    "Review and approve the project tariff table before running Finance Analysis.",
+                )
             project = require_ci_project(session, project_id=project_id, actor=actor)
             if project.setup_status != "ready":
                 raise CiProjectError(
@@ -1060,6 +1148,7 @@ def post_ci_annual_financial_comparison(
                 )
             tariff_result = tariff_state["result"]
             expected_tariff_result_sha256 = canonical_sha256(tariff_result)
+            expected_tariff_profile_sha256 = tariff_profile_sha256(profile)
             device_state = ci_device_profile_state(session, actor=actor)
             device_profile = (
                 device_state["profile"]
@@ -1071,6 +1160,12 @@ def post_ci_annual_financial_comparison(
                     "ci_device_profile_required",
                     "Save the workspace Device profile in Settings before calculating all solutions.",
                 )
+            expected_device_profile_sha256 = (
+                device_profile_sha256(device_profile)
+                if payload.pricing_mode == "device_profile"
+                and device_profile is not None
+                else None
+            )
         result = compare_ci_annual_financial_scenarios(
             tariff_replay_result=tariff_result,
             request=payload.model_dump(),
@@ -1079,6 +1174,59 @@ def post_ci_annual_financial_comparison(
         result["project_id"] = str(project_id)
         with session_factory() as session:
             with session.begin():
+                current_profile = approved_ci_project_tariff_calculation_profile(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                )
+                if (
+                    current_profile is None
+                    or tariff_profile_sha256(current_profile)
+                    != expected_tariff_profile_sha256
+                ):
+                    raise CiProjectError(
+                        "ci_project_annual_financial_inputs_changed",
+                        "The approved tariff changed while finance was running. Run finance again.",
+                    )
+                current_tariff_state = ci_tariff_replay_state(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    active_tariff_profile=current_profile,
+                )
+                current_tariff_result = (
+                    current_tariff_state.get("result")
+                    if current_tariff_state.get("status") == "ready"
+                    else None
+                )
+                if (
+                    not isinstance(current_tariff_result, dict)
+                    or canonical_sha256(current_tariff_result)
+                    != expected_tariff_result_sha256
+                ):
+                    raise CiProjectError(
+                        "ci_project_annual_financial_inputs_changed",
+                        "Tariff replay changed while finance was running. Run finance again.",
+                    )
+                if expected_device_profile_sha256 is not None:
+                    current_device_state = ci_device_profile_state(
+                        session,
+                        actor=actor,
+                    )
+                    current_device_profile = (
+                        current_device_state.get("profile")
+                        if current_device_state.get("status") == "ready"
+                        else None
+                    )
+                    if (
+                        not isinstance(current_device_profile, dict)
+                        or device_profile_sha256(current_device_profile)
+                        != expected_device_profile_sha256
+                    ):
+                        raise CiProjectError(
+                            "ci_project_annual_financial_inputs_changed",
+                            "The Device profile changed while finance was running. Run finance again.",
+                        )
                 record_ci_annual_financial_result(
                     session,
                     project_id=project_id,
@@ -1086,7 +1234,7 @@ def post_ci_annual_financial_comparison(
                     expected_tariff_replay_result_sha256=(
                         expected_tariff_result_sha256
                     ),
-                    active_tariff_replay_result=tariff_result,
+                    active_tariff_replay_result=current_tariff_result,
                     result=result,
                 )
         return result
@@ -1585,7 +1733,13 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
                 "ci_project_site_material_not_found",
             }
             else status.HTTP_409_CONFLICT
-            if exc.code == "ci_project_setup_required"
+            if exc.code
+            in {
+                "ci_project_setup_required",
+                "ci_project_evidence_inputs_changed",
+                "ci_project_tariff_profile_changed",
+                "ci_project_annual_financial_inputs_changed",
+            }
             else status.HTTP_422_UNPROCESSABLE_ENTITY
         ),
         detail={"code": exc.code, "message": str(exc)},

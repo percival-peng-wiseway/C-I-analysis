@@ -107,6 +107,10 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   let saved = false;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const pathname = new URL(String(input), "http://local.test").pathname;
+    if (pathname.endsWith("/tariff-profile")) {
+      if (init?.method === "PUT") return new Response(JSON.stringify(tariffProfileState("draft", JSON.parse(String(init.body)).profile)), { status: 200 });
+      return new Response(JSON.stringify(tariffProfileState("not_available", saved ? tariffProfileFixture : null)), { status: 200 });
+    }
     if (pathname.endsWith("/evidence-intake") && !init?.method) {
       return new Response(JSON.stringify(saved ? {
         contract_version: "ci_project_evidence_state_v1",
@@ -166,6 +170,11 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   expect(screen.getByText("Withheld pending approved tariff replay")).toBeTruthy();
   expect(screen.queryByText("$1,060.00")).toBeNull();
   expect(onUseNem12).toHaveBeenCalledWith();
+  await user.click(screen.getByRole("button", { name: "Open tariff profile" }));
+  expect(screen.getByRole("dialog", { name: "Tariff profile" })).toBeTruthy();
+  expect((screen.getByLabelText("Display label") as HTMLInputElement).value).toBe("Detected LLVT2 tariff");
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  expect(await screen.findByText("Draft")).toBeTruthy();
 
   firstView.unmount();
   render(
@@ -204,6 +213,7 @@ it("confirms a retailer-neutral bill without adding a company adapter", async ()
   let saved = false;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const pathname = new URL(String(input), "http://local.test").pathname;
+    if (pathname.endsWith("/tariff-profile")) return new Response(JSON.stringify(tariffProfileState("not_available", null)), { status: 200 });
     if (!init?.method) return new Response(JSON.stringify(saved ? {
       contract_version: "ci_project_evidence_state_v1", status: "saved",
       evidence: { saved_at: "2026-08-17T01:02:03+00:00", files: { bill: { filename: "agl.pdf", content_type: "application/pdf", size_bytes: 3 }, interval: { filename: "meter.csv", content_type: "text/csv", size_bytes: 5 } }, inspection: baseResult },
@@ -228,3 +238,48 @@ it("confirms a retailer-neutral bill without adding a company adapter", async ()
   expect(submitted).toMatchObject({ confirmed: true, retailer: "AGL", network_tariff_code: "LLVT2", total_inc_gst_aud: 46.2 });
   expect(String(reviewCall?.[1]?.body)).not.toContain("SYNTH");
 });
+
+const tariffProfileFixture = {
+  contract_version: "ci_project_tariff_profile_v1" as const,
+  display_label: "Detected LLVT2 tariff",
+  network_tariff_code: "LLVT2",
+  additional_bill_adjustment_aud: 0,
+  rates: {
+    retail_peak_c_per_kwh: 10,
+    retail_off_peak_c_per_kwh: 8,
+    incentive_demand_aud_per_kva_month: 4,
+    rolling_demand_aud_per_kva_month: 3,
+    network_peak_c_per_kwh: 5,
+    network_off_peak_c_per_kwh: 2,
+    aemo_ancillary_c_per_kwh: 0.1,
+    aemo_participant_c_per_kwh: 0.2,
+    aemo_frc_c_per_day: 1,
+    environmental_c_per_kwh: 0.3,
+    environmental_certificate_fraction: 1,
+    metering_aud_per_day: 2,
+    value_added_c_per_day: 3,
+  },
+  factors: { mlf: 1, dlf: 1 },
+  windows: {
+    retail_energy: { start: "07:00", end: "23:00" },
+    network_energy: { start: "07:00", end: "19:00" },
+    rolling_demand: { start: "07:00", end: "19:00" },
+    incentive_demand: { start: "16:00", end: "19:00" },
+  },
+  minimum_chargeable_rolling_kva: 0,
+};
+
+function tariffProfileState(status: "not_available" | "draft", suggestedProfile: typeof tariffProfileFixture | null) {
+  const savedProfile = status === "draft" ? suggestedProfile : null;
+  return {
+    contract_version: "ci_project_tariff_profile_state_v1",
+    status,
+    updated_at: savedProfile ? "2026-09-02T00:00:00Z" : null,
+    approved_at: null,
+    profile_sha256: savedProfile ? "a".repeat(64) : null,
+    profile: savedProfile,
+    suggested_profile: suggestedProfile,
+    evidence_basis: null,
+    blockers: status === "draft" ? [{ code: "tariff_profile_approval_required", message: "Review and approve the tariff profile." }] : [],
+  };
+}

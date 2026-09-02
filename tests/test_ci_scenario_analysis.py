@@ -75,6 +75,7 @@ def _profile() -> dict[str, object]:
         },
         "minimum_chargeable_rolling_kva": 10.0,
         "gst_rate": 0.1,
+        "additional_bill_adjustment_aud": -5.0,
         "factors": {"mlf": 1.0, "dlf": 1.0},
         "rates": {
             "retail_peak_c_per_kwh": 10.0,
@@ -241,6 +242,9 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     )
     for row in result["scenarios"]:
         annual = row["annual_tariff_value"]
+        assert annual["baseline_categories_ex_gst_aud"]["additional_charges"] == 0.0
+        assert annual["scenario_categories_ex_gst_aud"]["additional_charges"] == 0.0
+        assert annual["category_savings_ex_gst_aud"]["additional_charges"] == 0.0
         assert sum(annual["baseline_categories_ex_gst_aud"].values()) == pytest.approx(
             annual["baseline_cost_ex_gst_aud"], abs=0.05
         )
