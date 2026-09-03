@@ -64,7 +64,7 @@ const generatedDesign = {
     contract_version: "ci_design_context_v1",
     existing_solar: { installed: false, brand: "", model: "", panel_count: 0, panel_rating_w: 0, installed_capacity_kwp_dc: 0, inverter_brand: "", inverter_model: "", inverter_capacity_kw_ac: 0, installation_year: null, operating_status: "unknown", included_in_interval_baseline: false },
     existing_battery: { installed: false, brand: "", model: "", nominal_capacity_kwh: 0, usable_capacity_kwh: 0, power_kw: 0, installation_year: null, operating_status: "unknown", included_in_interval_baseline: false },
-    technical_options: { annual_specific_yield_kwh_per_kw: 1500, shading_loss_percent: 3, soiling_loss_percent: 2, temperature_loss_percent: 5, wiring_mismatch_loss_percent: 2, other_system_loss_percent: 0, system_availability_percent: 99, effective_derating_percent: 87.6, target_dc_ac_ratio: 1.15, inverter_block_size_kw: 5, site_ac_headroom_kw: 250, battery_duration_hours: 2, charge_efficiency_percent: 95, discharge_efficiency_percent: 95, minimum_soc_percent: 10, maximum_soc_percent: 100, allow_grid_charging: false, reactive_support_enabled: false, reactive_support_max_kvar: 0 },
+    technical_options: { annual_specific_yield_kwh_per_kw: 1500, shading_loss_percent: 3, soiling_loss_percent: 2, temperature_loss_percent: 5, wiring_mismatch_loss_percent: 2, other_system_loss_percent: 0, system_availability_percent: 99, effective_derating_percent: 87.6, target_dc_ac_ratio: 1.15, inverter_block_size_kw: 125, site_ac_headroom_kw: 250, battery_duration_hours: 2, charge_efficiency_percent: 95, discharge_efficiency_percent: 95, minimum_soc_percent: 10, maximum_soc_percent: 100, allow_grid_charging: false, reactive_support_enabled: false, reactive_support_max_kvar: 0 },
   },
 };
 
@@ -283,7 +283,7 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("tab", { name: "Equipment & finance" }));
     expect(await screen.findByRole("heading", { name: "Equipment & finance" })).toBeTruthy();
     expect((screen.getByLabelText("Per kWp DC capital") as HTMLInputElement).value).toBe("530");
-    expect((screen.getByLabelText("30 capital") as HTMLInputElement).value).toBe("77578");
+    expect((screen.getByLabelText("210 kWh capital") as HTMLInputElement).value).toBe("77578");
     expect((screen.getByLabelText("125 kW capital") as HTMLInputElement).value).toBe("10000");
     await user.click(screen.getByRole("button", { name: "Save profile" }));
     expect(await screen.findByText(/Device profile saved/)).toBeTruthy();
@@ -295,7 +295,7 @@ describe("C&I project workspace", () => {
     renderPage();
     expect(await screen.findByRole("region", { name: "Evidence sources" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Next: Solution Generator" }));
-    expect(screen.getByRole("heading", { name: "Build the solution search space" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Configure solutions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Previous: Evidence" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next: Scenario Analysis" })).toBeTruthy();
   });
@@ -396,7 +396,7 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
     const rebateHeading = await screen.findByRole("heading", { name: "STC" });
     const quoteHeading = screen.getByRole("heading", { name: "Solutions" });
-    expect(screen.getByLabelText("Solution generation summary").textContent).toBe("2 requested·0 duplicate sizes merged·0 rejected·2 feasible configurations=2 solutions");
+    expect(screen.getByLabelText("Solution generation summary").textContent).toBe("2 configured combinations·2 feasible");
     expect(screen.queryByRole("heading", { name: "Solution preview & quotations" })).toBeNull();
     expect(screen.getByText("2 / 2 selected")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
@@ -443,6 +443,37 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("3 / 3 selected")).toBeTruthy();
   });
 
+  it("disables custom additions when the 200-solution limit is reached", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 200 } as const;
+    const cappedCandidates = Array.from({ length: 200 }, (_, index) => ({
+      ...generatedDesign.candidates[index % generatedDesign.candidates.length],
+      scenario_id: `capped-solution-${index + 1}`,
+      label: `Capped solution ${index + 1}`,
+    }));
+    const cappedDesign = {
+      ...generatedDesign,
+      candidate_count: 200,
+      candidates: cappedCandidates,
+      generation_summary: {
+        ...generatedDesign.generation_summary,
+        requested_count: 200,
+        generated_candidate_count: 200,
+      },
+    };
+    const fetchMock = mockApi([readyProject], cappedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    const addCustom = await screen.findByRole("button", { name: "Add custom solution" }, { timeout: 5_000 });
+    expect(addCustom.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe("Maximum 200 solutions reached.");
+    await user.click(addCustom);
+    expect(screen.queryByRole("heading", { name: "Custom solution & quotation" })).toBeNull();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-candidates/custom") && init?.method === "POST")).toHaveLength(0);
+  });
+
   it("keeps an approved enabled STC profile price-ready after adding a custom solution", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
@@ -462,7 +493,7 @@ describe("C&I project workspace", () => {
 
     expect(await screen.findByText("3 / 3 selected")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Net CAPEX is not ready" })).toBeNull();
-    expect(screen.getByLabelText("Solution generation summary").textContent).toContain("+1 custom solutions");
+    expect(screen.getByLabelText("Solution generation summary").textContent).toContain("+1 custom solution=3 solutions");
     const customSave = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/design-candidates/custom") && init?.method === "POST");
     expect(JSON.parse(String(customSave?.[1]?.body)).stc_settings).toEqual({
       solar_stc_enabled: true,

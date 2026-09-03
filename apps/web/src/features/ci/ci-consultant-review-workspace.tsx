@@ -300,7 +300,7 @@ function DecisionOverview({
                 <p className="mt-1 text-2xl font-semibold">{financial.label}</p>
                 {scenario ? (
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {formatNumber(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp PV · {formatNumber(scenario.authored_inputs.nominal_capacity_kwh)} kWh BESS · {formatNumber(scenario.authored_inputs.max_discharge_kw)} kW discharge
+                    {formatCapacity(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp PV · {formatCapacity(scenario.authored_inputs.nominal_capacity_kwh)} kWh BESS · {formatCapacity(scenario.authored_inputs.max_discharge_kw)} kW discharge
                   </p>
                 ) : null}
               </div>
@@ -320,7 +320,7 @@ function DecisionOverview({
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Viewed physical scenario</p>
               <p className="mt-1 text-xl font-semibold">{scenario.label}</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                {formatNumber(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp PV · {formatNumber(scenario.authored_inputs.nominal_capacity_kwh)} kWh BESS · no matching saved financial assessment
+                {formatCapacity(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp PV · {formatCapacity(scenario.authored_inputs.nominal_capacity_kwh)} kWh BESS · no matching saved financial assessment
               </p>
             </div>
           ) : (
@@ -433,7 +433,7 @@ function SolutionExplorer({
                   <thead className="bg-muted/60"><tr><th className="px-3 py-2">Rank</th><th className="px-3 py-2">System</th><th className="px-3 py-2">PV</th><th className="px-3 py-2">Battery</th><th className="px-3 py-2">Rolling kVA</th><th className="px-3 py-2">Year-1 tariff value</th><th className="px-3 py-2">Peak effect</th><th className="px-3 py-2">Review</th></tr></thead>
                   <tbody>{scenarios.map((scenario) => {
                     const viewed = scenario.scenario_id === viewedScenario?.scenario_id;
-                    return <tr className={viewed ? "border-t border-border bg-muted/40" : "border-t border-border"} key={scenario.scenario_id}><td className="px-3 py-3 font-semibold">#{scenario.physical_review_rank}</td><td className="px-3 py-3">{scenario.label}</td><td className="px-3 py-3 tabular-nums">{formatNumber(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp</td><td className="px-3 py-3 tabular-nums">{formatNumber(scenario.authored_inputs.nominal_capacity_kwh)} kWh · {formatNumber(scenario.authored_inputs.max_discharge_kw)} kW</td><td className="px-3 py-3 tabular-nums">{scenario.post_dispatch.raw_rolling_demand_kva.toFixed(2)}</td><td className="px-3 py-3 tabular-nums">{formatAud(scenario.annual_tariff_value.first_year_value_ex_gst_aud)} ex GST</td><td className="px-3 py-3 capitalize">{formatPeakEffect(scenario)}</td><td className="px-3 py-3"><Button onClick={() => onViewScenario(scenario)} className="h-8 px-2" type="button" variant={viewed ? "secondary" : "outline"}>{viewed ? "Viewed" : "View"}</Button></td></tr>;
+                    return <tr className={viewed ? "border-t border-border bg-muted/40" : "border-t border-border"} key={scenario.scenario_id}><td className="px-3 py-3 font-semibold">#{scenario.physical_review_rank}</td><td className="px-3 py-3">{scenario.label}</td><td className="px-3 py-3 tabular-nums">{formatCapacity(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp</td><td className="px-3 py-3 tabular-nums">{formatCapacity(scenario.authored_inputs.nominal_capacity_kwh)} kWh · {formatCapacity(scenario.authored_inputs.max_discharge_kw)} kW</td><td className="px-3 py-3 tabular-nums">{scenario.post_dispatch.raw_rolling_demand_kva.toFixed(2)}</td><td className="px-3 py-3 tabular-nums">{formatAud(scenario.annual_tariff_value.first_year_value_ex_gst_aud)} ex GST</td><td className="px-3 py-3 capitalize">{formatPeakEffect(scenario)}</td><td className="px-3 py-3"><Button onClick={() => onViewScenario(scenario)} className="h-8 px-2" type="button" variant={viewed ? "secondary" : "outline"}>{viewed ? "Viewed" : "View"}</Button></td></tr>;
                   })}</tbody>
                 </table>
               </div>
@@ -531,13 +531,13 @@ function ThreeCaseComparison({
           <label className="grid gap-1 text-sm font-medium">PV-only scenario
             <select className="h-10 rounded-md border border-input bg-background px-3 font-normal" onChange={(event) => setPvOnlyScenarioId(event.target.value)} value={pvOnlyScenarioId}>
               <option value="">Select an explicit PV-only case</option>
-              {pvOnlyCandidates.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.label} · {formatNumber(item.authored_inputs.pv_capacity_kwp_dc)} kWp</option>)}
+              {pvOnlyCandidates.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.label} · {formatCapacity(item.authored_inputs.pv_capacity_kwp_dc)} kWp</option>)}
             </select>
           </label>
           <label className="grid gap-1 text-sm font-medium">PV + battery scenario
             <select className="h-10 rounded-md border border-input bg-background px-3 font-normal" onChange={(event) => setPvBatteryScenarioId(event.target.value)} value={pvBatteryScenarioId}>
               <option value="">Select an explicit PV + battery case</option>
-              {pvBatteryCandidates.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.label} · {formatNumber(item.authored_inputs.pv_capacity_kwp_dc)} kWp + {formatNumber(item.authored_inputs.nominal_capacity_kwh)} kWh</option>)}
+              {pvBatteryCandidates.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.label} · {formatCapacity(item.authored_inputs.pv_capacity_kwp_dc)} kWp + {formatCapacity(item.authored_inputs.nominal_capacity_kwh)} kWh</option>)}
             </select>
           </label>
           <Button disabled={!pvOnlyScenarioId || !pvBatteryScenarioId || isPending} onClick={() => onRun({ pvOnlyScenarioId, pvBatteryScenarioId })} type="button">{isPending ? "Comparing…" : "Compare selected cases"}</Button>
@@ -865,6 +865,10 @@ function formatPeakEffect(scenario: PhysicalScenario): string {
 
 function formatAud(value: number): string {
   return new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 }).format(value);
+}
+
+function formatCapacity(value: number): string {
+  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 9 }).format(value);
 }
 
 function formatNumber(value: number): string {

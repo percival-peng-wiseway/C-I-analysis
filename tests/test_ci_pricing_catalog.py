@@ -38,6 +38,18 @@ def test_size_cost_table_resolves_independent_pv_sizing_list() -> None:
     assert all(resolved[size][1] == "extrapolated" for size in (50.0, 75.0, 100.0, 125.0))
 
 
+def test_size_cost_table_interpolates_quantity_just_above_authored_row() -> None:
+    cost_rows = [
+        {"size": 100.0, "capital_cost_aud": 1000.0, "replacement_cost_aud": 500.0, "annual_om_cost_aud": 100.0},
+        {"size": 200.0, "capital_cost_aud": 2000.0, "replacement_cost_aud": 1000.0, "annual_om_cost_aud": 200.0},
+    ]
+
+    resolved, method = _resolve_cost_table(cost_rows, 100.0000009)
+
+    assert method == "interpolated"
+    assert resolved["capital_cost_aud"] > 1000.0
+
+
 def test_versioned_catalog_resolves_product_and_installation_prices() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

@@ -125,7 +125,7 @@ def _stc_settings() -> dict[str, object]:
     }
 
 
-def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> None:
+def test_python_generator_preserves_screening_capacities_without_hardware_snapping() -> None:
     digest = "a" * 64
 
     first = generate_ci_solutions(
@@ -142,19 +142,19 @@ def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> N
     assert first == second
     assert first["generation_summary"] == {
         "requested_count": 6,
-        "deduplicated_count": 2,
+        "deduplicated_count": 0,
         "rejected_count": 0,
-        "generated_candidate_count": 4,
+        "generated_candidate_count": 6,
         "rejection_reasons": [],
     }
     candidates = first["candidates"]
-    assert len(candidates) == 4
-    assert {item["pv_capacity_kwp_dc"] for item in candidates} == {
-        100.17,
-        101.43,
+    assert len(candidates) == 6
+    assert {item["pv_capacity_kwp_dc"] for item in candidates} == {100.0, 101.0}
+    assert {item["nominal_capacity_kwh"] for item in candidates} == {
+        0.0,
+        7.0,
+        14.0,
     }
-    assert {item["nominal_capacity_kwh"] for item in candidates} == {0.0, 14.0}
-    assert all(item["pv_inverter_capacity_kw_ac"] in {85.0} for item in candidates)
     assert [
         (
             item["pv_capacity_kwp_dc"],
@@ -163,12 +163,18 @@ def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> N
         )
         for item in candidates
     ] == [
-        (100.17, 0.0, 85.0),
-        (100.17, 14.0, 85.0),
-        (101.43, 0.0, 85.0),
-        (101.43, 14.0, 85.0),
+        (100.0, 0.0, 83.333333333),
+        (100.0, 7.0, 83.333333333),
+        (100.0, 14.0, 83.333333333),
+        (101.0, 0.0, 84.166666667),
+        (101.0, 7.0, 84.166666667),
+        (101.0, 14.0, 84.166666667),
     ]
-    assert all(item["shared_ac_headroom_kw"] == 85.0 for item in candidates)
+    assert all(
+        item["shared_ac_headroom_kw"]
+        == item["pv_inverter_capacity_kw_ac"]
+        for item in candidates
+    )
     assert all(
         item["grid_emissions_factor_kg_co2e_per_kwh"] == 0.0
         for item in candidates
@@ -200,7 +206,7 @@ def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> N
     assert validate_ci_design_context(context) == context
 
 
-def test_fox_range_example_reduces_66_requests_to_12_feasible_solutions() -> None:
+def test_fox_range_example_keeps_all_36_screening_combinations() -> None:
     profile = _device_profile()
     solar = profile["solution_profiles"]["solar_profiles"][0]
     battery = profile["solution_profiles"]["battery_profiles"][0]
@@ -211,7 +217,8 @@ def test_fox_range_example_reduces_66_requests_to_12_feasible_solutions() -> Non
             "nominal_capacity_kwh_per_unit": 97.44,
             "continuous_power_kw_per_unit": 64.51,
             "minimum_units": 1,
-            "maximum_units": 30,
+            # Hardware quantity limits do not constrain a screening capacity.
+            "maximum_units": 1,
         }
     )
     inverter.update(
@@ -228,7 +235,7 @@ def test_fox_range_example_reduces_66_requests_to_12_feasible_solutions() -> Non
         "step_kwp_dc": 10.0,
     }
     request["battery_range"] = {
-        "minimum_kwh": 300.0,
+        "minimum_kwh": 350.0,
         "maximum_kwh": 400.0,
         "step_kwh": 10.0,
     }
@@ -247,26 +254,58 @@ def test_fox_range_example_reduces_66_requests_to_12_feasible_solutions() -> Non
     )
 
     assert result["generation_summary"] == {
-        "requested_count": 66,
-        "deduplicated_count": 54,
-        "rejected_count": 6,
-        "generated_candidate_count": 12,
-        "rejection_reasons": [
-            {"code": "configured_inverter_capacity_insufficient", "count": 6}
-        ],
+        "requested_count": 36,
+        "deduplicated_count": 0,
+        "rejected_count": 0,
+        "generated_candidate_count": 36,
+        "rejection_reasons": [],
     }
     assert result["design_context"]["generation_summary"] == result[
         "generation_summary"
     ]
-    assert [
-        item["pv_capacity_kwp_dc"] for item in result["candidates"][::2]
-    ] == [100.1, 110.5, 120.25, 130.0, 140.4, 150.15]
-    assert [
-        item["nominal_capacity_kwh"] for item in result["candidates"]
-    ] == [0.0, 389.76] * 6
-    assert {
-        item["pv_inverter_capacity_kw_ac"] for item in result["candidates"]
-    } == {300.0}
+    assert sorted(
+        {item["pv_capacity_kwp_dc"] for item in result["candidates"]}
+    ) == [100.0, 110.0, 120.0, 130.0, 140.0, 150.0]
+    assert sorted(
+        {item["nominal_capacity_kwh"] for item in result["candidates"]}
+    ) == [
+        350.0,
+        360.0,
+        370.0,
+        380.0,
+        390.0,
+        400.0,
+    ]
+    assert all(
+        item["pv_inverter_capacity_kw_ac"]
+        == pytest.approx(264.819376027)
+        for item in result["candidates"]
+    )
+
+
+def test_python_generator_keeps_precise_candidate_values_distinct_in_labels() -> None:
+    request = _request(maximum_pv=100.000000001, headroom=200.0)
+    request["pv_range"]["step_kwp_dc"] = 0.000000001
+    request["battery_range"] = {
+        "minimum_kwh": 0.0,
+        "maximum_kwh": 0.0,
+        "step_kwh": 1.0,
+    }
+
+    result = generate_ci_solutions(
+        request,
+        device_profile=_device_profile(),
+        device_profile_sha256=None,
+    )
+
+    assert [item["pv_capacity_kwp_dc"] for item in result["candidates"]] == [
+        100.0,
+        100.000000001,
+    ]
+    assert [item["label"].split(" kWp", 1)[0] for item in result["candidates"]] == [
+        "100",
+        "100.000000001",
+    ]
 
 
 def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
@@ -274,7 +313,9 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     request["inverter_profile_id"] = "inverter-125"
     request["connection_options"].update(
         {
-            "inverter_block_size_kw": 125.0,
+            # Legacy callers can still send this non-binding field; the saved
+            # context canonicalizes it to the selected performance reference.
+            "inverter_block_size_kw": 5.0,
             "inverter_quantity": 2,
             "reactive_support_enabled": True,
             "reactive_support_max_kvar": 200.0,
@@ -288,25 +329,29 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     )
 
     assert all(
-        candidate["pv_inverter_capacity_kw_ac"] == 250.0
+        candidate["pv_inverter_capacity_kw_ac"] == pytest.approx(83.333333333)
         for candidate in result["candidates"]
     )
     assert all(
-        candidate["reactive_support_max_kvar"] == 165.0
+        candidate["reactive_support_max_kvar"] == pytest.approx(55.0)
         for candidate in result["candidates"]
     )
     assert all(
-        candidate["shared_inverter_apparent_power_limit_kva"] == 275.0
+        candidate["shared_inverter_apparent_power_limit_kva"]
+        == pytest.approx(91.666666666)
         for candidate in result["candidates"]
     )
     selection = result["design_context"]["profile_selection"]
     assert selection["inverter_profile_id"] == "inverter-125"
     assert selection["inverter_profile"]["rated_active_power_kw"] == 125.0
+    assert result["design_context"]["technical_options"][
+        "inverter_block_size_kw"
+    ] == 125.0
     assert result["design_context"]["technical_options"]["inverter_quantity"] == 2
     assert validate_ci_design_context(result["design_context"]) == result["design_context"]
 
 
-def test_python_generator_explains_an_undersized_fixed_inverter_count() -> None:
+def test_python_generator_treats_inverter_quantity_as_non_binding_reference() -> None:
     request = _request(maximum_pv=200.0, headroom=500.0)
     request["pv_range"] = {
         "minimum_kwp_dc": 200.0,
@@ -323,15 +368,19 @@ def test_python_generator_explains_an_undersized_fixed_inverter_count() -> None:
         {"inverter_block_size_kw": 125.0, "inverter_quantity": 1}
     )
 
-    with pytest.raises(CiProjectError, match=r"provides 125 kW AC.*Use at least 2"):
-        generate_ci_solutions(
-            request,
-            device_profile=_device_profile(),
-            device_profile_sha256="e" * 64,
-        )
+    result = generate_ci_solutions(
+        request,
+        device_profile=_device_profile(),
+        device_profile_sha256="e" * 64,
+    )
+
+    assert result["candidates"][0]["pv_capacity_kwp_dc"] == 200.0
+    assert result["candidates"][0]["pv_inverter_capacity_kw_ac"] == pytest.approx(
+        166.666666667
+    )
 
 
-def test_python_generator_explains_when_the_next_inverter_block_exceeds_headroom() -> None:
+def test_python_generator_rejects_continuous_pcs_above_headroom() -> None:
     request = _request(maximum_pv=200.0, headroom=200.0)
     request["pv_range"] = {
         "minimum_kwp_dc": 200.0,
@@ -348,10 +397,9 @@ def test_python_generator_explains_when_the_next_inverter_block_exceeds_headroom
         {"inverter_block_size_kw": 125.0, "inverter_quantity": 1}
     )
 
-    with pytest.raises(
-        CiProjectError,
-        match=r"next valid block is 2 inverters \(250 kW AC\), above the 200 kW AC",
-    ):
+    request["connection_options"]["site_ac_headroom_kw"] = 160.0
+
+    with pytest.raises(CiProjectError, match="one to 200 screening candidates"):
         generate_ci_solutions(
             request,
             device_profile=_device_profile(),
@@ -384,7 +432,75 @@ def test_python_generator_rejects_connection_overflow_without_clamping() -> None
             {"code": "site_ac_headroom_exceeded", "count": 1}
         ],
     }
-    assert result["candidates"][0]["pv_inverter_capacity_kw_ac"] == 10.0
+    assert result["candidates"][0]["pv_inverter_capacity_kw_ac"] == pytest.approx(
+        8.333333333
+    )
+
+
+def test_python_generator_keeps_smaller_battery_when_larger_target_exceeds_headroom() -> None:
+    request = _request(maximum_pv=100.0, headroom=100.0)
+    request["battery_range"] = {
+        "minimum_kwh": 100.0,
+        "maximum_kwh": 300.0,
+        "step_kwh": 200.0,
+    }
+
+    result = generate_ci_solutions(
+        request,
+        device_profile=_device_profile(),
+        device_profile_sha256=None,
+    )
+
+    assert result["generation_summary"] == {
+        "requested_count": 2,
+        "deduplicated_count": 0,
+        "rejected_count": 1,
+        "generated_candidate_count": 1,
+        "rejection_reasons": [
+            {"code": "site_ac_headroom_exceeded", "count": 1}
+        ],
+    }
+    assert result["candidates"][0]["nominal_capacity_kwh"] == 100.0
+    assert result["candidates"][0]["pv_inverter_capacity_kw_ac"] == pytest.approx(
+        83.333333333
+    )
+
+
+@pytest.mark.parametrize(
+    ("pv_range", "battery_range", "message"),
+    [
+        (
+            {"minimum_kwp_dc": 1.0, "maximum_kwp_dc": 21.0, "step_kwp_dc": 1.0},
+            {"minimum_kwh": 0.0, "maximum_kwh": 0.0, "step_kwh": 1.0},
+            "at most 20 PV candidates",
+        ),
+        (
+            {"minimum_kwp_dc": 100.0, "maximum_kwp_dc": 100.0, "step_kwp_dc": 1.0},
+            {"minimum_kwh": 0.0, "maximum_kwh": 15.0, "step_kwh": 1.0},
+            "at most 15 battery candidates",
+        ),
+        (
+            {"minimum_kwp_dc": 1.0, "maximum_kwp_dc": 20.0, "step_kwp_dc": 1.0},
+            {"minimum_kwh": 0.0, "maximum_kwh": 10.0, "step_kwh": 1.0},
+            "at most 200 PV and battery combinations",
+        ),
+    ],
+)
+def test_python_generator_rejects_search_spaces_above_analysis_limits(
+    pv_range: dict[str, float],
+    battery_range: dict[str, float],
+    message: str,
+) -> None:
+    request = _request(maximum_pv=100.0, headroom=1_000.0)
+    request["pv_range"] = pv_range
+    request["battery_range"] = battery_range
+
+    with pytest.raises(CiProjectError, match=message):
+        generate_ci_solutions(
+            request,
+            device_profile=_device_profile(),
+            device_profile_sha256=None,
+        )
 
 
 def test_python_generator_accepts_only_published_profiles() -> None:
@@ -489,9 +605,9 @@ def test_generation_route_records_design_before_saving_stc_in_one_transaction(
     def save_stc(session, *, project_id, actor, **settings):
         project = session.get(CiProjectModel, project_id)
         assert project is not None
-        assert project.design_candidate_count == 4
+        assert project.design_candidate_count == 6
         assert isinstance(project.design_candidates_json, list)
-        assert len(project.design_candidates_json) == 4
+        assert len(project.design_candidates_json) == 6
         assert project.design_context_json["profile_selection"][
             "device_profile_sha256"
         ] == profile_digest
@@ -529,7 +645,7 @@ def test_generation_route_records_design_before_saving_stc_in_one_transaction(
             f"/api/commercial-industrial/projects/{project_id}/design-candidates"
         ).json()
         assert restored["status"] == "ready"
-        assert restored["design"]["candidate_count"] == 4
+        assert restored["design"]["candidate_count"] == 6
 
 
 def test_generation_route_atomically_binds_stc_to_the_new_design(
@@ -845,7 +961,7 @@ def test_generation_route_rolls_back_design_when_atomic_stc_save_fails(
         def fail_stc(session, *, project_id, actor, **_settings):
             project = session.get(CiProjectModel, project_id)
             assert project is not None
-            assert project.design_candidate_count == 6
+            assert project.design_candidate_count == 9
             raise CiProjectError(
                 "synthetic_stc_save_failed",
                 "Synthetic STC save failed.",
@@ -916,7 +1032,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             )
             assert response.status_code == 200
             result = response.json()
-            assert result["candidate_count"] == 4
+            assert result["candidate_count"] == 6
             assert result["generation_summary"]["requested_count"] == 6
             assert result["design_context"]["contract_version"] == (
                 "ci_design_context_v2"
@@ -931,7 +1047,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             )
             assert restored.status_code == 200
             saved = restored.json()["design"]
-            assert saved["candidate_count"] == 4
+            assert saved["candidate_count"] == 6
             assert saved["design_context"] == result["design_context"]
             assert saved["generation_summary"] == result["generation_summary"]
 
@@ -954,7 +1070,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             )
             assert custom.status_code == 200
             custom_result = custom.json()
-            assert custom_result["candidate_count"] == 5
+            assert custom_result["candidate_count"] == 7
             assert custom_result["quoted_net_capex_aud_ex_gst"] == 245000
             added = next(
                 item
@@ -962,16 +1078,16 @@ def test_generation_route_reads_profile_generates_and_persists_context(
                 if item["scenario_id"] == custom_result["added_scenario_id"]
             )
             assert added["label"] == "Client option A"
-            assert added["pv_capacity_kwp_dc"] == 120.33
+            assert added["pv_capacity_kwp_dc"] == 120
             assert added["nominal_capacity_kwh"] == 14
-            assert added["pv_inverter_capacity_kw_ac"] == 110
+            assert added["pv_inverter_capacity_kw_ac"] == 106
             assert (
                 custom_result["normalization"]["requested_inverter_capacity_kw_ac"]
                 == 106
             )
             assert (
                 custom_result["normalization"]["actual_inverter_capacity_kw_ac"]
-                == 110
+                == 106
             )
 
             undersized = client.post(
@@ -999,7 +1115,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             restored_custom = client.get(
                 f"/api/commercial-industrial/projects/{project_id}/design-candidates"
             )
-            assert restored_custom.json()["design"]["candidate_count"] == 5
+            assert restored_custom.json()["design"]["candidate_count"] == 7
 
             forged = client.post(
                 f"/api/commercial-industrial/projects/{project_id}/design-candidates",

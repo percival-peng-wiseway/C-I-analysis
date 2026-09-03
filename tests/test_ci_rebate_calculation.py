@@ -455,3 +455,57 @@ def test_design_price_preview_lists_every_candidate_and_returns_net_capex() -> N
     assert result["quotation_override_basis"].startswith(
         "Entered quotation replaces modelled Net CAPEX"
     )
+
+
+def test_design_price_preview_prices_continuous_authored_capacities_without_equipment_snapping() -> None:
+    authored = _scenario()["authored_inputs"]
+    candidates = [
+        {
+            **authored,
+            "scenario_id": "continuous-1",
+            "label": "Continuous 1",
+            "pv_capacity_kwp_dc": 100.0,
+            "nominal_capacity_kwh": 200.0,
+            "pv_inverter_capacity_kw_ac": 80.0,
+        },
+        {
+            **authored,
+            "scenario_id": "continuous-2",
+            "label": "Continuous 2",
+            "pv_capacity_kwp_dc": 100.1,
+            "nominal_capacity_kwh": 200.1,
+            "pv_inverter_capacity_kw_ac": 80.1,
+        },
+        {
+            **authored,
+            "scenario_id": "continuous-3",
+            "label": "Continuous 3",
+            "pv_capacity_kwp_dc": 100.0,
+            "nominal_capacity_kwh": 200.0,
+            "pv_inverter_capacity_kw_ac": 250.0,
+        },
+    ]
+
+    result = preview_ci_design_candidate_prices(
+        candidates=candidates,
+        device_profile=suggested_ci_device_profile(),
+        rebate_profile=None,
+    )
+
+    first, second, third = result["solutions"]
+    first_breakdown = first["capex_breakdown_aud_ex_gst"]
+    second_breakdown = second["capex_breakdown_aud_ex_gst"]
+    assert first_breakdown == {
+        "pv_aud": 53000.0,
+        "battery_aud": round((200.0 / 7.0) * (77578.0 / 30.0), 2),
+        "inverter_aud": 9000.0,
+    }
+    assert second_breakdown == {
+        "pv_aud": 53053.0,
+        "battery_aud": round((200.1 / 7.0) * (77578.0 / 30.0), 2),
+        "inverter_aud": 9002.5,
+    }
+    assert second_breakdown["battery_aud"] > first_breakdown["battery_aud"]
+    assert second_breakdown["inverter_aud"] > first_breakdown["inverter_aud"]
+    assert second["gross_capex_aud_ex_gst"] > first["gross_capex_aud_ex_gst"]
+    assert third["capex_breakdown_aud_ex_gst"]["inverter_aud"] == 20000.0

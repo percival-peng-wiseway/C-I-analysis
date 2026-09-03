@@ -46,7 +46,7 @@ const fixtures = vi.hoisted(() => {
     rebate_aud_ex_gst: program.rebate_aud_ex_gst,
   }));
   const scenarios = [
-    ["scenario-1", 146, 390, 150, 38852, 178351],
+    ["scenario-1", 146.123456789, 390.987654321, 150.111222333, 38852, 178351],
     ["scenario-2", 142, 390, 145, 38073, 179130],
     ["scenario-3", 138, 360, 140, 36536, 180667],
     ["scenario-4", 134, 330, 135, 34998, 182205],
@@ -122,6 +122,8 @@ it("applies the shared Device profile to all tariff scenarios", async () => {
   expect(screen.getByRole("img", { name: "All solution NPV and payback comparison" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "All solution financial metrics" })).toBeTruthy();
   expect(screen.getByRole("img", { name: "Cumulative cash flow comparison" })).toBeTruthy();
+  expect(screen.getAllByText("146.123456789 kWp PV · 390.987654321 kWh battery · 150.111222333 kW hybrid inverter / PCS").length).toBeGreaterThan(0);
+  expect(screen.getByText("#1 146.123456789 kWp / 390.987654321 kWh")).toBeTruthy();
   expect(screen.queryByRole("region", { name: "Financial review leader" })).toBeNull();
   expect(screen.getAllByText("+$90,000").length).toBeGreaterThan(0);
 });

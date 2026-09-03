@@ -266,15 +266,16 @@ function PhysicalFeasibilityWorkspace({ onAnalysisStart, onBack, onValidated, pr
         siteAddress={siteAddress}
         stcSettings={<CiRebateProfilePanel projectId={project.project_id} ref={stcSettingsRef} />}
       />
-    {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} generationSummary={generatedDesign.generation_summary ?? null} inverterBlockSizeKw={generatedDesign.design_context?.technical_options.inverter_block_size_kw ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { overriddenQuoteIds.current.add(scenarioId); setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
+    {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} generationSummary={generatedDesign.generation_summary ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { overriddenQuoteIds.current.add(scenarioId); setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
   </div>;
 }
 
-function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSummary, inverterBlockSizeKw, isAddingCustom, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, onSelectionChange, onSelectAll, preview, previewError, quotes, selectedSolutions, siteAcHeadroomKw }: {
+const MAX_DESIGN_SOLUTIONS = 200;
+
+function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSummary, isAddingCustom, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, onSelectionChange, onSelectAll, preview, previewError, quotes, selectedSolutions, siteAcHeadroomKw }: {
   addCustomError: string | null;
   analysisError: string | null;
   generationSummary: CiDesignCandidateResult["generation_summary"] | null;
-  inverterBlockSizeKw: number | null;
   isAddingCustom: boolean;
   isLoading: boolean;
   onAddCustom: (request: CiCustomDesignCandidateRequest) => Promise<void>;
@@ -292,8 +293,13 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSumm
   const [showCustom, setShowCustom] = useState(false);
   const [custom, setCustom] = useState({ label: "", pv: "", battery: "", inverter: "", capex: "" });
   const [customValidationError, setCustomValidationError] = useState<string | null>(null);
+  const customSolutionLimitReached = (preview?.candidate_count ?? 0) >= MAX_DESIGN_SOLUTIONS;
   const submitCustom = async () => {
     setCustomValidationError(null);
+    if (customSolutionLimitReached) {
+      setCustomValidationError(`Maximum ${MAX_DESIGN_SOLUTIONS} solutions reached.`);
+      return;
+    }
     const request: CiCustomDesignCandidateRequest = {
       contract_version: "ci_custom_design_candidate_request_v1",
       label: custom.label.trim(),
@@ -306,10 +312,8 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSumm
       setCustomValidationError("Enter a name, positive PV and PCS capacities, a non-negative battery capacity, and a positive Net CAPEX.");
       return;
     }
-    const blockSize = inverterBlockSizeKw && inverterBlockSizeKw > 0 ? inverterBlockSizeKw : 0;
-    const normalizedPcs = blockSize > 0 ? Math.ceil((request.inverter_capacity_kw_ac - 1e-9) / blockSize) * blockSize : request.inverter_capacity_kw_ac;
-    if (siteAcHeadroomKw && normalizedPcs > siteAcHeadroomKw + 1e-9) {
-      setCustomValidationError(`The requested PCS rounds to ${numberLabel(normalizedPcs)} kW AC, above the current ${numberLabel(siteAcHeadroomKw)} kW AC Site AC headroom. Reduce PCS or update the connection limit with approved evidence.`);
+    if (siteAcHeadroomKw && request.inverter_capacity_kw_ac > siteAcHeadroomKw + 1e-9) {
+      setCustomValidationError(`The requested PCS is ${numberLabel(request.inverter_capacity_kw_ac)} kW AC, above the current ${numberLabel(siteAcHeadroomKw)} kW AC Site AC headroom.`);
       return;
     }
     try {
@@ -322,15 +326,18 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSumm
   };
   if (isLoading) return <section className="rounded-xl border border-slate-200 bg-white p-6"><p className="flex items-center gap-2 text-sm text-slate-600"><RefreshCw className="size-4 animate-spin" />Calculating Net CAPEX for every feasible solution…</p></section>;
   if (previewError || !preview) return <section className="rounded-xl border border-amber-200 bg-amber-50 p-5"><h2 className="font-semibold text-amber-950">Net CAPEX is not ready</h2><p className="mt-1 text-sm leading-6 text-amber-900">{previewError ?? "Save the equipment and rebate assumptions, then try again."}</p><Button className="mt-4" onClick={onRetry} type="button" variant="outline"><RefreshCw className="size-4" />Retry pricing</Button></section>;
-  const feasibleRequestedCount = generationSummary
-    ? Math.max(0, generationSummary.requested_count - generationSummary.deduplicated_count - generationSummary.rejected_count)
-    : 0;
-  const addedComparatorCount = generationSummary
-    ? Math.max(0, generationSummary.generated_candidate_count - feasibleRequestedCount)
-    : 0;
   const addedCustomCount = generationSummary
     ? Math.max(0, preview.candidate_count - generationSummary.generated_candidate_count)
     : 0;
+  const feasibleCombinationCount = generationSummary
+    ? Math.max(0, generationSummary.requested_count - generationSummary.deduplicated_count - generationSummary.rejected_count)
+    : 0;
+  const legacyComparisonCount = generationSummary
+    ? Math.max(0, generationSummary.generated_candidate_count - feasibleCombinationCount)
+    : 0;
+  const rejectionTitle = generationSummary?.rejection_reasons
+    .map((reason) => `${reason.code}: ${reason.count}`)
+    .join("; ");
   const selectedCount = preview.solutions.filter((solution) => selectedSolutions[solution.scenario_id]).length;
   const allSelected = selectedCount === preview.solutions.length;
   const validQuotes = selectedCount > 0 && preview.solutions.filter((solution) => selectedSolutions[solution.scenario_id]).every((solution) => {
@@ -344,23 +351,22 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSumm
           <h3 className="text-xl font-semibold text-slate-950" id="generated-solution-quotes-title">Solutions</h3>
           {generationSummary ? (
             <div aria-label="Solution generation summary" className="mt-2 flex flex-wrap gap-2 text-xs text-slate-600">
-              <span>{generationSummary.requested_count} requested</span>
+              <span>{generationSummary.requested_count} configured combinations</span>
+              {generationSummary.deduplicated_count ? <><span aria-hidden="true">·</span><span>{generationSummary.deduplicated_count} merged from an earlier design</span></> : null}
+              {generationSummary.rejected_count ? <><span aria-hidden="true">·</span><span title={rejectionTitle}>{generationSummary.rejected_count} rejected</span></> : null}
               <span aria-hidden="true">·</span>
-              <span>{generationSummary.deduplicated_count} duplicate sizes merged</span>
-              <span aria-hidden="true">·</span>
-              <span>{generationSummary.rejected_count} rejected</span>
-              <span aria-hidden="true">·</span>
-              <span>{feasibleRequestedCount} feasible configurations</span>
-              {addedComparatorCount ? <><span aria-hidden="true">+</span><span>{addedComparatorCount} PV-only comparisons</span></> : null}
-              {addedCustomCount ? <><span aria-hidden="true">+</span><span>{addedCustomCount} custom solutions</span></> : null}
-              <span aria-hidden="true">=</span>
-              <strong className="text-slate-900">{preview.candidate_count} solutions</strong>
+              <strong className="text-slate-900">{feasibleCombinationCount} feasible</strong>
+              {legacyComparisonCount ? <><span aria-hidden="true">+</span><span>{legacyComparisonCount} legacy PV-only {legacyComparisonCount === 1 ? "comparison" : "comparisons"}</span></> : null}
+              {addedCustomCount ? <><span aria-hidden="true">+</span><span>{addedCustomCount} custom {addedCustomCount === 1 ? "solution" : "solutions"}</span><span aria-hidden="true">=</span><strong className="text-slate-900">{preview.candidate_count} solutions</strong></> : null}
             </div>
           ) : null}
         </div>
-        <div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{selectedCount} / {preview.candidate_count} selected</span><Button onClick={() => { setCustomValidationError(null); setShowCustom((current) => !current); }} type="button" variant="outline"><Plus className="size-4" />Add custom solution</Button></div>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{selectedCount} / {preview.candidate_count} selected</span><Button aria-describedby={customSolutionLimitReached ? "custom-solution-limit" : undefined} disabled={customSolutionLimitReached} onClick={() => { setCustomValidationError(null); setShowCustom((current) => !current); }} type="button" variant="outline"><Plus className="size-4" />Add custom solution</Button></div>
+          {customSolutionLimitReached ? <p className="text-xs font-medium text-amber-700" id="custom-solution-limit" role="status">Maximum {MAX_DESIGN_SOLUTIONS} solutions reached.</p> : null}
+        </div>
       </header>
-      {showCustom ? <div className="border-b border-slate-200 bg-cyan-50/40 p-5 sm:p-6"><div className="flex flex-wrap items-start justify-between gap-3"><h3 className="font-semibold text-slate-950">Custom solution &amp; quotation</h3><Button onClick={() => setShowCustom(false)} type="button" variant="outline">Cancel</Button></div><div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><label className="text-xs font-medium text-slate-700">Solution name<input aria-label="Custom solution name" className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100" maxLength={80} onChange={(event) => setCustom((current) => ({ ...current, label: event.target.value }))} placeholder="e.g. Client option A" value={custom.label} /></label><CustomNumberField label="PV capacity" onChange={(value) => setCustom((current) => ({ ...current, pv: value }))} suffix="kWp" value={custom.pv} /><CustomNumberField label="Battery capacity" min="0" onChange={(value) => setCustom((current) => ({ ...current, battery: value }))} suffix="kWh" value={custom.battery} /><CustomNumberField label="PCS capacity" onChange={(value) => setCustom((current) => ({ ...current, inverter: value }))} suffix="kW AC" value={custom.inverter} /><CustomNumberField label="Quoted Net CAPEX" onChange={(value) => setCustom((current) => ({ ...current, capex: value }))} prefix="$" suffix="ex GST" value={custom.capex} /></div>{customValidationError || addCustomError ? <p className="mt-3 text-sm text-red-700" role="alert">{customValidationError ?? addCustomError}</p> : null}<div className="mt-4 flex justify-end"><Button disabled={isAddingCustom} onClick={() => { void submitCustom(); }} type="button">{isAddingCustom ? <RefreshCw className="size-4 animate-spin" /> : <Plus className="size-4" />}{isAddingCustom ? "Validating…" : "Add to comparison"}</Button></div></div> : null}
+      {showCustom ? <div className="border-b border-slate-200 bg-cyan-50/40 p-5 sm:p-6"><div className="flex flex-wrap items-start justify-between gap-3"><h3 className="font-semibold text-slate-950">Custom solution &amp; quotation</h3><Button onClick={() => setShowCustom(false)} type="button" variant="outline">Cancel</Button></div><div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><label className="text-xs font-medium text-slate-700">Solution name<input aria-label="Custom solution name" className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100" maxLength={80} onChange={(event) => setCustom((current) => ({ ...current, label: event.target.value }))} placeholder="e.g. Client option A" value={custom.label} /></label><CustomNumberField label="PV capacity" onChange={(value) => setCustom((current) => ({ ...current, pv: value }))} suffix="kWp" value={custom.pv} /><CustomNumberField label="Battery capacity" min="0" onChange={(value) => setCustom((current) => ({ ...current, battery: value }))} suffix="kWh" value={custom.battery} /><CustomNumberField label="PCS capacity" onChange={(value) => setCustom((current) => ({ ...current, inverter: value }))} suffix="kW AC" value={custom.inverter} /><CustomNumberField label="Quoted Net CAPEX" onChange={(value) => setCustom((current) => ({ ...current, capex: value }))} prefix="$" suffix="ex GST" value={custom.capex} /></div>{customValidationError || addCustomError ? <p className="mt-3 text-sm text-red-700" role="alert">{customValidationError ?? addCustomError}</p> : null}<div className="mt-4 flex justify-end"><Button disabled={isAddingCustom || customSolutionLimitReached} onClick={() => { void submitCustom(); }} type="button">{isAddingCustom ? <RefreshCw className="size-4 animate-spin" /> : <Plus className="size-4" />}{isAddingCustom ? "Validating…" : "Add to comparison"}</Button></div></div> : null}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="w-12 px-4 py-3"><input aria-label="Select all solutions" checked={allSelected} onChange={(event) => onSelectAll(event.target.checked)} type="checkbox" /></th><th className="px-4 py-3">Solution</th><th className="px-4 py-3">PV</th><th className="px-4 py-3">Battery</th><th className="px-4 py-3">PCS</th><th className="px-4 py-3 text-right">Gross CAPEX</th><th className="px-4 py-3 text-right">Upfront rebates</th><th className="px-4 py-3 text-right">Model Net CAPEX</th><th className="px-4 py-3">Quoted Net CAPEX (ex GST)</th></tr></thead>
@@ -377,7 +383,7 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSumm
 }
 
 function CustomNumberField({ label, min = "0.01", onChange, prefix, suffix, value }: { label: string; min?: string; onChange: (value: string) => void; prefix?: string; suffix: string; value: string }) {
-  return <label className="text-xs font-medium text-slate-700">{label}<div className="relative mt-1"><input aria-label={label} className={`h-10 w-full rounded-md border border-slate-300 bg-white ${prefix ? "pl-7" : "pl-3"} pr-16 text-sm tabular-nums outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100`} min={min} onChange={(event) => onChange(event.target.value)} step="0.01" type="number" value={value} />{prefix ? <span className="pointer-events-none absolute left-3 top-2.5 text-slate-400">{prefix}</span> : null}<span className="pointer-events-none absolute right-3 top-2.5 text-[11px] text-slate-400">{suffix}</span></div></label>;
+  return <label className="text-xs font-medium text-slate-700">{label}<div className="relative mt-1"><input aria-label={label} className={`h-10 w-full rounded-md border border-slate-300 bg-white ${prefix ? "pl-7" : "pl-3"} pr-16 text-sm tabular-nums outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100`} min={min} onChange={(event) => onChange(event.target.value)} step={prefix ? "0.01" : "any"} type="number" value={value} />{prefix ? <span className="pointer-events-none absolute left-3 top-2.5 text-slate-400">{prefix}</span> : null}<span className="pointer-events-none absolute right-3 top-2.5 text-[11px] text-slate-400">{suffix}</span></div></label>;
 }
 
 function scenarioRebateStatus(calculation: CiDesignPricePreview["solutions"][number]["rebate_calculation"]) {
@@ -547,7 +553,7 @@ function toActiveProject(project: CiProject) {
 }
 
 function numberLabel(value: number) {
-  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 1 }).format(value);
+  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 9 }).format(value);
 }
 
 function AnalysisProgress({ progress }: { progress: { percent: number; label: string } }) {

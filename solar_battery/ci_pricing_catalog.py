@@ -334,7 +334,7 @@ def _resolve_cost_table(
             "annual_om_cost_aud": 0.0,
         }, "zero_size"
     exact = next(
-        (row for row in rows if abs(float(row["size"]) - quantity) <= 1e-6),
+        (row for row in rows if float(row["size"]) == float(quantity)),
         None,
     )
     if exact is not None:

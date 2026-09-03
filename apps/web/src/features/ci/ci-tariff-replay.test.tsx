@@ -15,7 +15,7 @@ const result = {
     scenario_id: "case-1",
     label: "Case 1",
     physical_review_rank: 1,
-    authored_inputs: { pv_capacity_kwp_dc: 141.7, nominal_capacity_kwh: 300, pv_inverter_capacity_kw_ac: 250 },
+    authored_inputs: { pv_capacity_kwp_dc: 141.123456789, nominal_capacity_kwh: 300.987654321, pv_inverter_capacity_kw_ac: 250.111222333 },
     annual_tariff_value: {
       period_start: "2025-01-01", period_end: "2025-12-31",
       rate_basis: "active_bill_rates_with_evidence_bound_seasonal_incentive",
@@ -136,7 +136,7 @@ describe("Tariff replay result workspace", () => {
     expect(screen.getByRole("heading", { name: "Open a solution to inspect the full analysis" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /^View details for solution 1:/ }));
-    expect(screen.getByRole("heading", { name: "141.7 kWp PV · 300 kWh battery · 250 kW hybrid inverter / PCS" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "141.123456789 kWp PV · 300.987654321 kWh battery · 250.111222333 kW hybrid inverter / PCS" })).toBeTruthy();
     expect(screen.getAllByText("$83,000").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$37,000").length).toBeGreaterThan(0);
     expect(screen.getByText("Solar PV")).toBeTruthy();

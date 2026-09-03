@@ -627,18 +627,26 @@ def _profile_capex_breakdown(
     inverter_product = _selected_product(
         profile, "inverter_products", equipment_selection["inverter_product_id"]
     )
-    battery_modules = max(
-        0,
-        math.ceil(battery_capacity / float(battery_product["module_capacity_kwh"])),
+    battery_reference_quantity = max(
+        0.0,
+        battery_capacity / float(battery_product["module_capacity_kwh"]),
     )
-    inverter_units = max(
-        0,
-        math.ceil(inverter_capacity / float(inverter_product["sizing_unit_kw_ac"])),
-    )
-    inverter_unit_cost = _curve_cost(
+    inverter_reference_capacity = float(inverter_product["sizing_unit_kw_ac"])
+    inverter_reference_cost = _curve_cost(
         inverter_product["cost_curve"],
-        x=float(inverter_product["sizing_unit_kw_ac"]),
+        x=inverter_reference_capacity,
         axis="capacity_kw_ac",
+    )
+    inverter_cost = (
+        _curve_cost(
+            inverter_product["cost_curve"],
+            x=inverter_capacity,
+            axis="capacity_kw_ac",
+        )
+        if inverter_capacity <= inverter_reference_capacity
+        else inverter_capacity
+        / inverter_reference_capacity
+        * inverter_reference_cost
     )
     return {
         "pv_aud": round(
@@ -647,12 +655,12 @@ def _profile_capex_breakdown(
         "battery_aud": round(
             _curve_cost(
                 battery_product["cost_curve"],
-                x=float(battery_modules),
+                x=float(battery_reference_quantity),
                 axis="quantity",
             ),
             2,
         ),
-        "inverter_aud": round(inverter_units * inverter_unit_cost, 2),
+        "inverter_aud": round(inverter_cost, 2),
     }
 
 

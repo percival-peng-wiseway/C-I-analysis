@@ -50,7 +50,6 @@ type SiteFactorsForm = {
 };
 type ConnectionOptionsForm = {
   inverter_block_size_kw: string;
-  inverter_quantity: string;
   site_ac_headroom_kw: string;
   allow_grid_charging: boolean;
   reactive_support_enabled: boolean;
@@ -69,6 +68,9 @@ type RestoredBuilderState = {
 
 const defaultPvRange = (): NumericRange => ({ minimum: "100", maximum: "500", step: "100" });
 const defaultBatteryRange = (): NumericRange => ({ minimum: "0", maximum: "500", step: "100" });
+const MAX_PV_CANDIDATES = 20;
+const MAX_BATTERY_CANDIDATES = 15;
+const MAX_SOLUTIONS = 200;
 const defaultSiteFactors = (): SiteFactorsForm => ({
   resource_source: "analyst_assumption",
   resource_label: "Workspace screening assumption",
@@ -84,7 +86,6 @@ const defaultSiteFactors = (): SiteFactorsForm => ({
 });
 const defaultConnectionOptions = (): ConnectionOptionsForm => ({
   inverter_block_size_kw: "5",
-  inverter_quantity: "",
   site_ac_headroom_kw: "250",
   allow_grid_charging: true,
   reactive_support_enabled: false,
@@ -190,6 +191,16 @@ export function CiScenarioBuilder({
     [batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile],
   );
   const candidateUpperBound = canonicalCandidateUpperBound(pvRange, batteryRange);
+  const pvCandidateCount = parsedRange(pvRange, true)?.count ?? 0;
+  const batteryCandidateCount = parsedRange(batteryRange, false)?.count ?? 0;
+  const candidateLimitError =
+    pvCandidateCount > MAX_PV_CANDIDATES
+      ? `Maximum ${MAX_PV_CANDIDATES} PV candidates. Current configuration: ${pvCandidateCount}.`
+      : batteryCandidateCount > MAX_BATTERY_CANDIDATES
+        ? `Maximum ${MAX_BATTERY_CANDIDATES} battery candidates. Current configuration: ${batteryCandidateCount}.`
+        : candidateUpperBound > MAX_SOLUTIONS
+          ? `Maximum ${MAX_SOLUTIONS} solutions. Current configuration: ${candidateUpperBound}.`
+          : null;
   const effectiveYield = effectiveSpecificYield(site);
 
   const selectInverterProfile = (profileId: string) => {
@@ -207,13 +218,13 @@ export function CiScenarioBuilder({
 
   return (
     <section aria-labelledby="search-space-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
-      <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Build the solution search space</h2>
+      <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Configure solutions</h2>
 
       <form
         className="mt-7 space-y-8"
         onSubmit={(event) => {
           event.preventDefault();
-          if (request && candidateUpperBound <= 200) onSubmit(request);
+          if (request && !candidateLimitError) onSubmit(request);
         }}
       >
         <WorkflowSection title="Location & solar resource">
@@ -265,27 +276,15 @@ export function CiScenarioBuilder({
           <div className="grid gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
-            <InverterProfileCard
-              onProfileChange={selectInverterProfile}
-              onQuantityChange={(inverter_quantity) => setConnection({ ...connection, inverter_quantity })}
-              profile={inverterProfile}
-              profiles={publishedInverter}
-              quantity={connection.inverter_quantity}
-            />
+            <InverterProfileCard onProfileChange={selectInverterProfile} profile={inverterProfile} profiles={publishedInverter} />
           </div>
           {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Published Solar, AC Battery and Inverter profiles are required.</p>
           ) : null}
           <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-            <div className="flex items-center gap-3">
-              <span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Cpu className="size-4" /></span>
-              <div>
-                <h4 className="font-semibold text-slate-950">Python auto-sizing</h4>
-              </div>
-            </div>
+            <h4 className="font-semibold text-slate-950">Connection &amp; reactive support</h4>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <OptionGroup title="Connection capacity">
-                <ReadOnlyFact label="PCS block from selected inverter" value={inverterProfile ? `${formatNumber(inverterProfile.rated_active_power_kw)} kW AC` : "Select an inverter profile"} />
                 <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
                 <CheckField checked={connection.reactive_support_enabled} label="Model inverter reactive support" onChange={(reactive_support_enabled) => setConnection({ ...connection, reactive_support_enabled })} />
                 {connection.reactive_support_enabled ? <NumberField label="Reactive support cap (kvar)" onChange={(reactive_support_max_kvar) => setConnection({ ...connection, reactive_support_max_kvar })} value={connection.reactive_support_max_kvar} /> : null}
@@ -301,8 +300,8 @@ export function CiScenarioBuilder({
         <div className="flex flex-wrap items-center justify-end gap-4 border-t border-slate-200 pt-5">
           <div className="flex flex-wrap items-center justify-end gap-3">
             {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
-            {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Maximum 200 candidates. Current request: up to {candidateUpperBound}.</p> : null}
-            <Button className="min-w-64" disabled={!request || candidateUpperBound > 200 || isPending} type="submit">
+            {candidateLimitError ? <p className="max-w-xl text-sm text-amber-800">{candidateLimitError}</p> : null}
+            <Button className="min-w-64" disabled={!request || Boolean(candidateLimitError) || isPending} type="submit">
               {isPending ? "Saving & generating in Python…" : "Save configuration & generate solutions"}
               <Play className="size-4" />
             </Button>
@@ -334,15 +333,14 @@ function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, r
 }) {
   return (
     <ProfileCard icon={SunMedium} title="Solar PV">
-      <SelectField label="Published Solar profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      <SelectField label="Solar performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
       {profile ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3">
-          <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
-          <ProfileFact label="Module rating" value={`${formatNumber(profile.rated_power_w)} W`} />
           <ProfileFact label="Module efficiency" value={`${formatNumber(profile.module_efficiency_percent)}%`} />
           <ProfileFact label="Technology" value={humanize(profile.module_technology)} />
+          <ProfileFact label="Temperature coefficient" value={`${formatNumber(profile.temperature_coefficient_percent_per_c)}% / °C`} />
+          <ProfileFact label="Annual degradation" value={`${formatNumber(profile.annual_degradation_percent)}% / yr`} />
           <ProfileFact label="Default DC/AC" value={formatNumber(profile.default_dc_ac_ratio)} />
-          <ProfileFact label="Source" value={profile.source_label} />
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
@@ -360,15 +358,16 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
 }) {
   return (
     <ProfileCard icon={BatteryCharging} title="Battery">
-      <SelectField label="Published Battery profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      <SelectField label="Battery performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
       {profile ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3">
-          <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
           <ProfileFact label="Chemistry / coupling" value={`${profile.chemistry} · ${profile.coupling.toUpperCase()}`} />
-          <ProfileFact label="Unit size" value={`${formatNumber(profile.nominal_capacity_kwh_per_unit)} kWh / ${formatNumber(profile.continuous_power_kw_per_unit)} kW`} />
+          <ProfileFact label="Power ratio" value={`${formatNumber(profile.continuous_power_kw_per_unit / profile.nominal_capacity_kwh_per_unit)} kW/kWh`} />
           <ProfileFact label="Pack RTE" value={`${formatNumber(profile.round_trip_efficiency_percent)}%`} />
+          <ProfileFact label="Conversion efficiency" value={`${formatNumber(profile.power_conversion_efficiency_percent)}%`} />
           <ProfileFact label="Usable DoD" value={`${formatNumber(profile.usable_depth_of_discharge_percent)}%`} />
-          <ProfileFact label="Source" value={profile.source_label} />
+          <ProfileFact label="Standby loss" value={`${formatNumber(profile.standby_loss_percent_per_month)}% / month`} />
+          <ProfileFact label="Annual degradation" value={`${formatNumber(profile.annual_capacity_degradation_percent)}% / yr`} />
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
@@ -377,26 +376,20 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
   );
 }
 
-function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profiles, quantity }: {
+function InverterProfileCard({ onProfileChange, profile, profiles }: {
   onProfileChange: (profileId: string) => void;
-  onQuantityChange: (quantity: string) => void;
   profile: CiInverterSolutionProfile | null;
   profiles: CiInverterSolutionProfile[];
-  quantity: string;
 }) {
-  const parsedQuantity = optionalPositiveInteger(quantity);
   return (
     <ProfileCard icon={Cpu} title="Inverter / PCS">
-      <SelectField label="Published Inverter profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
-      <IntegerField label="Fixed inverter quantity (optional)" onChange={onQuantityChange} placeholder="Auto-size per solution" value={quantity} />
+      <SelectField label="Inverter performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
       {profile ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3 xl:grid-cols-2">
-          <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
-          <ProfileFact label="Active power" value={`${formatNumber(profile.rated_active_power_kw)} kW`} />
-          <ProfileFact label="Apparent power" value={`${formatNumber(profile.rated_apparent_power_kva)} kVA`} />
-          <ProfileFact label="Reactive cap" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
+          <ProfileFact label="Apparent / active ratio" value={formatNumber(profile.rated_apparent_power_kva / profile.rated_active_power_kw)} />
+          <ProfileFact label="Reactive / active ratio" value={formatNumber(profile.maximum_reactive_power_kvar / profile.rated_active_power_kw)} />
           <ProfileFact label="European efficiency" value={`${formatNumber(profile.european_efficiency_percent)}%`} />
-          <ProfileFact label="Configured PCS" value={parsedQuantity === null ? "Auto-sized" : `${parsedQuantity} × ${formatNumber(profile.rated_active_power_kw)} kW = ${formatNumber(parsedQuantity * profile.rated_active_power_kw)} kW`} />
+          <ProfileFact label="Maximum efficiency" value={`${formatNumber(profile.maximum_efficiency_percent)}%`} />
           <ProfileFact label="Source" value={profile.source_label} />
         </dl>
       ) : <MissingProfile />}
@@ -407,7 +400,7 @@ function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profi
 function ProfileCard({ children, icon: Icon, title }: { children: ReactNode; icon: typeof SunMedium; title: string }) {
   return (
     <section aria-label={`${title} profile`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-      <div className="mb-4 flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><Icon className="size-5" /></span><h4 className="font-semibold text-slate-950">{title}</h4></div>
+      <div className="mb-4 flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><Icon className="size-5" /></span><h4 className="font-semibold text-slate-950">{title}</h4><span className="ml-auto rounded-full bg-cyan-50 px-2.5 py-1 text-[11px] font-semibold text-cyan-800">Performance reference</span></div>
       <div className="space-y-3">{children}</div>
     </section>
   );
@@ -431,12 +424,14 @@ function WorkflowSection({ children, title }: { children: ReactNode; title: stri
 }
 
 function CandidateValuesSummary({ range, strictlyPositiveMinimum = false, unit }: { range: NumericRange; strictlyPositiveMinimum?: boolean; unit: string }) {
-  const values = rangeValues(range, strictlyPositiveMinimum);
-  const countLabel = `${values.length} ${values.length === 1 ? "candidate" : "candidates"}`;
+  const parsed = parsedRange(range, strictlyPositiveMinimum);
+  const values = parsed && parsed.count <= MAX_SOLUTIONS ? rangeValues(range, strictlyPositiveMinimum) : [];
+  const count = parsed?.count ?? 0;
+  const countLabel = `${count} ${count === 1 ? "candidate" : "candidates"}`;
   return (
     <div className="rounded-lg bg-cyan-50 px-3 py-2 text-xs leading-5 text-cyan-950">
       <strong>{countLabel}:</strong>{" "}
-      <span className="tabular-nums">{values.length ? `${values.map(formatCandidateValue).join(", ")} ${unit}` : "—"}</span>
+      <span className="tabular-nums">{values.length ? `${values.map(formatCandidateValue).join(", ")} ${unit}` : count > MAX_SOLUTIONS ? "Reduce the range to view candidates" : "—"}</span>
     </div>
   );
 }
@@ -445,16 +440,8 @@ function OptionGroup({ children, title }: { children: ReactNode; title: string }
   return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>;
 }
 
-function ReadOnlyFact({ label, value }: { label: string; value: string }) {
-  return <div className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><strong className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2 text-sm font-semibold text-slate-900">{value}</strong></div>;
-}
-
 function NumberField({ allowBlank = false, label, onChange, value }: { allowBlank?: boolean; label: string; onChange: (value: string) => void; value: string }) {
   return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="0" onChange={(event) => onChange(event.target.value)} placeholder={allowBlank ? "Not modelled" : undefined} step="any" type="number" value={value} /></label>;
-}
-
-function IntegerField({ label, onChange, placeholder, value }: { label: string; onChange: (value: string) => void; placeholder?: string; value: string }) {
-  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="1" onChange={(event) => onChange(event.target.value)} placeholder={placeholder} step="1" type="number" value={value} /></label>;
 }
 
 function TextField({ className = "", label, onChange, value }: { className?: string; label: string; onChange: (value: string) => void; value: string }) {
@@ -513,7 +500,6 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
   const other = parseNumber(site.other_system_loss_percent);
   const availability = parseNumber(site.system_availability_percent);
   const block = parseNumber(connection.inverter_block_size_kw);
-  const inverterQuantity = optionalPositiveInteger(connection.inverter_quantity);
   const headroom = parseNumber(connection.site_ac_headroom_kw);
   const reactive = connection.reactive_support_enabled ? parseNumber(connection.reactive_support_max_kvar) : 0;
   const emissions = connection.grid_emissions_factor_kg_co2e_per_kwh.trim() ? parseNumber(connection.grid_emissions_factor_kg_co2e_per_kwh) : null;
@@ -523,7 +509,6 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
     !between(annualYield, 500, 3000) || !between(azimuth, 0, 360) || !between(tilt, 0, 90) ||
     losses.some((value) => !between(value, 0, 99)) || !between(availability, 1, 100) ||
     !between(block, 0.1, 1000) || !positive(headroom) ||
-    (connection.inverter_quantity.trim() !== "" && inverterQuantity === null) ||
     (connection.reactive_support_enabled && !positive(reactive)) ||
     (emissions !== null && !between(emissions, 0, 5))
   ) return null;
@@ -550,7 +535,6 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
     },
     connection_options: {
       inverter_block_size_kw: block,
-      ...(inverterQuantity === null ? {} : { inverter_quantity: inverterQuantity }),
       site_ac_headroom_kw: headroom,
       allow_grid_charging: true,
       reactive_support_enabled: connection.reactive_support_enabled,
@@ -600,14 +584,14 @@ function restoreV2(context: CiDesignContextV2): RestoredBuilderState {
   const options = context.technical_options;
   return {
     pvRange: {
-      minimum: formatNumber(context.search_space.pv_range.minimum_kwp_dc),
-      maximum: formatNumber(context.search_space.pv_range.maximum_kwp_dc),
-      step: formatNumber(context.search_space.pv_range.step_kwp_dc),
+      minimum: formatCandidateValue(context.search_space.pv_range.minimum_kwp_dc),
+      maximum: formatCandidateValue(context.search_space.pv_range.maximum_kwp_dc),
+      step: formatCandidateValue(context.search_space.pv_range.step_kwp_dc),
     },
     batteryRange: {
-      minimum: formatNumber(context.search_space.battery_range.minimum_kwh),
-      maximum: formatNumber(context.search_space.battery_range.maximum_kwh),
-      step: formatNumber(context.search_space.battery_range.step_kwh),
+      minimum: formatCandidateValue(context.search_space.battery_range.minimum_kwh),
+      maximum: formatCandidateValue(context.search_space.battery_range.maximum_kwh),
+      step: formatCandidateValue(context.search_space.battery_range.step_kwh),
     },
     site: {
       resource_source: context.site_factors.resource_source,
@@ -645,7 +629,6 @@ function siteFormFromTechnical(options: CiDesignContext["technical_options"]): S
 function connectionFormFromTechnical(options: CiDesignContext["technical_options"]): ConnectionOptionsForm {
   return {
     inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
-    inverter_quantity: options.inverter_quantity === undefined ? "" : String(options.inverter_quantity),
     site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
     allow_grid_charging: true,
     reactive_support_enabled: options.reactive_support_enabled,
@@ -658,19 +641,13 @@ function publishedId<T extends { profile_id: string }>(preferred: string, profil
   return profiles.some((profile) => profile.profile_id === preferred) ? preferred : (profiles[0]?.profile_id ?? "");
 }
 
-function optionalPositiveInteger(value: string) {
-  if (value.trim() === "") return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 10_000 ? parsed : null;
-}
-
 function parsedRange(range: NumericRange, strictlyPositiveMinimum: boolean): { minimum: number; maximum: number; step: number; count: number } | null {
   const minimum = parseNumber(range.minimum);
   const maximum = parseNumber(range.maximum);
   const step = parseNumber(range.step);
   if (!Number.isFinite(minimum) || (strictlyPositiveMinimum ? minimum <= 0 : minimum < 0) || !Number.isFinite(maximum) || maximum < minimum || !positive(step)) return null;
   const count = decimalRangeCount(minimum, maximum, step);
-  return count !== null && count >= 1 && count <= 200 ? { minimum, maximum, step, count } : null;
+  return count !== null && count >= 1 && count <= 10_000 ? { minimum, maximum, step, count } : null;
 }
 
 function rangeValues(range: NumericRange, strictlyPositiveMinimum: boolean) {
@@ -692,8 +669,7 @@ function canonicalCandidateUpperBound(pvRange: NumericRange, batteryRange: Numer
   const pv = parsedRange(pvRange, true);
   const battery = parsedRange(batteryRange, false);
   if (!pv || !battery) return 0;
-  const comparatorCountPerPv = battery.count - (battery.minimum === 0 ? 1 : 0);
-  return pv.count * (battery.count + comparatorCountPerPv);
+  return pv.count * battery.count;
 }
 
 function decimalRangeCount(minimum: number, maximum: number, step: number) {
@@ -753,7 +729,7 @@ function rangeFromValues(values: number[]): NumericRange {
   const minimum = sorted[0];
   const maximum = sorted.at(-1) ?? minimum;
   const step = sorted.length > 1 ? (maximum - minimum) / (sorted.length - 1) : Math.max(1, minimum);
-  return { minimum: formatNumber(minimum), maximum: formatNumber(maximum), step: formatNumber(step) };
+  return { minimum: formatCandidateValue(minimum), maximum: formatCandidateValue(maximum), step: formatCandidateValue(step) };
 }
 
 function effectiveSpecificYield(site: SiteFactorsForm) {

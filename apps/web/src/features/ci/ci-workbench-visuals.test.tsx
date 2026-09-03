@@ -30,7 +30,7 @@ describe("C&I workbench visuals", () => {
       scenario_id: "pv-battery",
       label: "200 kWp + 400 kWh",
       physical_review_rank: 1,
-      authored_inputs: { pv_capacity_kwp_dc: 200, nominal_capacity_kwh: 400 },
+      authored_inputs: { pv_capacity_kwp_dc: 200.123456789, nominal_capacity_kwh: 400.987654321 },
       post_dispatch: { raw_rolling_demand_kva: 230 },
       annual_tariff_value: { first_year_value_ex_gst_aud: 42000 },
     };
@@ -40,6 +40,8 @@ describe("C&I workbench visuals", () => {
     } as unknown as CiPhysicalScenarioResult} />);
 
     expect(screen.getByRole("img", { name: "Solution landscape chart" })).toBeTruthy();
+    expect(screen.getByText("200 kWp + 400 kWh: $42,000, 200.123456789 kWp PV, 400.987654321 kWh battery")).toBeTruthy();
+    expect(screen.getByText("200.1 kWp")).toBeTruthy();
     expect(screen.getByText("Evidence baseline")).toBeTruthy();
     expect(screen.getByText("#1 200 kWp + 400 kWh")).toBeTruthy();
   });

@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CiDeviceProfile } from "./api/ci-device-profile";
+import type { CiDesignContextV2 } from "./api/ci-projects";
 import { CiScenarioBuilder } from "./ci-scenario-builder";
 
 afterEach(cleanup);
@@ -26,10 +27,15 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByRole("link", { name: /Directions in Google Maps/ }).getAttribute("href")).toContain("10%20Sample%20Street");
     expect(screen.getByRole("region", { name: "Solar PV profile" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Battery profile" })).toBeTruthy();
+    expect(screen.getAllByText("Performance reference")).toHaveLength(3);
+    expect(screen.queryByText("Module rating")).toBeNull();
+    expect(screen.queryByText("Unit size")).toBeNull();
     expect(screen.queryByText("Existing site assets")).toBeNull();
     expect(screen.queryByText(/Python will snap & validate/)).toBeNull();
-    await userEvent.type(screen.getByLabelText("Fixed inverter quantity (optional)"), "3");
-    expect(screen.getByText("3 × 125 kW = 375 kW")).toBeTruthy();
+    expect(screen.queryByText("Python auto-sizing")).toBeNull();
+    expect(screen.queryByText("PCS block from selected inverter")).toBeNull();
+    expect(screen.queryByLabelText(/Inverter quantity/)).toBeNull();
+    expect(screen.queryByText("Configured PCS")).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
 
@@ -49,7 +55,6 @@ describe("CiScenarioBuilder", () => {
         array_tilt_degrees: 20,
       },
       connection_options: {
-        inverter_quantity: 3,
         site_ac_headroom_kw: 250,
         allow_grid_charging: true,
         grid_emissions_factor_kg_co2e_per_kwh: null,
@@ -74,11 +79,10 @@ describe("CiScenarioBuilder", () => {
     });
     render(<CiScenarioBuilder deviceProfile={secondProfile} error={null} isPending={false} onSubmit={onSubmit} />);
 
-    await userEvent.selectOptions(screen.getByLabelText("Published Solar profile"), "high_power_pv_v1");
+    await userEvent.selectOptions(screen.getByLabelText("Solar performance profile"), "high_power_pv_v1");
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
 
     expect(onSubmit.mock.calls[0][0].solar_profile_id).toBe("high_power_pv_v1");
-    expect(screen.getByText("700 W")).toBeTruthy();
   });
 
   it("shows every requested PV and battery candidate from the configured ranges", async () => {
@@ -91,12 +95,12 @@ describe("CiScenarioBuilder", () => {
     await user.clear(minimums[0]); await user.type(minimums[0], "100");
     await user.clear(maximums[0]); await user.type(maximums[0], "150");
     await user.clear(steps[0]); await user.type(steps[0], "10");
-    await user.clear(minimums[1]); await user.type(minimums[1], "300");
+    await user.clear(minimums[1]); await user.type(minimums[1], "350");
     await user.clear(maximums[1]); await user.type(maximums[1], "400");
     await user.clear(steps[1]); await user.type(steps[1], "10");
 
-    expect(screen.getByText("6 candidates:").parentElement?.textContent).toBe("6 candidates: 100, 110, 120, 130, 140, 150 kWp");
-    expect(screen.getByText("11 candidates:").parentElement?.textContent).toBe("11 candidates: 300, 310, 320, 330, 340, 350, 360, 370, 380, 390, 400 kWh");
+    expect(screen.getAllByText("6 candidates:")[0].parentElement?.textContent).toBe("6 candidates: 100, 110, 120, 130, 140, 150 kWp");
+    expect(screen.getAllByText("6 candidates:")[1].parentElement?.textContent).toBe("6 candidates: 350, 360, 370, 380, 390, 400 kWh");
   });
 
   it("floors decimal range counts the same way as Python", async () => {
@@ -139,6 +143,55 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByText("1 candidate:").parentElement?.textContent).toBe("1 candidate: 100.000976562 kWp");
   });
 
+  it("restores and resubmits saved nine-decimal ranges without truncation", async () => {
+    const onSubmit = vi.fn();
+    const initialContext = {
+      contract_version: "ci_design_context_v2",
+      search_space: {
+        pv_range: { minimum_kwp_dc: 100.000000001, maximum_kwp_dc: 100.000000002, step_kwp_dc: 0.000000001 },
+        battery_range: { minimum_kwh: 350.000000001, maximum_kwh: 350.000000002, step_kwh: 0.000000001 },
+      },
+      site_factors: {
+        resource_source: "analyst_assumption",
+        resource_label: "Workspace screening assumption",
+        annual_specific_yield_kwh_per_kw: 1500,
+        array_azimuth_degrees: 0,
+        array_tilt_degrees: 20,
+        shading_loss_percent: 3,
+        soiling_loss_percent: 2,
+        temperature_loss_percent: 5,
+        wiring_mismatch_loss_percent: 2,
+        other_system_loss_percent: 0,
+        system_availability_percent: 99,
+      },
+      profile_selection: {
+        solar_profile_id: "generic_crystalline_pv_v1",
+        battery_profile_id: "generic_lfp_ac_2h_v1",
+        inverter_profile_id: "fox_h3_125_plus_v1",
+      },
+      technical_options: {
+        inverter_block_size_kw: 125,
+        site_ac_headroom_kw: 250,
+        reactive_support_enabled: false,
+        reactive_support_max_kvar: 0,
+        grid_emissions_factor_kg_co2e_per_kwh: 0,
+      },
+    } as unknown as CiDesignContextV2;
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} initialContext={initialContext} isPending={false} onSubmit={onSubmit} />);
+
+    const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" }) as HTMLInputElement[];
+    const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" }) as HTMLInputElement[];
+    const steps = screen.getAllByRole("spinbutton", { name: "Step" }) as HTMLInputElement[];
+    expect([minimums[0].value, maximums[0].value, steps[0].value]).toEqual(["100.000000001", "100.000000002", "0.000000001"]);
+    expect([minimums[1].value, maximums[1].value, steps[1].value]).toEqual(["350.000000001", "350.000000002", "0.000000001"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      pv_range: { minimum_kwp_dc: 100.000000001, maximum_kwp_dc: 100.000000002, step_kwp_dc: 0.000000001 },
+      battery_range: { minimum_kwh: 350.000000001, maximum_kwh: 350.000000002, step_kwh: 0.000000001 },
+    });
+  });
+
   it("adopts a newly saved published battery profile without remounting", async () => {
     const beforeSave: CiDeviceProfile = structuredClone(deviceProfile);
     const foxBattery = {
@@ -163,7 +216,7 @@ describe("CiScenarioBuilder", () => {
 
     view.rerender(<CiScenarioBuilder deviceProfile={afterSave} error={null} isPending={false} onSubmit={vi.fn()} />);
 
-    await waitFor(() => expect((screen.getByLabelText("Published Battery profile") as HTMLSelectElement).value).toBe("fox_ess_cq7_l14_v1"));
+    await waitFor(() => expect((screen.getByLabelText("Battery performance profile") as HTMLSelectElement).value).toBe("fox_ess_cq7_l14_v1"));
     expect(screen.getByRole("region", { name: "Battery profile" }).textContent).toContain("Fox ESS CQ7-L14");
     expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", false);
   });
@@ -178,7 +231,7 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
   });
 
-  it("disables requests that could exceed the saved canonical candidate limit", async () => {
+  it("allows exactly 200 direct PV and battery combinations", async () => {
     const user = userEvent.setup();
     render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
     const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" }) as HTMLInputElement[];
@@ -192,7 +245,49 @@ describe("CiScenarioBuilder", () => {
     await user.clear(maximums[1]); await user.type(maximums[1], "1000");
     await user.clear(steps[1]); await user.type(steps[1], "100");
 
-    expect(await screen.findByText("Maximum 200 candidates. Current request: up to 400.")).toBeTruthy();
+    expect(screen.queryByText(/Maximum 200 solutions/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", false);
+  });
+
+  it("disables ranges above the downstream PV and battery candidate limits", async () => {
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" }) as HTMLInputElement[];
+    const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" }) as HTMLInputElement[];
+    const steps = screen.getAllByRole("spinbutton", { name: "Step" }) as HTMLInputElement[];
+
+    await user.clear(minimums[0]); await user.type(minimums[0], "1");
+    await user.clear(maximums[0]); await user.type(maximums[0], "21");
+    await user.clear(steps[0]); await user.type(steps[0], "1");
+    await user.clear(minimums[1]); await user.type(minimums[1], "0");
+    await user.clear(maximums[1]); await user.type(maximums[1], "0");
+    await user.clear(steps[1]); await user.type(steps[1], "1");
+
+    expect(await screen.findByText("Maximum 20 PV candidates. Current configuration: 21.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
+
+    await user.clear(maximums[0]); await user.type(maximums[0], "1");
+    await user.clear(maximums[1]); await user.type(maximums[1], "15");
+
+    expect(await screen.findByText("Maximum 15 battery candidates. Current configuration: 16.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
+  });
+
+  it("disables requests that exceed the direct combination limit", async () => {
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" }) as HTMLInputElement[];
+    const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" }) as HTMLInputElement[];
+    const steps = screen.getAllByRole("spinbutton", { name: "Step" }) as HTMLInputElement[];
+
+    await user.clear(minimums[0]); await user.type(minimums[0], "1");
+    await user.clear(maximums[0]); await user.type(maximums[0], "20");
+    await user.clear(steps[0]); await user.type(steps[0], "1");
+    await user.clear(minimums[1]); await user.type(minimums[1], "100");
+    await user.clear(maximums[1]); await user.type(maximums[1], "1100");
+    await user.clear(steps[1]); await user.type(steps[1], "100");
+
+    expect(await screen.findByText("Maximum 200 solutions. Current configuration: 220.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
   });
 });

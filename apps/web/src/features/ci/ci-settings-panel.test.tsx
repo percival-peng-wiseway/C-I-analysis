@@ -59,7 +59,7 @@ describe("CiSettingsPanel solution profile library", () => {
     await user.click(screen.getByRole("tab", { name: "Equipment & finance" }));
     expect(screen.getByRole("heading", { name: "Equipment & finance" })).toBeTruthy();
     expect((screen.getByLabelText("Per kWp DC capital") as HTMLInputElement).value).toBe("530");
-    expect((screen.getByLabelText("30 capital") as HTMLInputElement).value).toBe("77578");
+    expect((screen.getByLabelText("210 kWh capital") as HTMLInputElement).value).toBe("77578");
     expect((screen.getByLabelText("Discount rate") as HTMLInputElement).value).toBe("8");
     await user.clear(screen.getByLabelText("Analysis term"));
     await user.type(screen.getByLabelText("Analysis term"), "51");

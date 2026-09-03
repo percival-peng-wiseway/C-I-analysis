@@ -98,8 +98,8 @@ const scenarioResult: CiPhysicalScenarioResult = {
       control_profile_id: "demand_peak_shaving",
       pv_system_id: "pv-141",
       pv_profile_id: "generic_normalized_solar_shape_v1",
-      pv_capacity_kwp_dc: 141,
-      pv_inverter_capacity_kw_ac: 120,
+      pv_capacity_kwp_dc: 141.123456789,
+      pv_inverter_capacity_kw_ac: 120.111222333,
       shared_ac_headroom_kw: 250,
       reactive_support_enabled: false,
       reactive_support_max_kvar: 0,
@@ -109,9 +109,9 @@ const scenarioResult: CiPhysicalScenarioResult = {
       reactive_overcompensation_permitted: false,
       pv_annual_specific_yield_kwh_per_kw: 1200,
       pv_derating_factor: 0.9,
-      nominal_capacity_kwh: 300,
+      nominal_capacity_kwh: 300.987654321,
       max_charge_kw: 150,
-      max_discharge_kw: 150,
+      max_discharge_kw: 150.246813579,
       charge_efficiency: 0.95,
       discharge_efficiency: 0.95,
       min_soc_fraction: 0.1,
@@ -371,6 +371,7 @@ describe("C&I consultant review workspace", () => {
     expect(html).toContain("Assumptions &amp; provenance");
     expect(html).toContain("Output status");
     expect(html).toContain("141 kWp PV + 300 kWh BESS");
+    expect(html).toContain("141.123456789 kWp PV · 300.987654321 kWh BESS · 150.246813579 kW discharge");
     expect(html).toContain("$268,800");
     expect(html).toContain("14.0%");
     expect(html).toContain("No automatic recommendation");

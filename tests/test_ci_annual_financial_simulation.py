@@ -331,13 +331,13 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
         }
         assert auto_by_id[scenarios[0]["scenario_id"]][
             "upfront_cost_aud_ex_gst"
-        ] == 137992.07
+        ] == 135883.81
         assert auto_by_id[scenarios[0]["scenario_id"]][
             "capex_breakdown_aud_ex_gst"
-        ] == {"pv_aud": 53000.0, "battery_aud": 74992.07, "inverter_aud": 10000.0}
+        ] == {"pv_aud": 53000.0, "battery_aud": 73883.81, "inverter_aud": 9000.0}
         assert auto_by_id[scenarios[2]["scenario_id"]][
             "capex_breakdown_aud_ex_gst"
-        ]["inverter_aud"] == 20000.0
+        ]["inverter_aud"] == 12000.0
         changed_profile = client.put(
             "/api/commercial-industrial/settings/device-profile",
             json={**_device_profile(), "battery_cost_aud_per_kwh": 500.0},

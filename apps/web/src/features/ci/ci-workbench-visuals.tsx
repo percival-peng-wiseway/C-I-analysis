@@ -261,7 +261,7 @@ function ScenarioValueMap({ result }: { result: CiPhysicalScenarioResult }) {
                     stroke="white"
                     strokeWidth="2"
                   >
-                    <title>{`${scenario.label}: ${formatAud(scenario.annual_tariff_value.first_year_value_ex_gst_aud)}, ${formatNumber(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp PV, ${formatNumber(scenario.authored_inputs.nominal_capacity_kwh)} kWh battery`}</title>
+                    <title>{`${scenario.label}: ${formatAud(scenario.annual_tariff_value.first_year_value_ex_gst_aud)}, ${formatCapacity(scenario.authored_inputs.pv_capacity_kwp_dc)} kWp PV, ${formatCapacity(scenario.authored_inputs.nominal_capacity_kwh)} kWh battery`}</title>
                   </circle>
                 </g>
               );
@@ -320,6 +320,10 @@ function formatAud(value: number) {
 
 function compactAud(value: number) {
   return new Intl.NumberFormat("en-AU", { notation: "compact", style: "currency", currency: "AUD", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatCapacity(value: number) {
+  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 9 }).format(value);
 }
 
 function formatNumber(value: number) {

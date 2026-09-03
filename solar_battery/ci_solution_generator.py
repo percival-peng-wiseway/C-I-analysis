@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from collections import Counter
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, ROUND_FLOOR
 import hashlib
 import json
 import math
 from typing import Any
 
 from solar_battery.ci_projects import CiProjectError
-from solar_battery.ci_scenario_analysis import validate_ci_design_candidates
+from solar_battery.ci_scenario_analysis import (
+    MAX_BATTERY_SYSTEMS,
+    MAX_PV_SYSTEMS,
+    MAX_SOLUTIONS,
+    validate_ci_design_candidates,
+)
 
 
 CI_SOLUTION_GENERATION_REQUEST_CONTRACT_VERSION = (
@@ -51,43 +56,22 @@ def generate_ci_solutions(
     inverter_performance = (
         _inverter_performance(inverter) if inverter is not None else None
     )
-    if inverter_performance is not None and not math.isclose(
-        float(request["connection_options"]["inverter_block_size_kw"]),
-        float(inverter_performance["rated_active_power_kw"]),
-        rel_tol=0,
-        abs_tol=1e-8,
-    ):
-        raise _invalid(
-            "The PCS block size must match the selected inverter profile rating."
-        )
-    if (
-        request["connection_options"]["inverter_quantity"] is not None
-        and inverter_performance is None
-    ):
-        raise _invalid("A fixed inverter quantity requires an inverter profile.")
-
     pv_targets = _range_values(request["pv_range"], allow_zero=False)
     battery_targets = _range_values(request["battery_range"], allow_zero=True)
     requested_count = len(pv_targets) * len(battery_targets)
-    if requested_count > 100_000:
-        raise _invalid("The solution search space contains too many combinations.")
-    rejection_counts: Counter[str] = Counter()
-    snapped_pairs: set[tuple[float, int]] = set()
-    invalid_requested = 0
-    for pv_target in pv_targets:
-        pv_actual = _ceil_to_unit(
-            pv_target, solar_performance["rated_power_w"] / 1000
+    if len(pv_targets) > MAX_PV_SYSTEMS:
+        raise _invalid(
+            f"Configure at most {MAX_PV_SYSTEMS} PV candidates for one analysis."
         )
-        for battery_target in battery_targets:
-            try:
-                battery_units = _battery_units(
-                    battery_target, battery_performance
-                )
-            except CiProjectError:
-                invalid_requested += 1
-                rejection_counts["battery_unit_limit_exceeded"] += 1
-                continue
-            snapped_pairs.add((pv_actual, battery_units))
+    if len(battery_targets) > MAX_BATTERY_SYSTEMS:
+        raise _invalid(
+            f"Configure at most {MAX_BATTERY_SYSTEMS} battery candidates for one analysis."
+        )
+    if requested_count > MAX_SOLUTIONS:
+        raise _invalid(
+            f"Configure at most {MAX_SOLUTIONS} PV and battery combinations for one analysis."
+        )
+    rejection_counts: Counter[str] = Counter()
 
     site = request["site_factors"]
     connection = request["connection_options"]
@@ -98,73 +82,63 @@ def generate_ci_solutions(
     minimum_soc = 1 - (
         battery_performance["usable_depth_of_discharge_percent"] / 100
     )
-    scenarios_by_id: dict[str, dict[str, object]] = {}
-    rejected_unique = 0
-    minimum_inverter_required: float | None = None
-    for pv_actual, battery_units in sorted(snapped_pairs):
-        battery_capacity = _clean_number(
-            battery_units
-            * battery_performance["nominal_capacity_kwh_per_unit"]
-        )
-        battery_power = _clean_number(
-            battery_units
-            * battery_performance["continuous_power_kw_per_unit"]
-        )
-        inverter_required = max(
-            pv_actual / solar_performance["default_dc_ac_ratio"],
-            battery_power,
-        )
-        minimum_inverter_required = (
-            inverter_required
-            if minimum_inverter_required is None
-            else min(minimum_inverter_required, inverter_required)
-        )
-        configured_quantity = connection["inverter_quantity"]
-        inverter_capacity = (
-            _clean_number(
-                int(configured_quantity) * connection["inverter_block_size_kw"]
+    scenarios: list[dict[str, object]] = []
+    rejected_requested = 0
+    for pv_target in pv_targets:
+        # The generated matrix is a screening search, not an equipment bill of
+        # materials.  Preserve the analyst-authored capacities exactly and use
+        # the selected profiles only for performance ratios.
+        pv_capacity = _clean_number(pv_target)
+        battery_options = [
+            (
+                _clean_number(battery_target),
+                _screening_battery_power(battery_target, battery_performance),
             )
-            if configured_quantity is not None
-            else _ceil_to_unit(
-                inverter_required, connection["inverter_block_size_kw"]
+            for battery_target in battery_targets
+        ]
+        feasible_battery_options = [
+            (capacity, power)
+            for capacity, power in battery_options
+            if max(
+                pv_capacity / solar_performance["default_dc_ac_ratio"], power
             )
+            <= connection["site_ac_headroom_kw"] + 1e-9
+        ]
+        rejected_for_headroom = len(battery_options) - len(
+            feasible_battery_options
         )
-        if inverter_capacity + 1e-9 < inverter_required:
-            rejected_unique += 1
-            rejection_counts["configured_inverter_capacity_insufficient"] += 1
-            continue
-        if inverter_capacity > connection["site_ac_headroom_kw"] + 1e-9:
-            rejected_unique += 1
-            rejection_counts["site_ac_headroom_exceeded"] += 1
+        if rejected_for_headroom:
+            rejected_requested += rejected_for_headroom
+            rejection_counts["site_ac_headroom_exceeded"] += (
+                rejected_for_headroom
+            )
+        if not feasible_battery_options:
             continue
 
-        main = _scenario(
-            solar=solar,
-            battery=battery,
-            inverter=inverter,
-            pv_capacity_kwp_dc=pv_actual,
-            inverter_capacity_kw_ac=inverter_capacity,
-            battery_units=battery_units,
-            battery_capacity_kwh=battery_capacity,
-            battery_power_kw=battery_power,
-            annual_specific_yield=float(site["annual_specific_yield_kwh_per_kw"]),
-            derating=derating,
-            one_way_efficiency=one_way_efficiency,
-            minimum_soc=minimum_soc,
-            connection=connection,
-            inverter_performance=inverter_performance,
+        # A PV row represents one common screening PCS basis across all of its
+        # feasible battery alternatives.  Size it continuously for the largest
+        # surviving requirement so the PV-system signature remains stable while
+        # infeasible large batteries do not remove smaller feasible candidates.
+        inverter_capacity = _clean_number(
+            max(
+                pv_capacity / solar_performance["default_dc_ac_ratio"],
+                max(power for _capacity, power in feasible_battery_options),
+            )
         )
-        scenarios_by_id[str(main["scenario_id"])] = main
-        if battery_units > 0:
-            comparator = _scenario(
+        for battery_capacity, battery_power in feasible_battery_options:
+            battery_performance_scale = _clean_number(
+                battery_capacity
+                / float(battery_performance["nominal_capacity_kwh_per_unit"])
+            )
+            scenario = _scenario(
                 solar=solar,
                 battery=battery,
                 inverter=inverter,
-                pv_capacity_kwp_dc=pv_actual,
+                pv_capacity_kwp_dc=pv_capacity,
                 inverter_capacity_kw_ac=inverter_capacity,
-                battery_units=0,
-                battery_capacity_kwh=0.0,
-                battery_power_kw=0.0,
+                battery_performance_scale=battery_performance_scale,
+                battery_capacity_kwh=battery_capacity,
+                battery_power_kw=battery_power,
                 annual_specific_yield=float(
                     site["annual_specific_yield_kwh_per_kw"]
                 ),
@@ -174,10 +148,10 @@ def generate_ci_solutions(
                 connection=connection,
                 inverter_performance=inverter_performance,
             )
-            scenarios_by_id[str(comparator["scenario_id"])] = comparator
+            scenarios.append(scenario)
 
     candidates = sorted(
-        scenarios_by_id.values(),
+        scenarios,
         key=lambda item: (
             float(item["pv_capacity_kwp_dc"]),
             float(item["nominal_capacity_kwh"]),
@@ -185,59 +159,17 @@ def generate_ci_solutions(
             str(item["scenario_id"]),
         ),
     )
-    configured_quantity = connection["inverter_quantity"]
-    if not candidates and configured_quantity is not None:
-        configured_capacity = _clean_number(
-            int(configured_quantity) * connection["inverter_block_size_kw"]
-        )
-        if configured_capacity > connection["site_ac_headroom_kw"] + 1e-9:
-            raise _invalid(
-                f"The fixed {int(configured_quantity)}-inverter configuration provides "
-                f"{configured_capacity:g} kW AC, above the "
-                f"{connection['site_ac_headroom_kw']:g} kW AC site headroom. "
-                "Reduce inverter quantity or increase the evidenced site headroom."
-            )
-        if (
-            minimum_inverter_required is not None
-            and configured_capacity + 1e-9 < minimum_inverter_required
-        ):
-            required_quantity = _ceil_ratio(
-                minimum_inverter_required,
-                connection["inverter_block_size_kw"],
-            )
-            required_capacity = _clean_number(
-                required_quantity * connection["inverter_block_size_kw"]
-            )
-            if required_capacity > connection["site_ac_headroom_kw"] + 1e-9:
-                raise _invalid(
-                    f"The fixed {int(configured_quantity)}-inverter configuration provides "
-                    f"{configured_capacity:g} kW AC, but the smallest requested solution "
-                    f"requires {minimum_inverter_required:g} kW AC. The next valid block is "
-                    f"{required_quantity} inverters ({required_capacity:g} kW AC), above the "
-                    f"{connection['site_ac_headroom_kw']:g} kW AC site headroom. Reduce the "
-                    "PV/battery range, select a smaller inverter block, or increase the "
-                    "evidenced site headroom."
-                )
-            raise _invalid(
-                f"The fixed {int(configured_quantity)}-inverter configuration provides "
-                f"{configured_capacity:g} kW AC, but the smallest requested solution "
-                f"requires {minimum_inverter_required:g} kW AC. Use at least "
-                f"{required_quantity} inverters or reduce the PV/battery range."
-            )
     if not 1 <= len(candidates) <= 200:
         raise CiProjectError(
             "ci_solution_generation_invalid",
-            "The generated solution space must contain one to 200 canonical candidates after profile sizing and connection checks.",
+            "The generated solution space must contain one to 200 screening candidates after connection checks.",
         )
     validated = validate_ci_design_candidates(candidates)
     canonical_candidates = list(validated["candidates"])
     generation_summary = {
         "requested_count": requested_count,
-        "deduplicated_count": max(
-            0,
-            requested_count - invalid_requested - len(snapped_pairs),
-        ),
-        "rejected_count": invalid_requested + rejected_unique,
+        "deduplicated_count": 0,
+        "rejected_count": rejected_requested,
         "generated_candidate_count": len(canonical_candidates),
         "rejection_reasons": [
             {"code": code, "count": count}
@@ -309,32 +241,30 @@ def generate_ci_custom_solution(
     requested_inverter = _bounded(
         custom_request.get("inverter_capacity_kw_ac"), 1e-9, 1_000_000
     )
-    pv_actual = _ceil_to_unit(
-        requested_pv, float(solar_performance["rated_power_w"]) / 1000
+    pv_actual = _clean_number(requested_pv)
+    battery_capacity = _clean_number(requested_battery)
+    battery_performance_scale = _clean_number(
+        battery_capacity
+        / float(battery_performance["nominal_capacity_kwh_per_unit"])
     )
-    battery_units = _battery_units(requested_battery, battery_performance)
-    battery_capacity = _clean_number(
-        battery_units * float(battery_performance["nominal_capacity_kwh_per_unit"])
+    battery_power = _screening_battery_power(
+        battery_capacity, battery_performance
     )
-    battery_power = _clean_number(
-        battery_units * float(battery_performance["continuous_power_kw_per_unit"])
-    )
-    block_size = _bounded(technical.get("inverter_block_size_kw"), 0.1, 1000)
-    inverter_capacity = _ceil_to_unit(requested_inverter, block_size)
+    inverter_capacity = _clean_number(requested_inverter)
     minimum_inverter = max(
         pv_actual / float(solar_performance["default_dc_ac_ratio"]),
         battery_power,
     )
     if inverter_capacity + 1e-9 < minimum_inverter:
-        required_inverter = _ceil_to_unit(minimum_inverter, block_size)
         raise _invalid(
             "The custom PCS is too small for the selected profiles; use at least "
-            f"{required_inverter:g} kW AC."
+            f"{_candidate_label_number(minimum_inverter)} kW AC."
         )
     site_headroom = _bounded(technical.get("site_ac_headroom_kw"), 1e-9, 1_000_000)
     if inverter_capacity > site_headroom + 1e-9:
         raise _invalid(
-            f"The custom PCS exceeds the saved {site_headroom:g} kW AC site headroom."
+            "The custom PCS exceeds the saved "
+            f"{_candidate_label_number(site_headroom)} kW AC site headroom."
         )
     connection = {
         "allow_grid_charging": technical.get("allow_grid_charging"),
@@ -365,7 +295,7 @@ def generate_ci_custom_solution(
         inverter=inverter,
         pv_capacity_kwp_dc=pv_actual,
         inverter_capacity_kw_ac=inverter_capacity,
-        battery_units=battery_units,
+        battery_performance_scale=battery_performance_scale,
         battery_capacity_kwh=battery_capacity,
         battery_power_kw=battery_power,
         annual_specific_yield=_bounded(
@@ -645,16 +575,14 @@ def _profile_id(profile: dict[str, object]) -> str:
     )
 
 
-def _battery_units(target_kwh: float, profile: dict[str, Any]) -> int:
-    if target_kwh == 0:
-        return 0
-    required = _ceil_ratio(
-        target_kwh, float(profile["nominal_capacity_kwh_per_unit"])
+def _screening_battery_power(
+    capacity_kwh: float, profile: dict[str, Any]
+) -> float:
+    return _clean_number(
+        capacity_kwh
+        * float(profile["continuous_power_kw_per_unit"])
+        / float(profile["nominal_capacity_kwh_per_unit"])
     )
-    units = max(int(profile["minimum_units"]), required)
-    if units > int(profile["maximum_units"]):
-        raise _invalid("The requested battery exceeds the published unit limit.")
-    return units
 
 
 def _scenario(
@@ -664,7 +592,7 @@ def _scenario(
     inverter: dict[str, object] | None,
     pv_capacity_kwp_dc: float,
     inverter_capacity_kw_ac: float,
-    battery_units: int,
+    battery_performance_scale: float,
     battery_capacity_kwh: float,
     battery_power_kw: float,
     annual_specific_yield: float,
@@ -691,36 +619,32 @@ def _scenario(
         "profile_id": _profile_id(battery),
         "version": _integer(battery.get("version"), 1, 10_000),
         "profile_sha256": _snapshot_sha256(battery),
-        "battery_units": battery_units,
+        "battery_performance_scale": battery_performance_scale,
         "battery_capacity_kwh": battery_capacity_kwh,
         "battery_power_kw": battery_power_kw,
     }
     pv_system_id = _stable_id("pv", solar_key)
     battery_system_id = (
         _stable_id("battery", battery_key)
-        if battery_units > 0
+        if battery_capacity_kwh > 0
         else "battery-none"
     )
-    inverter_units = (
-        int(
-            round(
-                inverter_capacity_kw_ac
-                / float(inverter_performance["rated_active_power_kw"])
-            )
-        )
+    inverter_performance_scale = (
+        inverter_capacity_kw_ac
+        / float(inverter_performance["rated_active_power_kw"])
         if inverter_performance is not None
-        else 0
+        else 0.0
     )
     reactive_cap = float(connection["reactive_support_max_kvar"])
     if inverter_performance is not None and connection["reactive_support_enabled"]:
         reactive_cap = min(
             reactive_cap,
-            inverter_units
+            inverter_performance_scale
             * float(inverter_performance["maximum_reactive_power_kvar"]),
         )
     apparent_limit = (
         (
-            inverter_units
+            inverter_performance_scale
             * float(inverter_performance["rated_apparent_power_kva"])
             if inverter_performance is not None
             else math.hypot(inverter_capacity_kw_ac, reactive_cap)
@@ -731,8 +655,9 @@ def _scenario(
     return {
         "scenario_id": f"{pv_system_id}__{battery_system_id}",
         "label": (
-            f"{pv_capacity_kwp_dc:g} kWp PV + {battery_capacity_kwh:g} kWh battery / "
-            f"{inverter_capacity_kw_ac:g} kW hybrid inverter"
+            f"{_candidate_label_number(pv_capacity_kwp_dc)} kWp PV + "
+            f"{_candidate_label_number(battery_capacity_kwh)} kWh battery / "
+            f"{_candidate_label_number(inverter_capacity_kw_ac)} kW hybrid inverter"
         ),
         "battery_system_id": battery_system_id,
         "battery_technology_id": "generic_li_ion_ac",
@@ -831,7 +756,11 @@ def _design_context(
             ],
             "effective_derating_percent": round(derating * 100, 8),
             "target_dc_ac_ratio": solar_performance["default_dc_ac_ratio"],
-            "inverter_block_size_kw": connection["inverter_block_size_kw"],
+            "inverter_block_size_kw": (
+                inverter_performance["rated_active_power_kw"]
+                if inverter_performance is not None
+                else connection["inverter_block_size_kw"]
+            ),
             **(
                 {"inverter_quantity": connection["inverter_quantity"]}
                 if connection["inverter_quantity"] is not None
@@ -921,20 +850,12 @@ def _snapshot_sha256(value: object) -> str:
     ).hexdigest()
 
 
-def _ceil_to_unit(value: float, unit: float) -> float:
-    return _clean_number(_ceil_ratio(value, unit) * unit)
-
-
-def _ceil_ratio(value: float, unit: float) -> int:
-    return int(
-        (Decimal(str(value)) / Decimal(str(unit))).to_integral_value(
-            rounding=ROUND_CEILING
-        )
-    )
-
-
 def _clean_number(value: float) -> float:
     return round(float(value), 9)
+
+
+def _candidate_label_number(value: float) -> str:
+    return f"{_clean_number(value):.9f}".rstrip("0").rstrip(".")
 
 
 def _bounded(value: object, minimum: float, maximum: float) -> float:
