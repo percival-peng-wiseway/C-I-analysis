@@ -49,6 +49,13 @@ Wrangler builds the frontend, bundles the Worker, builds the linux/amd64
 container image and rolls out the container. Initial provisioning can take a
 few minutes.
 
+The production Worker starts the API container in the background on an HTML
+navigation and keeps the single instance available for two hours after its
+last activity. This reduces repeated project-list cold starts during a working
+session, while increasing the container runtime compared with the platform's
+ten-minute default. Review Container duration and cold-start logs when tuning
+this value.
+
 ## Verification
 
 1. Confirm `/api/health` returns `{"status":"healthy"}` after the container

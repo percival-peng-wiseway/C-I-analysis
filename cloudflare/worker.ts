@@ -26,7 +26,7 @@ export class E3ApiContainer extends Container<Env> {
   constructor(ctx: DurableObjectState<{}>, env: Env) {
     super(ctx, env, {
       defaultPort: 8080,
-      sleepAfter: "10m",
+      sleepAfter: "2h",
       envVars: {
         DATABASE_URL: env.DATABASE_URL,
         OBJECT_STORE_BACKEND: "http",
@@ -40,6 +40,12 @@ export class E3ApiContainer extends Container<Env> {
       },
     });
   }
+}
+
+const PRIMARY_CONTAINER_NAME = "primary";
+
+function primaryContainer(env: Env) {
+  return env.E3_API.get(env.E3_API.idFromName(PRIMARY_CONTAINER_NAME));
 }
 
 E3ApiContainer.outboundByHost = {
@@ -140,9 +146,8 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
   headers.set("Authorization", `Bearer ${env.DURABLE_API_BEARER_TOKEN}`);
   headers.delete("Cf-Access-Jwt-Assertion");
   const upstreamRequest = new Request(request, { headers });
-  const containerId = env.E3_API.idFromName("primary");
   try {
-    const response = await env.E3_API.get(containerId).fetch(upstreamRequest);
+    const response = await primaryContainer(env).fetch(upstreamRequest);
     if (!response.ok) {
       console.error("E3 container upstream failed", {
         status: response.status,
@@ -159,11 +164,32 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
   }
 }
 
+async function prewarmApiContainer(env: Env): Promise<void> {
+  try {
+    await primaryContainer(env).startAndWaitForPorts(8080);
+  } catch (error) {
+    console.error(
+      "E3 API container prewarm failed",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function isDocumentNavigation(request: Request): boolean {
+  return request.method === "GET" && (
+    request.headers.get("Sec-Fetch-Dest") === "document" ||
+    request.headers.get("Accept")?.includes("text/html") === true
+  );
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
       return proxyApi(request, env);
+    }
+    if (isDocumentNavigation(request)) {
+      ctx.waitUntil(prewarmApiContainer(env));
     }
     return env.ASSETS.fetch(request);
   },
