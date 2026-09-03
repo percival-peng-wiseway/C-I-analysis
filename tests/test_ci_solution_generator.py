@@ -175,6 +175,7 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     request["connection_options"].update(
         {
             "inverter_block_size_kw": 125.0,
+            "inverter_quantity": 2,
             "reactive_support_enabled": True,
             "reactive_support_max_kvar": 200.0,
         }
@@ -187,20 +188,21 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     )
 
     assert all(
-        candidate["pv_inverter_capacity_kw_ac"] == 125.0
+        candidate["pv_inverter_capacity_kw_ac"] == 250.0
         for candidate in result["candidates"]
     )
     assert all(
-        candidate["reactive_support_max_kvar"] == 82.5
+        candidate["reactive_support_max_kvar"] == 165.0
         for candidate in result["candidates"]
     )
     assert all(
-        candidate["shared_inverter_apparent_power_limit_kva"] == 137.5
+        candidate["shared_inverter_apparent_power_limit_kva"] == 275.0
         for candidate in result["candidates"]
     )
     selection = result["design_context"]["profile_selection"]
     assert selection["inverter_profile_id"] == "inverter-125"
     assert selection["inverter_profile"]["rated_active_power_kw"] == 125.0
+    assert result["design_context"]["technical_options"]["inverter_quantity"] == 2
     assert validate_ci_design_context(result["design_context"]) == result["design_context"]
 
 

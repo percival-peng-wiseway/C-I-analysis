@@ -65,6 +65,7 @@ export interface CiTechnicalOptions {
   effective_derating_percent?: number;
   target_dc_ac_ratio: number;
   inverter_block_size_kw: number;
+  inverter_quantity?: number;
   site_ac_headroom_kw: number;
   battery_duration_hours: number;
   charge_efficiency_percent: number;
@@ -108,6 +109,7 @@ export interface CiSiteFactors {
 
 export interface CiConnectionOptions {
   inverter_block_size_kw: number;
+  inverter_quantity?: number;
   site_ac_headroom_kw: number;
   allow_grid_charging: boolean;
   reactive_support_enabled: boolean;

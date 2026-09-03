@@ -60,6 +60,11 @@ def generate_ci_solutions(
         raise _invalid(
             "The PCS block size must match the selected inverter profile rating."
         )
+    if (
+        request["connection_options"]["inverter_quantity"] is not None
+        and inverter_performance is None
+    ):
+        raise _invalid("A fixed inverter quantity requires an inverter profile.")
 
     pv_targets = _range_values(request["pv_range"], allow_zero=False)
     battery_targets = _range_values(request["battery_range"], allow_zero=True)
@@ -108,9 +113,20 @@ def generate_ci_solutions(
             pv_actual / solar_performance["default_dc_ac_ratio"],
             battery_power,
         )
-        inverter_capacity = _ceil_to_unit(
-            inverter_required, connection["inverter_block_size_kw"]
+        configured_quantity = connection["inverter_quantity"]
+        inverter_capacity = (
+            _clean_number(
+                int(configured_quantity) * connection["inverter_block_size_kw"]
+            )
+            if configured_quantity is not None
+            else _ceil_to_unit(
+                inverter_required, connection["inverter_block_size_kw"]
+            )
         )
+        if inverter_capacity + 1e-9 < inverter_required:
+            rejected_unique += 1
+            rejection_counts["configured_inverter_capacity_insufficient"] += 1
+            continue
         if inverter_capacity > connection["site_ac_headroom_kw"] + 1e-9:
             rejected_unique += 1
             rejection_counts["site_ac_headroom_exceeded"] += 1
@@ -417,10 +433,14 @@ def _connection_options(value: object) -> dict[str, object]:
         emissions = _bounded(emissions, 0, 5)
     if value.get("initial_soc_basis") != "full_soc_physical_upper_bound":
         raise _invalid("The initial SOC basis is invalid.")
+    inverter_quantity = value.get("inverter_quantity")
+    if inverter_quantity is not None:
+        inverter_quantity = _integer(inverter_quantity, 1, 10_000)
     return {
         "inverter_block_size_kw": _bounded(
             value.get("inverter_block_size_kw"), 0.1, 1000
         ),
+        "inverter_quantity": inverter_quantity,
         "site_ac_headroom_kw": _bounded(
             value.get("site_ac_headroom_kw"), 1e-9, 1_000_000
         ),
@@ -757,6 +777,11 @@ def _design_context(
             "effective_derating_percent": round(derating * 100, 8),
             "target_dc_ac_ratio": solar_performance["default_dc_ac_ratio"],
             "inverter_block_size_kw": connection["inverter_block_size_kw"],
+            **(
+                {"inverter_quantity": connection["inverter_quantity"]}
+                if connection["inverter_quantity"] is not None
+                else {}
+            ),
             "site_ac_headroom_kw": connection["site_ac_headroom_kw"],
             "battery_duration_hours": _clean_number(duration),
             "charge_efficiency_percent": round(one_way_efficiency * 100, 8),

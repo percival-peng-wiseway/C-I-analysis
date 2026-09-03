@@ -28,6 +28,8 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByRole("region", { name: "Battery profile" })).toBeTruthy();
     expect(screen.queryByText("Existing site assets")).toBeNull();
     expect(screen.getByText("30 requested · Python will snap & validate")).toBeTruthy();
+    await userEvent.type(screen.getByLabelText("Fixed inverter quantity (optional)"), "3");
+    expect(screen.getByText("3 × 125 kW = 375 kW")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate 30 cases" }));
 
@@ -47,6 +49,7 @@ describe("CiScenarioBuilder", () => {
         array_tilt_degrees: 20,
       },
       connection_options: {
+        inverter_quantity: 3,
         site_ac_headroom_kw: 250,
         allow_grid_charging: false,
         grid_emissions_factor_kg_co2e_per_kwh: null,

@@ -51,6 +51,7 @@ type SiteFactorsForm = {
 };
 type ConnectionOptionsForm = {
   inverter_block_size_kw: string;
+  inverter_quantity: string;
   site_ac_headroom_kw: string;
   allow_grid_charging: boolean;
   reactive_support_enabled: boolean;
@@ -84,6 +85,7 @@ const defaultSiteFactors = (): SiteFactorsForm => ({
 });
 const defaultConnectionOptions = (): ConnectionOptionsForm => ({
   inverter_block_size_kw: "5",
+  inverter_quantity: "",
   site_ac_headroom_kw: "250",
   allow_grid_charging: false,
   reactive_support_enabled: false,
@@ -281,7 +283,13 @@ export function CiScenarioBuilder({
           <div className="grid gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
-            <InverterProfileCard onProfileChange={selectInverterProfile} profile={inverterProfile} profiles={publishedInverter} />
+            <InverterProfileCard
+              onProfileChange={selectInverterProfile}
+              onQuantityChange={(inverter_quantity) => setConnection({ ...connection, inverter_quantity })}
+              profile={inverterProfile}
+              profiles={publishedInverter}
+              quantity={connection.inverter_quantity}
+            />
           </div>
           {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Publish at least one Solar profile, one AC-coupled Battery profile and one Inverter profile in Settings before generating solutions. DC-coupled battery profiles can remain in the library, but the current Python dispatch engine does not model them.</p>
@@ -395,14 +403,18 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
   );
 }
 
-function InverterProfileCard({ onProfileChange, profile, profiles }: {
+function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profiles, quantity }: {
   onProfileChange: (profileId: string) => void;
+  onQuantityChange: (quantity: string) => void;
   profile: CiInverterSolutionProfile | null;
   profiles: CiInverterSolutionProfile[];
+  quantity: string;
 }) {
+  const parsedQuantity = optionalPositiveInteger(quantity);
   return (
     <ProfileCard icon={Cpu} title="Inverter / PCS">
       <SelectField label="Published Inverter profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      <IntegerField label="Fixed inverter quantity (optional)" onChange={onQuantityChange} placeholder="Auto-size per solution" value={quantity} />
       {profile ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3 xl:grid-cols-2">
           <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
@@ -410,6 +422,7 @@ function InverterProfileCard({ onProfileChange, profile, profiles }: {
           <ProfileFact label="Apparent power" value={`${formatNumber(profile.rated_apparent_power_kva)} kVA`} />
           <ProfileFact label="Reactive cap" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
           <ProfileFact label="European efficiency" value={`${formatNumber(profile.european_efficiency_percent)}%`} />
+          <ProfileFact label="Configured PCS" value={parsedQuantity === null ? "Auto-sized" : `${parsedQuantity} × ${formatNumber(profile.rated_active_power_kw)} kW = ${formatNumber(parsedQuantity * profile.rated_active_power_kw)} kW`} />
           <ProfileFact label="Source" value={profile.source_label} />
         </dl>
       ) : <MissingProfile />}
@@ -454,6 +467,10 @@ function ReadOnlyFact({ label, value }: { label: string; value: string }) {
 
 function NumberField({ allowBlank = false, label, onChange, value }: { allowBlank?: boolean; label: string; onChange: (value: string) => void; value: string }) {
   return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="0" onChange={(event) => onChange(event.target.value)} placeholder={allowBlank ? "Not modelled" : undefined} step="any" type="number" value={value} /></label>;
+}
+
+function IntegerField({ label, onChange, placeholder, value }: { label: string; onChange: (value: string) => void; placeholder?: string; value: string }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="1" onChange={(event) => onChange(event.target.value)} placeholder={placeholder} step="1" type="number" value={value} /></label>;
 }
 
 function TextField({ className = "", label, onChange, value }: { className?: string; label: string; onChange: (value: string) => void; value: string }) {
@@ -512,6 +529,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
   const other = parseNumber(site.other_system_loss_percent);
   const availability = parseNumber(site.system_availability_percent);
   const block = parseNumber(connection.inverter_block_size_kw);
+  const inverterQuantity = optionalPositiveInteger(connection.inverter_quantity);
   const headroom = parseNumber(connection.site_ac_headroom_kw);
   const reactive = connection.reactive_support_enabled ? parseNumber(connection.reactive_support_max_kvar) : 0;
   const emissions = connection.grid_emissions_factor_kg_co2e_per_kwh.trim() ? parseNumber(connection.grid_emissions_factor_kg_co2e_per_kwh) : null;
@@ -521,6 +539,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
     !between(annualYield, 500, 3000) || !between(azimuth, 0, 360) || !between(tilt, 0, 90) ||
     losses.some((value) => !between(value, 0, 99)) || !between(availability, 1, 100) ||
     !between(block, 0.1, 1000) || !positive(headroom) ||
+    (connection.inverter_quantity.trim() !== "" && inverterQuantity === null) ||
     (connection.reactive_support_enabled && !positive(reactive)) ||
     (emissions !== null && !between(emissions, 0, 5))
   ) return null;
@@ -547,6 +566,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
     },
     connection_options: {
       inverter_block_size_kw: block,
+      ...(inverterQuantity === null ? {} : { inverter_quantity: inverterQuantity }),
       site_ac_headroom_kw: headroom,
       allow_grid_charging: connection.allow_grid_charging,
       reactive_support_enabled: connection.reactive_support_enabled,
@@ -641,6 +661,7 @@ function siteFormFromTechnical(options: CiDesignContext["technical_options"]): S
 function connectionFormFromTechnical(options: CiDesignContext["technical_options"]): ConnectionOptionsForm {
   return {
     inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
+    inverter_quantity: options.inverter_quantity === undefined ? "" : String(options.inverter_quantity),
     site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
     allow_grid_charging: options.allow_grid_charging,
     reactive_support_enabled: options.reactive_support_enabled,
@@ -651,6 +672,12 @@ function connectionFormFromTechnical(options: CiDesignContext["technical_options
 
 function publishedId<T extends { profile_id: string }>(preferred: string, profiles: T[]) {
   return profiles.some((profile) => profile.profile_id === preferred) ? preferred : (profiles[0]?.profile_id ?? "");
+}
+
+function optionalPositiveInteger(value: string) {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 10_000 ? parsed : null;
 }
 
 function parsedRange(range: NumericRange, strictlyPositiveMinimum: boolean): { minimum: number; maximum: number; step: number } | null {

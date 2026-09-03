@@ -418,6 +418,11 @@ def _validate_technical_options(
         "full_soc_physical_upper_bound"
     ):
         raise ValueError
+    inverter_quantity = None
+    if "inverter_quantity" in value:
+        inverter_quantity = _integer(value, "inverter_quantity", positive=True)
+        if inverter_quantity > 10_000:
+            raise ValueError
     result = {
         "annual_specific_yield_kwh_per_kw": annual_yield,
         **losses,
@@ -425,6 +430,11 @@ def _validate_technical_options(
         "effective_derating_percent": round(effective_derating * 100, 8),
         "target_dc_ac_ratio": _bounded_number(value, "target_dc_ac_ratio", 0.8, 2.0),
         "inverter_block_size_kw": _bounded_number(value, "inverter_block_size_kw", 0.1, 1000),
+        **(
+            {"inverter_quantity": inverter_quantity}
+            if inverter_quantity is not None
+            else {}
+        ),
         "site_ac_headroom_kw": _bounded_number(value, "site_ac_headroom_kw", 0.1, 1_000_000),
         "battery_duration_hours": _bounded_number(value, "battery_duration_hours", 0.25, 24),
         "charge_efficiency_percent": _bounded_number(value, "charge_efficiency_percent", 1, 100),

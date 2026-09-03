@@ -123,6 +123,7 @@ class CiSolutionSiteFactorsRequest(BaseModel):
 
 class CiSolutionConnectionOptionsRequest(BaseModel):
     inverter_block_size_kw: float = Field(ge=0.1, le=1000)
+    inverter_quantity: int | None = Field(default=None, ge=1, le=10_000)
     site_ac_headroom_kw: float = Field(gt=0, le=1_000_000)
     allow_grid_charging: bool
     reactive_support_enabled: bool
