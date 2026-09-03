@@ -22,6 +22,11 @@ import {
   type CiProjectTariffProfileState,
 } from "@/features/ci/api/ci-tariff-profile";
 import { ciAnnualFinancialComparisonQueryKey } from "@/features/ci/api/ci-annual-financial-comparison";
+import { invalidateCiCalculationHandbook } from "@/features/ci/api/ci-calculation-handbook";
+import { ciDesignPricePreviewQueryKey } from "@/features/ci/api/ci-design-price-preview";
+import { ciSavedFeasibilityQueryKey } from "@/features/ci/api/ci-design-feasibility";
+import { ciProjectsQueryKey } from "@/features/ci/api/ci-projects";
+import { ciProjectRebateProfileQueryKey } from "@/features/ci/api/ci-rebate-profile";
 import { ciProjectTariffReplayQueryKey } from "@/features/ci/api/ci-scenarios";
 import { CiAnnualDemandHeatmap } from "@/features/ci/ci-annual-demand-heatmap";
 import { CiBillBreakdown } from "@/features/ci/ci-bill-breakdown";
@@ -58,8 +63,17 @@ export function CiEvidenceIntake({
     mutationFn: ({ billFile, billReview, nem12File }: { billFile: File; billReview?: CiBillReviewInput; nem12File: File }) => inspectCiEvidencePair(projectId, billFile, nem12File, undefined, billReview),
     onSuccess: async (result) => {
       setReplacing(false);
-      await queryClient.invalidateQueries({ queryKey: ciProjectEvidenceQueryKey(projectId) });
-      await queryClient.invalidateQueries({ queryKey: ciProjectTariffProfileQueryKey(projectId) });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ciProjectEvidenceQueryKey(projectId) }),
+        queryClient.invalidateQueries({ queryKey: ciProjectTariffProfileQueryKey(projectId) }),
+        queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey }),
+        queryClient.resetQueries({ exact: true, queryKey: ciDesignPricePreviewQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciSavedFeasibilityQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciProjectRebateProfileQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciProjectTariffReplayQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciAnnualFinancialComparisonQueryKey(projectId) }),
+        invalidateCiCalculationHandbook(queryClient, projectId),
+      ]);
       setBill(null);
       setNem12(null);
       if (result.intake_status === "ready_for_profile_review") onReady();
@@ -73,7 +87,16 @@ export function CiEvidenceIntake({
         ...current,
         evidence: { ...current.evidence, saved_at: new Date().toISOString(), inspection: result },
       } : current);
-      await queryClient.invalidateQueries({ queryKey: ciProjectTariffProfileQueryKey(projectId) });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ciProjectTariffProfileQueryKey(projectId) }),
+        queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey }),
+        queryClient.resetQueries({ exact: true, queryKey: ciDesignPricePreviewQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciSavedFeasibilityQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciProjectRebateProfileQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciProjectTariffReplayQueryKey(projectId) }),
+        queryClient.resetQueries({ exact: true, queryKey: ciAnnualFinancialComparisonQueryKey(projectId) }),
+        invalidateCiCalculationHandbook(queryClient, projectId),
+      ]);
       if (result.intake_status === "ready_for_profile_review") onReady();
     },
   });
@@ -85,6 +108,7 @@ export function CiEvidenceIntake({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ciProjectTariffReplayQueryKey(projectId) }),
         queryClient.invalidateQueries({ queryKey: ciAnnualFinancialComparisonQueryKey(projectId) }),
+        invalidateCiCalculationHandbook(queryClient, projectId),
       ]);
     },
   });

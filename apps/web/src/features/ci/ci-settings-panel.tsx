@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BatteryCharging, BadgeDollarSign, Check, CirclePlus, Library, Settings2, SunMedium, X, Zap } from "lucide-react";
-import { useEffect, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useId, useRef, useState, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SetStateAction } from "react";
 
 import { Button } from "@/components/ui/button";
+import { invalidateAllCiCalculationHandbooks } from "@/features/ci/api/ci-calculation-handbook";
 import {
   ciDeviceProfileQueryKey,
   fetchCiDeviceProfile,
@@ -20,6 +21,9 @@ type SolutionProfileKind = "solar" | "battery" | "inverter";
 
 export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
+  const settingsTabsId = useId();
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const profileQuery = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
   const [draft, setDraft] = useState<CiDeviceProfile | null>(null);
   const [section, setSection] = useState<SettingsSection>("solution_profiles");
@@ -32,9 +36,32 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
     onSuccess: (state) => {
       queryClient.setQueryData(ciDeviceProfileQueryKey, structuredClone(state));
       if (state.profile) setDraft(structuredClone(state.profile));
+      void queryClient.resetQueries({ queryKey: ["ci-design-price-preview"] });
+      void queryClient.resetQueries({ queryKey: ["ci-project-rebate-profile"] });
       void queryClient.invalidateQueries({ queryKey: ["ci-project-annual-financial-comparison"] });
+      void invalidateAllCiCalculationHandbooks(queryClient);
     },
   });
+
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.body.style.overflow = previousOverflow;
+      previousFocusRef.current?.focus();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !save.isPending) onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose, save.isPending]);
 
   useEffect(() => {
     if (profileQuery.data && draft === null) {
@@ -107,22 +134,22 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   const validationMessage = draft ? validateDraft(draft) : "Device profile is not available.";
 
   return (
-    <div aria-label="Settings" aria-modal="true" className="fixed inset-0 z-50 flex justify-end bg-slate-950/35 backdrop-blur-[2px]" role="dialog">
-      <button aria-label="Close settings" className="min-w-0 flex-1 cursor-default" onClick={onClose} type="button" />
+    <div aria-busy={profileQuery.isPending || save.isPending} aria-label="Settings" aria-modal="true" className="fixed inset-0 z-50 flex justify-end bg-slate-950/35 backdrop-blur-[2px]" onKeyDown={trapFocus} role="dialog">
+      <button aria-hidden="true" className="min-w-0 flex-1 cursor-default" disabled={save.isPending} onClick={onClose} tabIndex={-1} type="button" />
       <section className="flex h-full w-full max-w-[760px] flex-col overflow-hidden bg-white shadow-2xl">
         <header className="flex items-center justify-between border-b border-slate-200 px-5 py-4 sm:px-6">
           <div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Settings2 className="size-5" /></span><div><p className="text-xs font-semibold uppercase tracking-[.15em] text-cyan-700">Settings</p><h2 className="text-lg font-semibold text-slate-950">Device profile</h2></div></div>
-          <Button aria-label="Close settings panel" className="size-9 p-0" onClick={onClose} type="button" variant="ghost"><X className="size-4" /></Button>
+          <Button aria-label="Close settings panel" className="size-9 p-0" disabled={save.isPending} onClick={onClose} ref={closeButtonRef} type="button" variant="ghost"><X className="size-4" /></Button>
         </header>
 
-        <div aria-label="Settings sections" className="grid grid-cols-2 border-b border-slate-200 bg-slate-50 px-5 pt-3" role="tablist">
-          <SettingsTab active={section === "solution_profiles"} label="Solution profiles" onClick={() => setSection("solution_profiles")} />
-          <SettingsTab active={section === "equipment_finance"} label="Equipment & finance" onClick={() => setSection("equipment_finance")} />
+        <div aria-label="Settings sections" className="grid grid-cols-2 border-b border-slate-200 bg-slate-50 px-5 pt-3" onKeyDown={activateAdjacentTab} role="tablist">
+          <SettingsTab active={section === "solution_profiles"} controls={`${settingsTabsId}-solution-profiles-panel`} id={`${settingsTabsId}-solution-profiles-tab`} label="Solution profiles" onClick={() => setSection("solution_profiles")} />
+          <SettingsTab active={section === "equipment_finance"} controls={`${settingsTabsId}-equipment-finance-panel`} id={`${settingsTabsId}-equipment-finance-tab`} label="Equipment & finance" onClick={() => setSection("equipment_finance")} />
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5 sm:p-6">
-          {profileQuery.isPending || !draft ? <p className="text-sm text-slate-500">Loading Device profile…</p> : null}
-          {profileQuery.isError ? <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800">Device profile could not be loaded.</p> : null}
+        <div aria-labelledby={`${settingsTabsId}-${section === "solution_profiles" ? "solution-profiles" : "equipment-finance"}-tab`} className="flex-1 overflow-y-auto p-5 sm:p-6" id={`${settingsTabsId}-${section === "solution_profiles" ? "solution-profiles" : "equipment-finance"}-panel`} role="tabpanel">
+          {profileQuery.isPending || !draft ? <p aria-live="polite" className="text-sm text-slate-500" role="status">Loading Device profile…</p> : null}
+          {profileQuery.isError ? <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">Device profile could not be loaded.</p> : null}
           {draft ? (
             <form className="space-y-6" onSubmit={(event) => { event.preventDefault(); if (!validationMessage) save.mutate(draft); }}>
               <fieldset className="space-y-6 disabled:opacity-70" disabled={save.isPending}>
@@ -158,9 +185,9 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
               </fieldset>
 
               {validationMessage ? <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900" role="alert">{validationMessage}</p> : null}
-              {save.error instanceof Error ? <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{save.error.message}</p> : null}
-              {save.isSuccess ? <p className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-sm font-medium text-emerald-800"><Check className="size-4" />Device profile saved. Existing finance results are marked for recalculation.</p> : null}
-              <div className="flex justify-end gap-2 border-t border-slate-200 pt-5"><Button onClick={onClose} type="button" variant="outline">Cancel</Button><Button disabled={save.isPending || Boolean(validationMessage)} type="submit">{save.isPending ? "Saving…" : "Save profile"}</Button></div>
+              {save.error instanceof Error ? <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">{save.error.message}</p> : null}
+              {save.isSuccess ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />Device profile saved. Existing finance results are marked for recalculation.</p> : null}
+              <div className="flex justify-end gap-2 border-t border-slate-200 pt-5"><Button disabled={save.isPending} onClick={onClose} type="button" variant="outline">Cancel</Button><Button disabled={save.isPending || Boolean(validationMessage)} type="submit">{save.isPending ? "Saving…" : "Save profile"}</Button></div>
             </form>
           ) : null}
         </div>
@@ -169,8 +196,8 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function SettingsTab({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
-  return <button aria-selected={active} className={`border-b-2 px-3 py-3 text-sm font-semibold ${active ? "border-cyan-600 text-cyan-900" : "border-transparent text-slate-500 hover:text-slate-800"}`} onClick={onClick} role="tab" type="button">{label}</button>;
+function SettingsTab({ active, controls, id, label, onClick }: { active: boolean; controls: string; id: string; label: string; onClick: () => void }) {
+  return <button aria-controls={controls} aria-selected={active} className={`border-b-2 px-3 py-3 text-sm font-semibold ${active ? "border-cyan-600 text-cyan-900" : "border-transparent text-slate-500 hover:text-slate-800"}`} id={id} onClick={onClick} role="tab" tabIndex={active ? 0 : -1} type="button">{label}</button>;
 }
 
 function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd, onDefaultBattery, onDefaultSolar, onKindChange, onSelectBattery, onSelectInverter, onSelectSolar, onUpdateBattery, onUpdateInverter, onUpdateSolar, profiles, selectedBatteryId, selectedInverterId, selectedSolarId }: {
@@ -192,6 +219,7 @@ function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd
   selectedInverterId: string | null;
   selectedSolarId: string | null;
 }) {
+  const profileTabsId = useId();
   const selectedSolar = profiles.solar_profiles.find((item) => item.profile_id === selectedSolarId) ?? profiles.solar_profiles[0];
   const selectedBattery = profiles.battery_profiles.find((item) => item.profile_id === selectedBatteryId) ?? profiles.battery_profiles[0];
   const selectedInverter = profiles.inverter_profiles.find((item) => item.profile_id === selectedInverterId) ?? profiles.inverter_profiles[0];
@@ -200,13 +228,14 @@ function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd
       <div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Library className="size-5" /></span><div><h3 className="font-semibold text-slate-950" id="solution-profiles-title">Solution profile library</h3><p className="mt-1 text-xs leading-5 text-slate-500">Only Published solar and battery profiles can be selected as generator defaults. Drafts can be saved and retired profiles remain available for audit history.</p></div></div>
       <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950">Draft evidence is stored for completion but is excluded from solution generation and reactive-support claims.</p>
 
-      <div aria-label="Solution profile types" className="grid grid-cols-3 rounded-lg bg-slate-100 p-1" role="tablist">
-        <ProfileKindTab active={kind === "solar"} icon={SunMedium} label="Solar" onClick={() => onKindChange("solar")} />
-        <ProfileKindTab active={kind === "battery"} icon={BatteryCharging} label="Battery" onClick={() => onKindChange("battery")} />
-        <ProfileKindTab active={kind === "inverter"} icon={Zap} label="Inverter" onClick={() => onKindChange("inverter")} />
+      <div aria-label="Solution profile types" className="grid grid-cols-3 rounded-lg bg-slate-100 p-1" onKeyDown={activateAdjacentTab} role="tablist">
+        <ProfileKindTab active={kind === "solar"} controls={`${profileTabsId}-solar-panel`} icon={SunMedium} id={`${profileTabsId}-solar-tab`} label="Solar" onClick={() => onKindChange("solar")} />
+        <ProfileKindTab active={kind === "battery"} controls={`${profileTabsId}-battery-panel`} icon={BatteryCharging} id={`${profileTabsId}-battery-tab`} label="Battery" onClick={() => onKindChange("battery")} />
+        <ProfileKindTab active={kind === "inverter"} controls={`${profileTabsId}-inverter-panel`} icon={Zap} id={`${profileTabsId}-inverter-tab`} label="Inverter" onClick={() => onKindChange("inverter")} />
       </div>
 
-      {kind === "solar" ? (
+      <div aria-labelledby={`${profileTabsId}-${kind}-tab`} id={`${profileTabsId}-${kind}-panel`} role="tabpanel">
+        {kind === "solar" ? (
         <>
           <ProfileList
             defaultId={defaultSolarId}
@@ -244,13 +273,14 @@ function SolutionProfilesLibrary({ defaultBatteryId, defaultSolarId, kind, onAdd
           />
           {selectedInverter ? <InverterProfileEditor onUpdate={onUpdateInverter} profile={selectedInverter} /> : null}
         </>
-      )}
+        )}
+      </div>
     </section>
   );
 }
 
-function ProfileKindTab({ active, icon: Icon, label, onClick }: { active: boolean; icon: typeof SunMedium; label: string; onClick: () => void }) {
-  return <button aria-selected={active} className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold ${active ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`} onClick={onClick} role="tab" type="button"><Icon className="size-4" />{label}</button>;
+function ProfileKindTab({ active, controls, icon: Icon, id, label, onClick }: { active: boolean; controls: string; icon: typeof SunMedium; id: string; label: string; onClick: () => void }) {
+  return <button aria-controls={controls} aria-selected={active} className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold ${active ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`} id={id} onClick={onClick} role="tab" tabIndex={active ? 0 : -1} type="button"><Icon className="size-4" />{label}</button>;
 }
 
 function ProfileList({ defaultId, kind, onAdd, onDefault, onSelect, profiles, selectedId }: {
@@ -420,6 +450,37 @@ function CatalogPriceInput({ label, onChange, value }: { label: string; onChange
 
 function RateField({ label, onChange, suffix, value }: { label: string; onChange: (value: number) => void; suffix: string; value: number }) {
   return <label className="rounded-lg bg-slate-50 p-3"><span className="text-xs text-slate-500">{label}</span><span className="mt-1 flex items-center gap-1"><input aria-label={label} className="min-w-0 flex-1 bg-transparent text-sm font-semibold tabular-nums outline-none" min="0" onChange={(event) => onChange(Number(event.target.value))} step="0.1" type="number" value={Number(value.toFixed(3))} /><span className="text-[10px] text-slate-400">{suffix}</span></span></label>;
+}
+
+function activateAdjacentTab(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]:not([disabled])'));
+  const currentIndex = tabs.indexOf(document.activeElement as HTMLButtonElement);
+  if (currentIndex < 0 || tabs.length === 0) return;
+  event.preventDefault();
+  const nextIndex = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? tabs.length - 1
+      : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[nextIndex].focus();
+  tabs[nextIndex].click();
+}
+
+function trapFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (event.key !== "Tab") return;
+  const elements = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+    .filter((element) => element.tabIndex >= 0 && !element.closest('[hidden], [aria-hidden="true"], details:not([open])'));
+  const first = elements[0];
+  const last = elements.at(-1);
+  if (!first || !last) return;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function stableProfileId(kind: SolutionProfileKind, existing: Array<{ profile_id: string }>): string {

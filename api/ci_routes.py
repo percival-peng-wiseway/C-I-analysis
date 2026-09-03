@@ -37,6 +37,7 @@ from solar_battery.ci_annual_financial_demo import (
     analyze_ci_annual_financial_demo,
 )
 from solar_battery.ci_annual_financial_comparison import (
+    CI_DESIGN_PRICE_PREVIEW_CONTRACT_VERSION,
     compare_ci_annual_financial_scenarios,
     preview_ci_design_candidate_prices,
 )
@@ -46,8 +47,6 @@ from solar_battery.ci_annual_financial_simulation import (
 from solar_battery.ci_evidence_intake import (
     CiEvidenceIntakeError,
     MAX_CI_BILL_UPLOAD_BYTES,
-    enrich_ci_evidence_tariff_summary,
-    extract_ci_site_address,
     inspect_ci_evidence_pair,
 )
 from solar_battery.ci_design_feasibility import (
@@ -83,7 +82,6 @@ from solar_battery.ci_project_evidence import (
     record_ci_project_evidence,
     store_ci_project_evidence_files,
     update_ci_project_evidence_inspection,
-    update_ci_project_evidence_inspection_if_current,
 )
 from solar_battery.ci_project_site_material import (
     CI_PROJECT_SITE_MATERIAL_CONTRACT_VERSION,
@@ -100,6 +98,7 @@ from solar_battery.ci_project_feasibility import (
     design_candidates_sha256,
     record_ci_design_feasibility_result,
 )
+from solar_battery.ci_project_handbook import build_ci_project_handbook
 from solar_battery.ci_project_annual_financial import (
     ci_annual_financial_state,
     record_ci_annual_financial_result,
@@ -124,9 +123,11 @@ from solar_battery.ci_projects import (
     mark_ci_financial_simulation_ready,
     mark_ci_setup_ready,
     record_ci_design_candidates,
+    record_ci_design_price_preview,
     require_ci_project,
     saved_ci_design_candidates,
     saved_ci_design_context,
+    saved_ci_design_price_preview,
 )
 from solar_battery.ci_scenario_analysis import (
     CiScenarioAnalysisError,
@@ -233,6 +234,134 @@ def post_ci_project(
                     session, display_name=payload.display_name, actor=actor
                 )
         return {"contract_version": "ci_project_v1", **project}
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.get("/commercial-industrial/projects/{project_id}/calculation-handbook")
+def get_ci_project_calculation_handbook(
+    project_id: UUID,
+    response: Response,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    """Project formulas, parameters and persisted results without recalculation."""
+
+    actor = identity_provider.current()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        with session_factory() as session:
+            project = require_ci_project(
+                session, project_id=project_id, actor=actor
+            )
+            evidence_state = ci_project_evidence_state(
+                session, project_id=project_id, actor=actor
+            )
+            design_candidates = saved_ci_design_candidates(
+                session, project_id=project_id, actor=actor
+            )
+            design_context = saved_ci_design_context(
+                session, project_id=project_id, actor=actor
+            )
+            raw_price_preview = saved_ci_design_price_preview(
+                session, project_id=project_id, actor=actor
+            )
+            if raw_price_preview is None:
+                price_preview_state: dict[str, object] = {
+                    "status": "not_saved",
+                    "preview": None,
+                    "stale_reasons": [],
+                }
+            else:
+                try:
+                    price_preview = _validate_saved_ci_design_price_preview(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        preview=raw_price_preview,
+                    )
+                except CiProjectError as exc:
+                    if exc.code != "ci_design_price_preview_stale":
+                        raise
+                    price_preview_state = {
+                        "status": "stale",
+                        "preview": raw_price_preview,
+                        "stale_reasons": ["upstream_input_changed"],
+                    }
+                else:
+                    price_preview_state = {
+                        "status": "ready",
+                        "preview": price_preview,
+                        "stale_reasons": [],
+                    }
+            feasibility_state = ci_design_feasibility_state(
+                session, project_id=project_id, actor=actor
+            )
+            tariff_profile_state = ci_project_tariff_profile_state(
+                session, project_id=project_id, actor=actor
+            )
+            rebate_profile_state = ci_project_rebate_profile_state(
+                session, project_id=project_id, actor=actor
+            )
+            approved_tariff_profile = (
+                approved_ci_project_tariff_calculation_profile(
+                    session, project_id=project_id, actor=actor
+                )
+            )
+            tariff_replay_state = ci_tariff_replay_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_profile=approved_tariff_profile,
+            )
+            approved_rebate_profile = (
+                approved_ci_project_rebate_calculation_profile(
+                    session, project_id=project_id, actor=actor
+                )
+            )
+            device_profile_state = ci_device_profile_state(session, actor=actor)
+            active_tariff_result = (
+                tariff_replay_state.get("result")
+                if tariff_replay_state.get("status") == "ready"
+                else None
+            )
+            annual_financial_state = ci_annual_financial_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_replay_result=(
+                    active_tariff_result
+                    if isinstance(active_tariff_result, dict)
+                    else None
+                ),
+                active_device_profile=(
+                    device_profile_state.get("profile")
+                    if device_profile_state.get("status") == "ready"
+                    and isinstance(device_profile_state.get("profile"), dict)
+                    else None
+                ),
+                active_rebate_profile_sha256=(
+                    rebate_calculation_profile_sha256(approved_rebate_profile)
+                    if approved_rebate_profile is not None
+                    else None
+                ),
+                rebate_profile_blocks_finance=(
+                    _rebate_profile_blocks_finance(rebate_profile_state)
+                ),
+            )
+            return build_ci_project_handbook(
+                project=project,
+                evidence_state=evidence_state,
+                design_candidates=design_candidates,
+                design_context=design_context,
+                design_price_preview_state=price_preview_state,
+                feasibility_state=feasibility_state,
+                tariff_profile_state=tariff_profile_state,
+                rebate_profile_state=rebate_profile_state,
+                tariff_replay_state=tariff_replay_state,
+                annual_financial_state=annual_financial_state,
+                device_profile_state=device_profile_state,
+            )
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 
@@ -464,73 +593,13 @@ def get_ci_project_evidence(
     project_id: UUID,
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
-    object_store: ObjectStore = Depends(get_object_store),
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
         with session_factory() as session:
-            state = ci_project_evidence_state(
+            return ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
-        evidence = state.get("evidence")
-        inspection = evidence.get("inspection") if isinstance(evidence, dict) else None
-        bill_result = inspection.get("bill") if isinstance(inspection, dict) else None
-        if (
-            isinstance(inspection, dict)
-            and inspection.get("contract_version")
-            in {
-                "ci_evidence_intake_v7",
-                "ci_evidence_intake_v8",
-                "ci_evidence_intake_v9",
-            }
-            and isinstance(bill_result, dict)
-        ):
-            try:
-                with session_factory() as session:
-                    bill_source, interval_source = load_ci_project_evidence_sources(
-                        session,
-                        object_store,
-                        project_id=project_id,
-                        actor=actor,
-                    )
-            except CiProjectError:
-                return state
-            upgraded = dict(inspection)
-            if "site_address" not in bill_result:
-                try:
-                    site_address = extract_ci_site_address(bill_source.data)
-                except CiEvidenceIntakeError:
-                    site_address = None
-                if site_address is not None:
-                    upgraded["contract_version"] = "ci_evidence_intake_v8"
-                    upgraded["bill"] = {**bill_result, "site_address": site_address}
-                    upgraded["privacy"] = {
-                        **dict(inspection.get("privacy", {})),
-                        "customer_identifiers_returned": True,
-                    }
-            try:
-                upgraded = enrich_ci_evidence_tariff_summary(
-                    upgraded, interval_source.data
-                )
-            except CiEvidenceIntakeError:
-                pass
-            if upgraded != inspection:
-                expected_saved_at = evidence.get("saved_at")
-                with session_factory() as session:
-                    with session.begin():
-                        if isinstance(expected_saved_at, str):
-                            update_ci_project_evidence_inspection_if_current(
-                                session,
-                                project_id=project_id,
-                                actor=actor,
-                                expected_saved_at=expected_saved_at,
-                                inspection_result=upgraded,
-                            )
-                with session_factory() as session:
-                    state = ci_project_evidence_state(
-                        session, project_id=project_id, actor=actor
-                    )
-        return state
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 
@@ -797,6 +866,25 @@ def post_ci_design_candidates(
                             payload.stc_settings.battery_stc_price_aud_ex_gst
                         ),
                     )
+                price_preview = None
+                if (
+                    payload.generation_request is None
+                    or device_profile_digest is not None
+                ):
+                    price_preview = _calculate_ci_design_price_preview_if_ready(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        candidates=list(result["candidates"]),
+                        device_profile=device_profile,
+                    )
+                if price_preview is not None:
+                    record_ci_design_price_preview(
+                        session,
+                        project_id=project_id,
+                        preview=price_preview,
+                        actor=actor,
+                    )
         return result
     except (CiProjectError, CiScenarioAnalysisError) as exc:
         if isinstance(exc, CiProjectError):
@@ -939,6 +1027,19 @@ def post_ci_custom_design_candidate(
                         payload.stc_settings.battery_stc_price_aud_ex_gst
                     ),
                 )
+                price_preview = _calculate_ci_design_price_preview_if_ready(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    candidates=list(result["candidates"]),
+                )
+                if price_preview is not None:
+                    record_ci_design_price_preview(
+                        session,
+                        project_id=project_id,
+                        preview=price_preview,
+                        actor=actor,
+                    )
         return result
     except (CiProjectError, CiScenarioAnalysisError) as exc:
         if isinstance(exc, CiProjectError):
@@ -954,52 +1055,19 @@ def get_ci_design_price_preview(
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
 ) -> dict[str, object]:
-    """Price every saved feasible design using approved project assumptions."""
+    """Restore the Net CAPEX snapshot created by an explicit design action."""
     actor = identity_provider.current()
     try:
         with session_factory() as session:
-            project = require_ci_project(session, project_id=project_id, actor=actor)
-            if project.setup_status != "ready":
-                raise CiProjectError(
-                    "ci_project_setup_required",
-                    "Complete Evidence before pricing the generated solutions.",
-                )
-            candidates = saved_ci_design_candidates(
+            saved_preview = saved_ci_design_price_preview(
                 session, project_id=project_id, actor=actor
             )
-            if candidates is None:
-                raise CiProjectError(
-                    "ci_project_design_required",
-                    "Generate the solution space before calculating Net CAPEX.",
-                )
-            device_state = ci_device_profile_state(session, actor=actor)
-            if device_state["status"] != "ready":
-                raise CiProjectError(
-                    "ci_device_profile_required",
-                    "Save the workspace Device profile in Settings before calculating Net CAPEX.",
-                )
-            rebate_state = ci_project_rebate_profile_state(
+            return _validate_saved_ci_design_price_preview(
                 session,
                 project_id=project_id,
                 actor=actor,
+                preview=saved_preview,
             )
-            if _rebate_profile_blocks_finance(rebate_state):
-                raise CiProjectError(
-                    "ci_project_rebate_profile_required",
-                    "Review and approve the enabled project rebate programs before calculating Net CAPEX.",
-                )
-            rebate_profile = approved_ci_project_rebate_calculation_profile(
-                session,
-                project_id=project_id,
-                actor=actor,
-            )
-            result = preview_ci_design_candidate_prices(
-                candidates=candidates,
-                device_profile=device_state["profile"],
-                rebate_profile=rebate_profile,
-            )
-        result["project_id"] = str(project_id)
-        return result
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 
@@ -2121,6 +2189,8 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
                 "ci_project_tariff_profile_changed",
                 "ci_project_rebate_profile_required",
                 "ci_project_annual_financial_inputs_changed",
+                "ci_design_price_preview_required",
+                "ci_design_price_preview_stale",
             }
             else status.HTTP_422_UNPROCESSABLE_ENTITY
         ),
@@ -2133,6 +2203,150 @@ def _rebate_profile_blocks_finance(state: dict[str, object]) -> bool:
         state.get("status") in {"draft", "stale"}
         and rebate_profile_has_enabled_program(state.get("profile"))
     )
+
+
+def _calculate_ci_design_price_preview(
+    session,
+    *,
+    project_id: UUID,
+    actor,
+    candidates: list[dict[str, object]] | None = None,
+    device_profile: dict[str, object] | None = None,
+    require_ready: bool = True,
+) -> dict[str, object] | None:
+    project = require_ci_project(session, project_id=project_id, actor=actor)
+    if project.setup_status != "ready":
+        if not require_ready:
+            return None
+        raise CiProjectError(
+            "ci_project_setup_required",
+            "Complete Evidence before pricing the generated solutions.",
+        )
+    active_candidates = candidates
+    if active_candidates is None:
+        active_candidates = saved_ci_design_candidates(
+            session, project_id=project_id, actor=actor
+        )
+    if active_candidates is None:
+        if not require_ready:
+            return None
+        raise CiProjectError(
+            "ci_project_design_required",
+            "Generate the solution space before calculating Net CAPEX.",
+        )
+    active_device_profile = device_profile
+    if active_device_profile is None:
+        device_state = ci_device_profile_state(session, actor=actor)
+        if device_state["status"] != "ready":
+            if not require_ready:
+                return None
+            raise CiProjectError(
+                "ci_device_profile_required",
+                "Save the workspace Device profile in Settings before calculating Net CAPEX.",
+            )
+        active_device_profile = device_state["profile"]
+    rebate_state = ci_project_rebate_profile_state(
+        session,
+        project_id=project_id,
+        actor=actor,
+    )
+    if _rebate_profile_blocks_finance(rebate_state):
+        if not require_ready:
+            return None
+        raise CiProjectError(
+            "ci_project_rebate_profile_required",
+            "Review and approve the enabled project rebate programs before calculating Net CAPEX.",
+        )
+    rebate_profile = approved_ci_project_rebate_calculation_profile(
+        session,
+        project_id=project_id,
+        actor=actor,
+    )
+    result = preview_ci_design_candidate_prices(
+        candidates=active_candidates,
+        device_profile=active_device_profile,
+        rebate_profile=rebate_profile,
+    )
+    result["project_id"] = str(project_id)
+    result["design_candidates_sha256"] = canonical_sha256(active_candidates)
+    return result
+
+
+def _calculate_ci_design_price_preview_if_ready(
+    session,
+    *,
+    project_id: UUID,
+    actor,
+    candidates: list[dict[str, object]],
+    device_profile: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    try:
+        return _calculate_ci_design_price_preview(
+            session,
+            project_id=project_id,
+            actor=actor,
+            candidates=candidates,
+            device_profile=device_profile,
+            require_ready=False,
+        )
+    except CiProjectError as exc:
+        if exc.code == "ci_device_profile_invalid":
+            return None
+        raise
+
+
+def _validate_saved_ci_design_price_preview(
+    session,
+    *,
+    project_id: UUID,
+    actor,
+    preview: dict[str, object] | None,
+) -> dict[str, object]:
+    if preview is None:
+        raise CiProjectError(
+            "ci_design_price_preview_required",
+            "Generate solutions to calculate and save their Net CAPEX snapshot.",
+        )
+    project = require_ci_project(session, project_id=project_id, actor=actor)
+    candidates = saved_ci_design_candidates(
+        session, project_id=project_id, actor=actor
+    )
+    device_state = ci_device_profile_state(session, actor=actor)
+    rebate_state = ci_project_rebate_profile_state(
+        session,
+        project_id=project_id,
+        actor=actor,
+    )
+    rebate_profile = approved_ci_project_rebate_calculation_profile(
+        session,
+        project_id=project_id,
+        actor=actor,
+    )
+    rebate_digest = (
+        rebate_calculation_profile_sha256(rebate_profile)
+        if rebate_profile is not None
+        else None
+    )
+    stale = (
+        preview.get("contract_version")
+        != CI_DESIGN_PRICE_PREVIEW_CONTRACT_VERSION
+        or preview.get("project_id") != str(project_id)
+        or project.setup_status != "ready"
+        or candidates is None
+        or preview.get("design_candidates_sha256")
+        != canonical_sha256(candidates)
+        or device_state.get("status") != "ready"
+        or preview.get("device_profile_sha256")
+        != device_state.get("profile_sha256")
+        or _rebate_profile_blocks_finance(rebate_state)
+        or preview.get("rebate_profile_sha256") != rebate_digest
+    )
+    if stale:
+        raise CiProjectError(
+            "ci_design_price_preview_stale",
+            "Equipment, rebate, evidence or solution inputs changed. Generate solutions to refresh Net CAPEX.",
+        )
+    return preview
 
 
 def _select_ci_design_candidates(

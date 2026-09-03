@@ -4,21 +4,34 @@
 
 @layer base {
   :root {
-    --background: 210 40% 98%;
-    --foreground: 222 47% 11%;
+    color-scheme: light;
+    --background: 210 24% 97%;
+    --foreground: 222 44% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --muted: 210 40% 94%;
-    --muted-foreground: 215 16% 38%;
-    --accent: 164 69% 93%;
-    --accent-foreground: 173 80% 19%;
-    --primary: 222 47% 18%;
-    --primary-foreground: 210 40% 98%;
+    --card-foreground: 222 44% 12%;
+    --surface: 210 24% 97%;
+    --surface-subtle: 210 25% 96%;
+    --surface-raised: 0 0% 100%;
+    --muted: 210 22% 94%;
+    --muted-foreground: 215 18% 34%;
+    --accent: 188 65% 92%;
+    --accent-foreground: 190 80% 23%;
+    --brand: 188 79% 37%;
+    --brand-foreground: 0 0% 100%;
+    --brand-subtle: 185 80% 96%;
+    --success: 160 76% 32%;
+    --success-foreground: 161 94% 20%;
+    --success-subtle: 152 76% 96%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 32 95% 25%;
+    --warning-subtle: 48 100% 96%;
+    --primary: 218 46% 18%;
+    --primary-foreground: 210 25% 98%;
     --destructive: 0 72% 50%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 32% 88%;
-    --input: 214 32% 88%;
-    --ring: 199 89% 48%;
+    --border: 214 25% 86%;
+    --input: 214 25% 82%;
+    --ring: 188 79% 37%;
   }
 
   * {
@@ -27,12 +40,18 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    min-width: 320px;
     font-family:
-      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      "Segoe UI Variable Text", Aptos, "Segoe UI", ui-sans-serif, system-ui,
+      -apple-system, BlinkMacSystemFont,
       sans-serif;
+    font-variant-numeric: proportional-nums;
+    text-rendering: optimizeLegibility;
   }
 
   html { scroll-behavior: smooth; }
+
+  ::selection { background: hsl(var(--brand) / 0.2); color: hsl(var(--foreground)); }
 
   button,
   input,
@@ -41,18 +60,30 @@
     font: inherit;
   }
 
-  :focus-visible { outline: 3px solid hsl(var(--ring)); outline-offset: 3px; }
+  input::placeholder,
+  textarea::placeholder { color: #64748b; opacity: 1; }
+
+  :focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
 @layer components {
-  .premium-page { overflow-x: hidden; background: #fbfbfc; color: #1d1d1f; }
-  .premium-content { max-width: 1120px; }
-  .premium-page .rounded-lg, .premium-page .rounded-md { border-radius: 10px; }
+  .premium-page { overflow-x: hidden; background: #f5f7f9; color: #172033; }
+  .premium-content { max-width: 1460px; }
   .premium-page [class*="bg-card"] { background: #fff; }
-  .premium-page .border-border { border-color: #e2e2e7; }
-  .premium-page .text-primary { color: #1255a5; }
-  .premium-page button.bg-primary, .premium-page .bg-primary { background: #1255a5; }
-  .premium-page button { min-height: 44px; }
+  .premium-page .border-border { border-color: #dce3e9; }
+  .premium-page .text-primary { color: #0e7490; }
+  .premium-page button.bg-primary, .premium-page .bg-primary { background: #17314f; }
+  .premium-page button { min-height: 40px; }
   .premium-create-project, .premium-registry, .premium-registry-state, .premium-workflow-summary, .premium-results-workspace, .premium-inputs-workspace, .premium-report-output { box-shadow: none; }
   .premium-create-project { border: 0; background: transparent; }
   .premium-registry-row { border-width: 0 0 1px; border-radius: 0; padding-inline: 0; }
@@ -76,20 +107,29 @@
   .premium-report-primary { border-left: 3px solid #1255a5; }
   .premium-evidence-status dd { color: #1d1d1f; }
   .premium-evidence-shell > summary { list-style-position: outside; }
-  .ci-app { background: #f3f6f8; }
-  .ci-app-header { position: sticky; top: 0; z-index: 40; }
+  .ci-app { min-height: 100dvh; background: #eef2f5; }
+  .ci-app-header { position: sticky; top: 0; z-index: 40; box-shadow: 0 1px 0 rgba(148, 163, 184, 0.16); }
+  .ci-app-bar { min-height: 64px; }
+  .ci-project-sidebar { background: #f8fafc; }
+  .ci-project-sidebar-header { background: rgba(255, 255, 255, 0.88); }
+  .ci-project-link { scroll-snap-align: start; }
+  .ci-project-link[aria-current="page"] { box-shadow: inset 3px 0 0 #0891b2; }
+  .ci-project-toolbar { background: rgba(255, 255, 255, 0.96); }
+  .ci-module-tabs { isolation: isolate; }
+  .ci-module-tab { min-width: 0; }
+  .ci-scroll-row { scrollbar-width: none; scroll-snap-type: x proximity; }
+  .ci-scroll-row::-webkit-scrollbar { display: none; }
+  .ci-scroll-region { scrollbar-color: #94a3b8 transparent; scrollbar-width: thin; }
+  .ci-scroll-region:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+  .ci-app .text-slate-400 { color: #64748b; }
   .ci-module-link { color: #475569; transition: background 160ms ease, color 160ms ease; text-align: left; }
   .ci-module-link:hover:not(:disabled) { background: #ecfeff; color: #155e75; }
   .ci-module-link[aria-current="page"] { background: #cffafe; color: #155e75; }
   .ci-module-link[aria-current="page"] > span:first-child { background: #a5f3fc; color: #155e75; }
   .ci-module-link:disabled { cursor: not-allowed; opacity: 0.45; }
-  .ci-workbench-page { background:
-    radial-gradient(circle at 76% 0%, rgba(34, 211, 238, 0.08), transparent 25rem),
-    linear-gradient(180deg, #f5f8fa 0%, #fbfbfc 28rem); }
+  .ci-workbench-page { background: #f5f7f9; }
   .ci-dashboard-hero, .ci-stage-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; border-radius: 18px; background:
-    radial-gradient(circle at 83% 15%, rgba(34, 211, 238, 0.2), transparent 20rem),
-    radial-gradient(circle at 63% 100%, rgba(139, 92, 246, 0.14), transparent 18rem),
-    #071525; padding: clamp(1.5rem, 4vw, 3rem); box-shadow: 0 24px 60px rgba(7, 21, 37, 0.12); }
+    linear-gradient(135deg, #0a192b, #102942); padding: clamp(1.5rem, 4vw, 3rem); box-shadow: 0 18px 44px rgba(7, 21, 37, 0.12); }
   .ci-overview-stat { display: flex; flex: none; align-items: center; gap: 12px; min-width: 150px; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; background: rgba(255,255,255,.06); padding: 14px; color: white; }
   .ci-overview-stat strong { display: block; font-size: 1.4rem; line-height: 1; }
   .ci-overview-stat small { display: block; margin-top: 4px; color: #94a3b8; }
@@ -97,11 +137,8 @@
   .ci-project-card, .ci-new-project-card { min-height: 300px; border-radius: 16px; box-shadow: 0 12px 32px rgba(15, 23, 42, .07); transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }
   .ci-project-card:hover, .ci-new-project-card:hover { transform: translateY(-2px); border-color: #a5f3fc; box-shadow: 0 18px 40px rgba(15, 23, 42, .1); }
   .ci-new-project-card { border-style: dashed; background: rgba(255,255,255,.7); }
-  .ci-workbench-hero { box-shadow: 0 24px 60px rgba(7, 21, 37, 0.12); }
-  .ci-hero-header { background:
-    radial-gradient(circle at 83% 15%, rgba(34, 211, 238, 0.22), transparent 20rem),
-    radial-gradient(circle at 63% 100%, rgba(139, 92, 246, 0.18), transparent 18rem),
-    #071525; padding: clamp(1.5rem, 4vw, 3.5rem); }
+  .ci-workbench-hero { box-shadow: 0 18px 44px rgba(7, 21, 37, 0.12); }
+  .ci-hero-header { background: linear-gradient(135deg, #0a192b, #102942); padding: clamp(1.5rem, 4vw, 3.5rem); }
   .ci-workflow-nav { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow: hidden; border: 1px solid #dfe7ec; border-radius: 14px; background: white; }
   .ci-workflow-step { position: relative; display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 15px 14px; color: #334155; transition: background 160ms ease, color 160ms ease; }
   .ci-workflow-step + .ci-workflow-step { border-left: 1px solid #e2e8f0; }
@@ -113,14 +150,19 @@
   .ci-workflow-step[data-status="current"] .ci-workflow-icon { background: #cffafe; }
   .ci-workflow-step[data-status="complete"] .ci-workflow-icon { background: #ccfbf1; }
   .ci-workflow-arrow { color: #cbd5e1; }
-  .premium-page .ci-dark-card { background:
-    radial-gradient(circle at 80% 10%, rgba(34, 211, 238, 0.16), transparent 18rem),
-    linear-gradient(135deg, #071525, #10243b); color: white; }
+  .premium-page .ci-dark-card { background: linear-gradient(135deg, #0a192b, #102942); color: white; }
   .ci-pipeline-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .ci-pipeline-stage { position: relative; display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 11px; padding: 8px 28px 8px 0; }
   .ci-pipeline-stage + .ci-pipeline-stage { padding-left: 20px; border-left: 1px solid rgba(255, 255, 255, 0.1); }
   .ci-pipeline-arrow { position: absolute; right: 7px; top: 19px; }
-  @media (max-width: 1023px) { .premium-project-context { position: static; } .premium-project-rail { position: static; } }
+  @media (max-width: 1023px) {
+    .premium-project-context { position: static; }
+    .premium-project-rail { position: static; }
+    .ci-project-sidebar-header { padding-block: 14px; }
+    .ci-project-list { scroll-padding-inline: 16px; }
+    .ci-project-link { min-width: min(78vw, 300px); }
+    .ci-project-toolbar { position: static; }
+  }
   @media (max-width: 1100px) {
     .ci-workflow-nav { grid-template-columns: 1fr; }
     .ci-workflow-step + .ci-workflow-step { border-top: 1px solid #e2e8f0; border-left: 0; }
@@ -134,5 +176,7 @@
   @media (max-width: 640px) {
     .ci-hero-header { padding: 24px 18px; }
     .ci-dashboard-hero, .ci-stage-header { align-items: stretch; flex-direction: column; padding: 24px 18px; }
+    .ci-module-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ci-module-tab { border-radius: 10px; border-width: 1px; }
   }
 }

@@ -8,8 +8,9 @@ from solar_battery.ci_project_evidence import (
     ci_project_evidence_state,
     record_ci_project_evidence,
     store_ci_project_evidence_files,
-    update_ci_project_evidence_inspection_if_current,
+    update_ci_project_evidence_inspection,
 )
+from solar_battery.durable_cockpit.orm import CiProjectModel
 from solar_battery.durable_cockpit.filesystem_object_store import (
     FilesystemObjectStore,
 )
@@ -128,40 +129,68 @@ def _saved_evidence_inspection(
     }
 
 
-def test_lazy_evidence_upgrade_updates_when_saved_at_token_is_current(
+def test_explicit_evidence_changes_clear_saved_design_price_preview(tmp_path) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "evidence-clears-price-preview.sqlite3")
+    session_factory = create_sqlite_session_factory(database_url)
+    object_store = FilesystemObjectStore(tmp_path / "evidence-clears-price-preview-objects")
+    actor = local_actor()
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Evidence invalidates price snapshot"},
+        )
+        assert created.status_code == 201
+        project_id = UUID(created.json()["project_id"])
+
+    bill = CiEvidenceSource("bill.pdf", "application/pdf", b"bill-v1")
+    interval = CiEvidenceSource("interval.csv", "text/csv", b"interval-v1")
+    bill_object, interval_object = store_ci_project_evidence_files(
+        object_store,
+        project_id=project_id,
+        bill=bill,
+        interval=interval,
+    )
+    first_inspection = _saved_evidence_inspection("first")
+    with session_factory.begin() as session:
+        project = session.get(CiProjectModel, project_id)
+        assert project is not None
+        project.design_price_preview_json = {"status": "ready"}
+        record_ci_project_evidence(
+            session,
+            project_id=project_id,
+            actor=actor,
+            bill=bill,
+            interval=interval,
+            bill_object=bill_object,
+            interval_object=interval_object,
+            inspection_result=first_inspection,
+        )
+        assert project.design_price_preview_json is None
+
+    with session_factory.begin() as session:
+        project = session.get(CiProjectModel, project_id)
+        assert project is not None
+        project.design_price_preview_json = {"status": "ready"}
+        update_ci_project_evidence_inspection(
+            session,
+            project_id=project_id,
+            actor=actor,
+            inspection_result=_saved_evidence_inspection("reviewed"),
+        )
+        assert project.design_price_preview_json is None
+
+
+def test_get_evidence_restores_legacy_snapshot_without_lazy_upgrade(
     tmp_path, monkeypatch
 ) -> None:
-    database_url = sqlite_url_for_path(tmp_path / "lazy-upgrade-current.sqlite3")
-    object_store_root = tmp_path / "lazy-upgrade-current-objects"
+    database_url = sqlite_url_for_path(tmp_path / "read-only-legacy-evidence.sqlite3")
+    object_store_root = tmp_path / "read-only-legacy-evidence-objects"
     session_factory = create_sqlite_session_factory(database_url)
     actor = local_actor()
     source_inspection = _saved_evidence_inspection("source-v9")
-    upgraded_inspection = _saved_evidence_inspection(
-        "upgraded-v10", contract_version="ci_evidence_intake_v10"
-    )
     monkeypatch.setattr(
         "api.ci_routes.inspect_ci_evidence_pair",
         lambda _bill, _interval, **_kwargs: source_inspection,
-    )
-    monkeypatch.setattr(
-        "api.ci_routes.enrich_ci_evidence_tariff_summary",
-        lambda inspection, interval: (
-            upgraded_inspection
-            if inspection["marker"] == "source-v9" and interval == b"source-interval"
-            else inspection
-        ),
-    )
-    captured_tokens: list[str] = []
-
-    def compare_and_swap_spy(*args, expected_saved_at: str, **kwargs) -> bool:
-        captured_tokens.append(expected_saved_at)
-        return update_ci_project_evidence_inspection_if_current(
-            *args, expected_saved_at=expected_saved_at, **kwargs
-        )
-
-    monkeypatch.setattr(
-        "api.ci_routes.update_ci_project_evidence_inspection_if_current",
-        compare_and_swap_spy,
     )
 
     with create_test_client(
@@ -185,36 +214,58 @@ def test_lazy_evidence_upgrade_updates_when_saved_at_token_is_current(
             before = ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
-        current_saved_at = before["evidence"]["saved_at"]
+        forbidden_calls: list[str] = []
 
-        upgraded = client.get(f"{project_url}/evidence-intake")
+        def forbid_call(name: str):
+            def fail(*_args, **_kwargs):
+                forbidden_calls.append(name)
+                raise AssertionError(f"GET evidence-intake called {name}")
 
-        assert upgraded.status_code == 200
-        assert upgraded.json()["evidence"]["inspection"] == upgraded_inspection
-        assert captured_tokens == [current_saved_at]
+            return fail
+
+        import api.ci_routes as ci_routes
+
+        monkeypatch.setattr(
+            ci_routes,
+            "load_ci_project_evidence_sources",
+            forbid_call("source loading"),
+        )
+        monkeypatch.setattr(
+            ci_routes,
+            "enrich_ci_evidence_tariff_summary",
+            forbid_call("tariff enrichment"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ci_routes,
+            "update_ci_project_evidence_inspection_if_current",
+            forbid_call("inspection write"),
+            raising=False,
+        )
+
+        restored = client.get(f"{project_url}/evidence-intake")
+
+        assert restored.status_code == 200
+        assert restored.json() == before
+        assert forbidden_calls == []
         with session_factory() as session:
             persisted = ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
-        assert persisted["evidence"]["inspection"] == upgraded_inspection
-        assert persisted["evidence"]["saved_at"] != current_saved_at
+        assert persisted == before
 
 
-def test_lazy_evidence_upgrade_stale_token_cannot_overwrite_newer_evidence(
+def test_get_evidence_does_not_extract_or_write_missing_legacy_site_address(
     tmp_path, monkeypatch
 ) -> None:
-    database_url = sqlite_url_for_path(tmp_path / "lazy-upgrade-stale.sqlite3")
-    object_store_root = tmp_path / "lazy-upgrade-stale-objects"
+    database_url = sqlite_url_for_path(tmp_path / "read-only-v7-evidence.sqlite3")
+    object_store_root = tmp_path / "read-only-v7-evidence-objects"
     session_factory = create_sqlite_session_factory(database_url)
-    object_store = FilesystemObjectStore(object_store_root)
     actor = local_actor()
-    source_inspection = _saved_evidence_inspection("source-v9")
-    stale_upgrade = _saved_evidence_inspection(
-        "stale-upgrade", contract_version="ci_evidence_intake_v10"
+    source_inspection = _saved_evidence_inspection(
+        "source-v7", contract_version="ci_evidence_intake_v7"
     )
-    newer_inspection = _saved_evidence_inspection(
-        "newer-evidence", contract_version="ci_evidence_intake_v10"
-    )
+    source_inspection["bill"].pop("site_address")
     monkeypatch.setattr(
         "api.ci_routes.inspect_ci_evidence_pair",
         lambda _bill, _interval, **_kwargs: source_inspection,
@@ -241,60 +292,51 @@ def test_lazy_evidence_upgrade_stale_token_cannot_overwrite_newer_evidence(
             before = ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
-        stale_saved_at = before["evidence"]["saved_at"]
+        forbidden_calls: list[str] = []
 
-        def replace_evidence_during_upgrade(
-            inspection: dict[str, object], interval: bytes
-        ) -> dict[str, object]:
-            assert inspection["marker"] == "source-v9"
-            assert interval == b"source-interval"
-            bill_source = CiEvidenceSource(
-                "newer.pdf", "application/pdf", b"newer-bill"
-            )
-            interval_source = CiEvidenceSource(
-                "newer.csv", "text/csv", b"newer-interval"
-            )
-            bill_object, interval_object = store_ci_project_evidence_files(
-                object_store,
-                project_id=project_id,
-                bill=bill_source,
-                interval=interval_source,
-            )
-            with session_factory() as session:
-                with session.begin():
-                    old_keys = record_ci_project_evidence(
-                        session,
-                        project_id=project_id,
-                        actor=actor,
-                        bill=bill_source,
-                        interval=interval_source,
-                        bill_object=bill_object,
-                        interval_object=interval_object,
-                        inspection_result=newer_inspection,
-                    )
-            for old_key in old_keys:
-                object_store.delete(old_key)
-            return stale_upgrade
+        def forbid_call(name: str):
+            def fail(*_args, **_kwargs):
+                forbidden_calls.append(name)
+                raise AssertionError(f"GET evidence-intake called {name}")
+
+            return fail
+
+        import api.ci_routes as ci_routes
 
         monkeypatch.setattr(
-            "api.ci_routes.enrich_ci_evidence_tariff_summary",
-            replace_evidence_during_upgrade,
+            ci_routes,
+            "load_ci_project_evidence_sources",
+            forbid_call("source loading"),
+        )
+        monkeypatch.setattr(
+            ci_routes,
+            "extract_ci_site_address",
+            forbid_call("site-address extraction"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ci_routes,
+            "enrich_ci_evidence_tariff_summary",
+            forbid_call("tariff enrichment"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ci_routes,
+            "update_ci_project_evidence_inspection_if_current",
+            forbid_call("inspection write"),
+            raising=False,
         )
 
         restored = client.get(f"{project_url}/evidence-intake")
 
         assert restored.status_code == 200
-        state = restored.json()
-        assert state["evidence"]["inspection"] == newer_inspection
-        assert state["evidence"]["files"]["bill"]["filename"] == "newer.pdf"
-        assert state["evidence"]["files"]["interval"]["filename"] == "newer.csv"
-        assert state["evidence"]["saved_at"] != stale_saved_at
+        assert restored.json() == before
+        assert forbidden_calls == []
         with session_factory() as session:
             persisted = ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
-        assert persisted["evidence"]["inspection"] == newer_inspection
-        assert persisted["evidence"]["files"] == state["evidence"]["files"]
+        assert persisted == before
 
 
 def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(

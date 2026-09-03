@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CiReadinessPage } from "./ci-readiness-page";
 import { CiProductShell } from "./ci-product-shell";
+import { createCiQueryClient } from "./ci-query-client";
 import { CiWorkspaceProvider } from "./ci-workspace-context";
 import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
 
@@ -141,15 +142,34 @@ const approvedSolarStcState: CiProjectRebateProfileState = {
   site_evidence: { detected_site_address: "10 Collins Street Melbourne VIC, 3000", state_code: "VIC", postcode: "3000" },
 };
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); window.sessionStorage.clear(); vi.unstubAllGlobals(); });
 
 function renderPage() {
-  render(<QueryClientProvider client={new QueryClient()}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
+  return render(<QueryClientProvider client={createCiQueryClient()}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
 }
 
-function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture, holdAnalysis = false, failStcSave = false, nextGeneratedDesign: typeof generatedDesign | null = null) {
+type MockApiOverrides = {
+  feasibilityPost?: () => Response | Promise<Response>;
+  pricePreview?: (readNumber: number, payload: Record<string, unknown>) => Response | Promise<Response>;
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+function fullAnalysisPosts(fetchMock: ReturnType<typeof vi.fn>) {
+  const suffixes = ["/design-feasibility", "/tariff-replay", "/annual-financial-comparison"];
+  return fetchMock.mock.calls.filter(([input, init]) => (
+    init?.method === "POST" && suffixes.some((suffix) => String(input).endsWith(suffix))
+  ));
+}
+
+function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture, holdAnalysis = false, failStcSave = false, nextGeneratedDesign: typeof generatedDesign | null = null, overrides: MockApiOverrides = {}) {
   let currentSavedDesign = savedDesign;
   let currentRebateState = rebateState;
+  let pricePreviewReads = 0;
   const applyStcSettings = (body: Record<string, unknown>) => {
     const nextProfile = structuredClone(currentRebateState.profile ?? currentRebateState.suggested_profile);
     nextProfile.programs.solar_stc.enabled = Boolean(body.solar_stc_enabled);
@@ -191,33 +211,39 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
       return new Response(JSON.stringify(currentSavedDesign), { status: 200 });
     }
     if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(currentSavedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: currentSavedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
-    if (path.endsWith("/design-price-preview") && currentSavedDesign) return new Response(JSON.stringify({
-      contract_version: "ci_design_price_preview_v1",
-      project_id: path.includes("project-2") ? "project-2" : "project-1",
-      status: "ready",
-      pricing_basis: "workspace_device_profile_less_approved_rebates",
-      device_profile_sha256: "c".repeat(64),
-      rebate_profile_sha256: currentRebateState.status === "approved" ? "d".repeat(64) : null,
-      equipment_selection: deviceProfileFixture.default_equipment_selection,
-      candidate_count: currentSavedDesign.candidate_count,
-      solutions: currentSavedDesign.candidates.map((candidate, index) => ({
-        scenario_id: candidate.scenario_id,
-        label: candidate.label ?? `Option ${index + 1}`,
-        pv_capacity_kwp_dc: candidate.pv_capacity_kwp_dc,
-        battery_capacity_kwh: candidate.nominal_capacity_kwh,
-        inverter_capacity_kw_ac: candidate.pv_inverter_capacity_kw_ac,
-        gross_capex_aud_ex_gst: 100_000 + index * 10_000,
-        upfront_rebate_aud_ex_gst: 10_000,
-        net_capex_aud_ex_gst: 90_000 + index * 10_000,
-        capex_breakdown_aud_ex_gst: { pv_aud: 50_000 + index * 10_000, battery_aud: 40_000, inverter_aud: 10_000 },
-        rebate_calculation: { scenario_id: candidate.scenario_id, customer_facing_permission: false },
-      })),
-      quotation_override_basis: "Entered quotation replaces modelled Net CAPEX.",
-      currency_values_permitted: true,
-      customer_facing_permission: false,
-      recommendation_permitted: false,
-    }), { status: 200 });
+    if (path.endsWith("/design-price-preview") && currentSavedDesign) {
+      const payload = {
+        contract_version: "ci_design_price_preview_v1",
+        project_id: path.includes("project-2") ? "project-2" : "project-1",
+        status: "ready",
+        pricing_basis: "workspace_device_profile_less_approved_rebates",
+        design_candidates_sha256: "b".repeat(64),
+        device_profile_sha256: "c".repeat(64),
+        rebate_profile_sha256: currentRebateState.status === "approved" ? "d".repeat(64) : null,
+        equipment_selection: deviceProfileFixture.default_equipment_selection,
+        candidate_count: currentSavedDesign.candidate_count,
+        solutions: currentSavedDesign.candidates.map((candidate, index) => ({
+          scenario_id: candidate.scenario_id,
+          label: candidate.label ?? `Option ${index + 1}`,
+          pv_capacity_kwp_dc: candidate.pv_capacity_kwp_dc,
+          battery_capacity_kwh: candidate.nominal_capacity_kwh,
+          inverter_capacity_kw_ac: candidate.pv_inverter_capacity_kw_ac,
+          gross_capex_aud_ex_gst: 100_000 + index * 10_000,
+          upfront_rebate_aud_ex_gst: 10_000,
+          net_capex_aud_ex_gst: 90_000 + index * 10_000,
+          capex_breakdown_aud_ex_gst: { pv_aud: 50_000 + index * 10_000, battery_aud: 40_000, inverter_aud: 10_000 },
+          rebate_calculation: { scenario_id: candidate.scenario_id, customer_facing_permission: false },
+        })),
+        quotation_override_basis: "Entered quotation replaces modelled Net CAPEX.",
+        currency_values_permitted: true,
+        customer_facing_permission: false,
+        recommendation_permitted: false,
+      };
+      pricePreviewReads += 1;
+      return overrides.pricePreview?.(pricePreviewReads, payload) ?? new Response(JSON.stringify(payload), { status: 200 });
+    }
     if (path.endsWith("/design-feasibility")) {
+      if (init?.method === "POST" && overrides.feasibilityPost) return overrides.feasibilityPost();
       if (init?.method === "POST" && holdAnalysis) return new Promise<Response>((resolve) => window.setTimeout(() => resolve(new Response(JSON.stringify({ detail: { message: "Synthetic delayed analysis stopped." } }), { status: 422 })), 500));
       return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     }
@@ -241,7 +267,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
 
 describe("C&I project workspace", () => {
   it("shows projects on the left and all four analysis modules on top", async () => {
-    mockApi();
+    const fetchMock = mockApi();
     renderPage();
     expect(await screen.findByRole("region", { name: "Evidence sources" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open project Commercial feasibility" })).toBeTruthy();
@@ -251,6 +277,8 @@ describe("C&I project workspace", () => {
       expect(screen.getByRole("button", { name: label })).toBeTruthy();
     }
     expect(screen.queryByRole("button", { name: /Comparison/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open project calculation Handbook" })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/calculation-handbook"))).toBe(false);
     expect(screen.getByRole("button", { name: "Next: Solution Generator" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Previous:/ })).toBeNull();
   });
@@ -386,6 +414,56 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("Solution 2")).toBeTruthy();
   });
 
+  it("keeps saved module data cached while navigating without an explicit action", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi([readyProject], generatedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+    const designReads = fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-candidates") && !init?.method).length;
+    const priceReads = fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-price-preview") && !init?.method).length;
+
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
+    await screen.findByRole("heading", { name: "Scenario dispatch analysis" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-candidates") && !init?.method)).toHaveLength(designReads);
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-price-preview") && !init?.method)).toHaveLength(priceReads);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
+  it("restores solution selections and quotations after module navigation and refresh", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi([readyProject], generatedDesign);
+    const firstRender = renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+
+    await user.click(screen.getByLabelText("Select Solution 2"));
+    const quote = screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement;
+    await user.clear(quote);
+    await user.type(quote, "123456");
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
+    await screen.findByRole("heading", { name: "Scenario dispatch analysis" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+    expect((screen.getByLabelText("Select Solution 2") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("123456");
+
+    firstRender.unmount();
+    renderPage();
+    await screen.findByRole("heading", { name: "Solutions" });
+    expect((screen.getByLabelText("Select Solution 2") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("123456");
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
   it("lists every feasible Net CAPEX quotation after STC settings", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
@@ -513,6 +591,10 @@ describe("C&I project workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
     await screen.findByRole("heading", { name: "Solutions" });
+    await user.click(screen.getByLabelText("Select Solution 2"));
+    const editedQuote = screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement;
+    await user.clear(editedQuote);
+    await user.type(editedQuote, "123456");
     await user.click(screen.getByRole("button", { name: /Save configuration & generate/ }));
 
     await waitFor(() => {
@@ -617,6 +699,73 @@ describe("C&I project workspace", () => {
     expect(screen.queryByText("Solution 2")).toBeNull();
   });
 
+  it("drops queued and remembered prices when the current Net CAPEX revision changes", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi(
+      [readyProject],
+      generatedDesign,
+      rebateStateFixture,
+      false,
+      false,
+      null,
+      {
+        pricePreview: (readNumber, payload) => new Response(JSON.stringify(
+          readNumber === 1 ? payload : { ...payload, design_candidates_sha256: "e".repeat(64) },
+        ), { status: 200 }),
+      },
+    );
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+
+    const quote = screen.getByLabelText("Quoted Net CAPEX for Solution 1");
+    await user.clear(quote);
+    await user.type(quote, "123456");
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+
+    expect(await screen.findByText("The Net CAPEX snapshot changed. Return to Solution Generator and confirm the current quotations.")).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-price-preview") && !init?.method)).toHaveLength(2);
+    expect(fullAnalysisPosts(fetchMock)).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
+    await screen.findByRole("heading", { name: "Scenario dispatch analysis" });
+
+    expect(screen.queryByRole("button", { name: /Run full analysis/i })).toBeNull();
+    expect(screen.getByRole("button", { name: "Run 2 solutions" })).toBeTruthy();
+    expect(fullAnalysisPosts(fetchMock)).toHaveLength(0);
+  });
+
+  it("clears a launch without POSTing when the current Net CAPEX snapshot returns 409", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi(
+      [readyProject],
+      generatedDesign,
+      rebateStateFixture,
+      false,
+      false,
+      null,
+      {
+        pricePreview: (readNumber, payload) => readNumber === 1
+          ? new Response(JSON.stringify(payload), { status: 200 })
+          : new Response(JSON.stringify({ detail: { code: "ci_design_price_preview_stale", message: "Equipment, rebate, evidence or solution inputs changed." } }), { status: 409 }),
+      },
+    );
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+
+    expect(await screen.findByText("Equipment, rebate, evidence or solution inputs changed.")).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-price-preview") && !init?.method)).toHaveLength(2);
+    expect(fullAnalysisPosts(fetchMock)).toHaveLength(0);
+    expect(await screen.findByRole("button", { name: "Run 2 solutions" })).toBeTruthy();
+  });
+
   it("opens Scenario Analysis immediately and displays analysis progress", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
@@ -631,6 +780,55 @@ describe("C&I project workspace", () => {
     expect(await screen.findByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
     expect((await screen.findByRole("progressbar", { name: "Running scenario dispatch" })).getAttribute("aria-valuenow")).toBe("12");
     expect(screen.queryByText(/Processing 2 saved solutions/)).toBeNull();
+  });
+
+  it("keeps an in-flight full analysis pending across module remounts", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<void>();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi(
+      [readyProject],
+      generatedDesign,
+      rebateStateFixture,
+      false,
+      false,
+      null,
+      {
+        feasibilityPost: async () => {
+          await gate.promise;
+          return new Response(JSON.stringify({ detail: { message: "Synthetic delayed analysis stopped." } }), { status: 422 });
+        },
+      },
+    );
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "Solutions" });
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+    await screen.findByRole("progressbar", { name: "Running scenario dispatch" });
+    await waitFor(() => expect(fullAnalysisPosts(fetchMock)).toHaveLength(1));
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+      await screen.findByRole("heading", { name: "Solutions" });
+      const generatorButton = screen.getByRole("button", { name: "Analysis running…" });
+      expect(generatorButton.hasAttribute("disabled")).toBe(true);
+      await user.click(generatorButton);
+      expect(fullAnalysisPosts(fetchMock)).toHaveLength(1);
+
+      await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
+      await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
+      expect(await screen.findByRole("progressbar", { name: "Running scenario dispatch" })).toBeTruthy();
+      const pendingButton = screen.getByRole("button", { name: "Full analysis running…" });
+      expect(pendingButton.hasAttribute("disabled")).toBe(true);
+      await user.click(pendingButton);
+      expect(fullAnalysisPosts(fetchMock)).toHaveLength(1);
+    } finally {
+      gate.resolve(undefined);
+    }
+
+    expect(await screen.findByText("Synthetic delayed analysis stopped.")).toBeTruthy();
+    expect(fullAnalysisPosts(fetchMock)).toHaveLength(1);
   });
 
   it("can retry the complete analysis after a failed stage", async () => {

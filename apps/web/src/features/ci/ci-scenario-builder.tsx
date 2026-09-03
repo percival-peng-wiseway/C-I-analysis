@@ -201,6 +201,9 @@ export function CiScenarioBuilder({
         : candidateUpperBound > MAX_SOLUTIONS
           ? `Maximum ${MAX_SOLUTIONS} solutions. Current configuration: ${candidateUpperBound}.`
           : null;
+  const generationBlocker = candidateLimitError ?? (!request
+    ? "Complete the site resource, published profiles, capacity ranges and connection limits."
+    : null);
   const effectiveYield = effectiveSpecificYield(site);
 
   const selectInverterProfile = (profileId: string) => {
@@ -221,6 +224,7 @@ export function CiScenarioBuilder({
       <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Configure solutions</h2>
 
       <form
+        aria-busy={isPending}
         className="mt-7 space-y-8"
         onSubmit={(event) => {
           event.preventDefault();
@@ -299,10 +303,10 @@ export function CiScenarioBuilder({
 
         <div className="flex flex-wrap items-center justify-end gap-4 border-t border-slate-200 pt-5">
           <div className="flex flex-wrap items-center justify-end gap-3">
-            {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
-            {candidateLimitError ? <p className="max-w-xl text-sm text-amber-800">{candidateLimitError}</p> : null}
-            <Button className="min-w-64" disabled={!request || Boolean(candidateLimitError) || isPending} type="submit">
-              {isPending ? "Saving & generating in Python…" : "Save configuration & generate solutions"}
+            {error ? <p className="max-w-xl text-sm text-destructive" role="alert">{error}</p> : null}
+            {generationBlocker ? <p className="max-w-xl text-right text-sm font-medium text-amber-800" id="generation-blocker" role="status">{generationBlocker}</p> : null}
+            <Button aria-describedby={generationBlocker ? "generation-blocker" : undefined} aria-label={isPending ? "Saving and generating solutions" : "Save configuration & generate solutions"} className="min-w-48" disabled={!request || Boolean(candidateLimitError) || isPending} type="submit">
+              {isPending ? "Generating solutions…" : "Generate solutions"}
               <Play className="size-4" />
             </Button>
           </div>

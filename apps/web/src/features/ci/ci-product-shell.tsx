@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   BatteryCharging,
+  BookOpenText,
   Building2,
   ChevronRight,
   CirclePlus,
@@ -22,6 +23,10 @@ import {
 import { useCiWorkspace, type CiWorkspaceStage } from "./ci-workspace-context";
 import { CiSettingsPanel } from "./ci-settings-panel";
 
+const LazyCiHandbookPanel = lazy(() => import("./ci-handbook-panel").then((module) => ({
+  default: module.CiHandbookPanel,
+})));
+
 const modules: Array<{ stage: CiWorkspaceStage; label: string; icon: typeof SunMedium }> = [
   { stage: "evidence", label: "Evidence", icon: FolderKanban },
   { stage: "physical_feasibility", label: "Solution Generator", icon: SunMedium },
@@ -35,6 +40,7 @@ export function CiProductShell({ children }: { children: ReactNode }) {
   const projects = useQuery({ queryKey: ciProjectsQueryKey, queryFn: () => listCiProjects() });
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [handbookOpen, setHandbookOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const createProject = useMutation({
     mutationFn: (name: string) => createCiProject(name),
@@ -47,18 +53,30 @@ export function CiProductShell({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (!workspace.activeProject && projects.data?.length) {
+    if (!projects.data?.length) return;
+    const restoredProject = projects.data.find((project) => project.project_id === workspace.activeProject?.projectId);
+    if (!restoredProject) {
       workspace.openProjectStage(toActiveProject(projects.data[0]));
+      return;
     }
-  }, [projects.data, workspace.activeProject]);
+    const restored = toActiveProject(restoredProject);
+    if (
+      workspace.activeProject?.displayName !== restored.displayName
+      || workspace.activeProject.setupReady !== restored.setupReady
+      || workspace.activeProject.designReady !== restored.designReady
+    ) {
+      workspace.openProjectStage(restored, workspace.stage);
+    }
+  }, [projects.data, workspace.activeProject, workspace.stage]);
 
   const active = projects.data?.find((project) => project.project_id === workspace.activeProject?.projectId) ?? null;
   return (
-    <div className="ci-app min-h-screen bg-slate-50 text-slate-950">
+    <div className="ci-app min-h-[100dvh] bg-slate-50 text-slate-950">
+      <a className="sr-only fixed left-4 top-3 z-50 rounded-md bg-white px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg focus:not-sr-only" href="#analysis-content">Skip to analysis content</a>
       <header className="ci-app-header border-b border-white/10 bg-[#071525] text-white">
-        <div className="mx-auto flex max-w-[1800px] items-center justify-between gap-4 px-4 py-3 sm:px-6">
+        <div className="ci-app-bar mx-auto flex max-w-[1800px] items-center justify-between gap-4 px-4 py-3 sm:px-6">
           <a className="flex items-center gap-3" href="/" onClick={() => workspace.setStage("evidence")}>
-            <span className="relative grid size-10 place-items-center overflow-hidden rounded-xl bg-gradient-to-br from-cyan-300 to-emerald-300 text-slate-950 shadow-lg shadow-cyan-950/30">
+            <span className="relative grid size-10 place-items-center overflow-hidden rounded-lg bg-cyan-300 text-slate-950 shadow-sm shadow-black/20">
               <Building2 className="size-4" />
               <BatteryCharging className="absolute -bottom-1 -right-1 size-4 rounded-full bg-[#071525] p-0.5 text-cyan-200" />
             </span>
@@ -68,9 +86,9 @@ export function CiProductShell({ children }: { children: ReactNode }) {
       </header>
 
       <div className="mx-auto grid min-w-0 max-w-[1800px] grid-cols-[minmax(0,1fr)] lg:grid-cols-[270px_minmax(0,1fr)]">
-        <aside aria-label="Project workspace" className="border-b border-slate-200 bg-white lg:sticky lg:top-[65px] lg:flex lg:h-[calc(100vh-65px)] lg:min-h-0 lg:self-start lg:flex-col lg:overflow-hidden lg:border-b-0 lg:border-r">
-          <div className="border-b border-slate-200 px-5 py-5">
-            <div><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">Workspace</p><h2 className="mt-1 font-semibold text-slate-950">Projects</h2></div>
+        <aside aria-label="Project workspace" className="ci-project-sidebar border-b border-slate-200 bg-white lg:sticky lg:top-16 lg:flex lg:h-[calc(100dvh-64px)] lg:min-h-0 lg:self-start lg:flex-col lg:overflow-hidden lg:border-b-0 lg:border-r">
+          <div className="ci-project-sidebar-header border-b border-slate-200 px-5 py-5">
+            <div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Workspace</p><h2 className="mt-1 font-semibold text-slate-950">Projects</h2></div>
           </div>
 
           <div className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:p-4">
@@ -82,7 +100,7 @@ export function CiProductShell({ children }: { children: ReactNode }) {
               </form>
             ) : null}
 
-            <nav aria-label="Projects" className={`${creating ? "mt-3" : ""} flex gap-2 overflow-x-auto lg:block lg:space-y-2 lg:overflow-visible`}>
+            <nav aria-label="Projects" className={`${creating ? "mt-3" : ""} ci-project-list ci-scroll-row flex gap-2 overflow-x-auto lg:block lg:space-y-2 lg:overflow-visible`}>
               {projects.isPending ? <p className="px-2 py-3 text-xs text-slate-500">Loading projects…</p> : null}
               {projects.isError ? <p className="px-2 py-3 text-xs text-red-700">Projects unavailable.</p> : null}
               {projects.data?.map((project) => {
@@ -91,7 +109,7 @@ export function CiProductShell({ children }: { children: ReactNode }) {
                   <button
                     aria-current={selected ? "page" : undefined}
                     aria-label={`Open project ${project.display_name}`}
-                    className={`group flex min-w-52 items-center gap-3 rounded-xl border px-3 py-3 text-left transition lg:w-full lg:min-w-0 ${selected ? "border-cyan-200 bg-cyan-50 text-cyan-950 shadow-sm" : "border-transparent bg-white text-slate-700 hover:border-slate-200 hover:bg-slate-50"}`}
+                    className={`ci-project-link group flex min-w-52 items-center gap-3 rounded-lg border px-3 py-3 text-left transition lg:w-full lg:min-w-0 ${selected ? "border-cyan-200 bg-cyan-50 text-cyan-950 shadow-sm" : "border-transparent bg-white text-slate-700 hover:border-slate-200 hover:bg-slate-50"}`}
                     key={project.project_id}
                     onClick={() => workspace.openProjectStage(toActiveProject(project))}
                     type="button"
@@ -108,24 +126,23 @@ export function CiProductShell({ children }: { children: ReactNode }) {
             {!creating ? <button className="mt-3 flex w-full items-center gap-3 rounded-xl border border-dashed border-slate-300 px-3 py-3 text-left text-sm font-medium text-slate-600 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-900" onClick={() => setCreating(true)} type="button"><CirclePlus className="size-5 text-cyan-700" />New project</button> : null}
           </div>
           <div className="border-t border-slate-200 bg-white p-3 lg:shrink-0 lg:p-4">
-            <button aria-label="Open settings" className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-950" onClick={() => setSettingsOpen(true)} type="button"><span className="grid size-9 place-items-center rounded-lg bg-slate-100 text-slate-600"><Settings2 className="size-4" /></span><span className="min-w-0 flex-1"><strong className="block text-sm">Settings</strong><small className="mt-0.5 block text-[11px] font-normal text-slate-400">Device prices &amp; finance</small></span><ChevronRight className="size-4 text-slate-300" /></button>
+            <button aria-label="Open settings" className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-950" onClick={() => { setHandbookOpen(false); setSettingsOpen(true); }} type="button"><span className="grid size-9 place-items-center rounded-lg bg-slate-100 text-slate-600"><Settings2 className="size-4" /></span><span className="min-w-0 flex-1"><strong className="block text-sm">Settings</strong><small className="mt-0.5 block text-xs font-normal text-slate-500">Device prices &amp; finance</small></span><ChevronRight className="size-4 text-slate-300" /></button>
           </div>
         </aside>
 
         <div className="min-w-0">
-          <section className="border-b border-slate-200 bg-white px-4 pt-4 sm:px-6 sm:pt-5">
+          <section className="ci-project-toolbar border-b border-slate-200 bg-white px-4 pt-4 sm:px-6 sm:pt-5 lg:sticky lg:top-16 lg:z-30">
             <div className="mb-4">
-              <div><p className="text-[10px] font-semibold uppercase tracking-[.18em] text-cyan-700">Active project</p><h1 className="mt-1 text-2xl font-semibold text-slate-950">{active?.display_name ?? "Select or create a project"}</h1></div>
+              <div><p className="text-xs font-semibold uppercase tracking-[.12em] text-cyan-700">Active project</p><h1 className="mt-1 text-xl font-semibold tracking-[-0.01em] text-slate-950 sm:text-2xl">{active?.display_name ?? "Select or create a project"}</h1></div>
             </div>
-            <div className="overflow-x-auto"><nav aria-label="Analysis modules" className="grid min-w-[580px] grid-cols-4 gap-1 lg:min-w-0">
+            <div><nav aria-label="Analysis modules" className="ci-module-tabs grid grid-cols-2 gap-2 pb-4 sm:grid-cols-4">
               {modules.map((module) => {
                 const Icon = module.icon;
                 const selected = workspace.stage === module.stage;
                 return (
-                  <button aria-current={selected ? "page" : undefined} className={`relative flex min-h-16 items-center gap-2.5 rounded-t-xl border-x border-t px-3 py-2.5 text-left transition ${selected ? "border-slate-200 bg-slate-50 text-slate-950" : "border-transparent bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`} disabled={!active} key={module.stage} onClick={() => workspace.setStage(module.stage)} type="button">
+                  <button aria-current={selected ? "page" : undefined} className={`ci-module-tab relative flex min-h-14 items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition ${selected ? "border-cyan-200 bg-cyan-50 text-cyan-950 shadow-sm" : "border-transparent bg-white text-slate-600 hover:border-slate-200 hover:bg-slate-50 hover:text-slate-900"}`} disabled={!active} key={module.stage} onClick={() => workspace.setStage(module.stage)} type="button">
                     <span className={`grid size-8 shrink-0 place-items-center rounded-lg ${selected ? "bg-cyan-100 text-cyan-800" : "bg-slate-100 text-slate-500"}`}><Icon className="size-4" /></span>
-                    <strong className="min-w-0 text-sm font-bold leading-5 xl:text-base">{module.label}</strong>
-                    {selected ? <span className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-cyan-500" /> : null}
+                    <strong className="min-w-0 text-sm font-semibold leading-5 xl:text-base">{module.label}</strong>
                   </button>
                 );
               })}
@@ -134,7 +151,25 @@ export function CiProductShell({ children }: { children: ReactNode }) {
           <div className="min-w-0">{children}</div>
         </div>
       </div>
+      {active ? <Button aria-label="Open project calculation Handbook" className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 z-30 h-11 rounded-xl px-4 shadow-lg shadow-slate-950/20 sm:right-6" onClick={() => { setSettingsOpen(false); setHandbookOpen(true); }} type="button"><BookOpenText className="size-4" />Handbook</Button> : null}
       {settingsOpen ? <CiSettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
+      {handbookOpen && active ? (
+        <Suspense fallback={<HandbookPanelFallback onClose={() => setHandbookOpen(false)} />}>
+          <LazyCiHandbookPanel onClose={() => setHandbookOpen(false)} open />
+        </Suspense>
+      ) : null}
+    </div>
+  );
+}
+
+function HandbookPanelFallback({ onClose }: { onClose: () => void }) {
+  return (
+    <div aria-label="Loading Handbook" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4 backdrop-blur-[2px]" role="dialog">
+      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 text-center shadow-2xl">
+        <BookOpenText className="mx-auto size-7 animate-pulse text-cyan-700 motion-reduce:animate-none" />
+        <p aria-live="polite" className="mt-3 text-sm font-semibold text-slate-900">Loading Handbook…</p>
+        <Button className="mt-4" onClick={onClose} type="button" variant="outline">Cancel</Button>
+      </div>
     </div>
   );
 }

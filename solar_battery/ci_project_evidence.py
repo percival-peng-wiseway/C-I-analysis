@@ -60,7 +60,7 @@ def record_ci_project_evidence(
     interval_object: StoredObject,
     inspection_result: dict[str, object],
 ) -> tuple[str, ...]:
-    require_ci_project(session, project_id=project_id, actor=actor)
+    project = require_ci_project(session, project_id=project_id, actor=actor)
     row = session.scalar(
         select(CiProjectEvidenceModel).where(
             CiProjectEvidenceModel.project_id == project_id,
@@ -107,6 +107,12 @@ def record_ci_project_evidence(
         row.inspection_result_json = inspection_result
         row.updated_by_actor_id = actor.actor_id
         row.updated_at = now
+    # Evidence is an input to eligibility and downstream pricing. Keep the
+    # generated design, but require an explicit Generate action to create a
+    # new price snapshot for the replacement source files.
+    project.design_price_preview_json = None
+    project.updated_by_actor_id = actor.actor_id
+    project.updated_at = now
     session.flush()
     return old_keys
 
@@ -118,10 +124,15 @@ def update_ci_project_evidence_inspection(
     actor: LocalActorContext,
     inspection_result: dict[str, object],
 ) -> None:
+    project = require_ci_project(session, project_id=project_id, actor=actor)
     row = _require_evidence(session, project_id=project_id, actor=actor)
+    now = datetime.now(timezone.utc)
     row.inspection_result_json = inspection_result
     row.updated_by_actor_id = actor.actor_id
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = now
+    project.design_price_preview_json = None
+    project.updated_by_actor_id = actor.actor_id
+    project.updated_at = now
     session.flush()
 
 

@@ -105,11 +105,32 @@ describe("CiSettingsPanel solution profile library", () => {
     releaseSave();
     expect(await screen.findByText(/Device profile saved/)).toBeTruthy();
   });
+
+  it("supports dialog focus, keyboard tab navigation, and Escape", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(readyState(deviceProfile())), { status: 200 })));
+
+    renderSettings(onClose);
+    await screen.findByRole("heading", { name: "Solution profile library" });
+    const close = screen.getByRole("button", { name: "Close settings panel" });
+    await waitFor(() => expect(document.activeElement).toBe(close));
+
+    const solutionProfiles = screen.getByRole("tab", { name: "Solution profiles" });
+    const equipmentAndFinance = screen.getByRole("tab", { name: "Equipment & finance" });
+    solutionProfiles.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(equipmentAndFinance);
+    expect(equipmentAndFinance.getAttribute("aria-selected")).toBe("true");
+
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });
 
-function renderSettings() {
+function renderSettings(onClose = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={client}><CiSettingsPanel onClose={vi.fn()} /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><CiSettingsPanel onClose={onClose} /></QueryClientProvider>);
 }
 
 function readyState(profile: CiDeviceProfile) {

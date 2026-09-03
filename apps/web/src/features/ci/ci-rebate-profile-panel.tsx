@@ -3,6 +3,7 @@ import { Check, Save } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useState, type KeyboardEvent } from "react";
 
 import { Button } from "@/components/ui/button";
+import { invalidateCiCalculationHandbook } from "@/features/ci/api/ci-calculation-handbook";
 import { ciDesignPricePreviewQueryKey } from "@/features/ci/api/ci-design-price-preview";
 import {
   ciProjectRebateProfileQueryKey,
@@ -44,7 +45,11 @@ export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { pro
       }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["ci-project-annual-financial-comparison", variables.targetProjectId] }),
-        queryClient.invalidateQueries({ queryKey: ciDesignPricePreviewQueryKey(variables.targetProjectId) }),
+        queryClient.resetQueries({
+          exact: true,
+          queryKey: ciDesignPricePreviewQueryKey(variables.targetProjectId),
+        }),
+        invalidateCiCalculationHandbook(queryClient, variables.targetProjectId),
       ]);
     },
   });

@@ -29,6 +29,7 @@ function payload() {
     project_id: "project-1",
     status: "ready",
     pricing_basis: "workspace_device_profile_less_approved_rebates",
+    design_candidates_sha256: "c".repeat(64),
     device_profile_sha256: "a".repeat(64),
     rebate_profile_sha256: null,
     equipment_selection: {

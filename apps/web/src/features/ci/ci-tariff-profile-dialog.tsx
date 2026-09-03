@@ -127,7 +127,7 @@ export function CiTariffProfileDialog({
               <p className="text-xs leading-5 text-slate-500">Import fills this draft only. Saving still requires server validation and approval.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <input accept="application/json,.json" aria-label="Import tariff profile JSON file" className="sr-only" onChange={(event) => void importJson(event, setDraft, setImportMessage)} ref={fileInputRef} type="file" />
+              <input accept="application/json,.json" aria-label="Import tariff profile JSON file" className="sr-only" onChange={(event) => void importJson(event, setDraft, setImportMessage)} ref={fileInputRef} tabIndex={-1} type="file" />
               <Button disabled={busy} onClick={() => fileInputRef.current?.click()} type="button" variant="outline"><Upload className="size-4" />Import JSON</Button>
               <Button disabled={busy || Boolean(validationMessage)} onClick={() => exportJson(draft)} type="button" variant="outline"><Download className="size-4" />Export JSON</Button>
             </div>

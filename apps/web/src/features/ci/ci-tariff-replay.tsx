@@ -20,6 +20,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { invalidateCiCalculationHandbook } from "@/features/ci/api/ci-calculation-handbook";
 import {
   ciProjectEvidenceQueryKey,
   fetchCiProjectEvidence,
@@ -167,6 +168,7 @@ export function CiTariffReplay({
         stale_reasons: [],
         result: financeResult,
       });
+      void invalidateCiCalculationHandbook(queryClient, project.project_id);
     },
   });
 
@@ -238,7 +240,7 @@ export function CiTariffReplay({
 
   return (
     <section aria-labelledby="tariff-replay-title" className="space-y-5">
-      <FinanceRunHeader canRun={canRun} count={design.data?.candidate_count ?? 0} hasResult={Boolean(result)} onRun={() => runReplay.mutate()} pending={runReplay.isPending} />
+      <FinanceRunHeader blockedCount={checks.filter((item) => !item.ready).length} canRun={canRun} count={design.data?.candidate_count ?? 0} hasResult={Boolean(result)} onRun={() => runReplay.mutate()} pending={runReplay.isPending} />
 
       {error ? <p aria-live="assertive" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{error}</p> : null}
       {replay.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved replay no longer matches the current project inputs. Run the scenarios again to refresh the annual bills.</p> : null}
@@ -609,8 +611,9 @@ function TariffBasis({ evidenceCode, profileLabel, result, scenario }: { evidenc
   return <div className="space-y-6"><section><h3 className="font-semibold text-slate-950">Evidence and calculation basis</h3><div className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 px-4">{rows.map(([label,value])=><div className="grid gap-1 py-3 text-sm sm:grid-cols-[190px_minmax(0,1fr)]" key={label}><dt className="text-slate-500">{label}</dt><dd className="font-medium text-slate-800">{value}</dd></div>)}</div></section><section><h3 className="font-semibold text-slate-950">Python assumptions</h3><ul className="mt-3 space-y-2">{result.assumptions.map((item)=><li className="flex gap-2 text-sm leading-6 text-slate-600" key={item}><span className="mt-2 size-1.5 shrink-0 rounded-full bg-cyan-500" />{item}</li>)}</ul></section></div>;
 }
 
-function FinanceRunHeader({ canRun, count, hasResult, onRun, pending }: { canRun: boolean; count: number; hasResult: boolean; onRun: () => void; pending: boolean }) {
-  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates Scenario Analysis, tariff and Finance for all {count} solutions.</p></div></div><Button disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Analysis running…" : hasResult ? "Re-run analysis" : "Start analysis"}</Button></header>;
+function FinanceRunHeader({ blockedCount = 0, canRun, count, hasResult, onRun, pending }: { blockedCount?: number; canRun: boolean; count: number; hasResult: boolean; onRun: () => void; pending: boolean }) {
+  const blockerId = blockedCount > 0 ? "finance-run-blocker" : undefined;
+  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates Scenario Analysis, tariff and Finance for all {count} solutions.</p></div></div><div className="flex flex-col items-end gap-2">{blockedCount > 0 ? <p className="text-xs font-semibold text-amber-800" id={blockerId} role="status">{blockedCount} {blockedCount === 1 ? "input" : "inputs"} required</p> : null}<Button aria-describedby={blockerId} disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin motion-reduce:animate-none" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Analysis running…" : hasResult ? "Re-run analysis" : "Start analysis"}</Button></div></header>;
 }
 
 function ReplayLoading() { return <section className="grid min-h-[420px] place-items-center rounded-xl border border-slate-200 bg-white"><div className="text-center"><RefreshCw className="mx-auto size-6 animate-spin text-cyan-700" /><h2 className="mt-4 font-semibold text-slate-950">Loading tariff replay</h2><p className="mt-1 text-sm text-slate-500">Checking project evidence and completed scenarios.</p></div></section>; }

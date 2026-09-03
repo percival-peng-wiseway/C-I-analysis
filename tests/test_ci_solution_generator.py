@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from api import ci_routes
 from api.ci_schemas import CiDesignCandidatesRequest
 from solar_battery.ci_design_context import validate_ci_design_context
 from solar_battery.ci_device_profile import (
@@ -732,6 +733,17 @@ def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready
     database_url = sqlite_url_for_path(tmp_path / "custom-solution-stc-binding.sqlite3")
     profile = suggested_ci_device_profile()
     profile_digest = device_profile_sha256(profile)
+    preview_calls = 0
+    calculate_preview = ci_routes.preview_ci_design_candidate_prices
+
+    def counted_preview(**kwargs):
+        nonlocal preview_calls
+        preview_calls += 1
+        return calculate_preview(**kwargs)
+
+    monkeypatch.setattr(
+        "api.ci_routes.preview_ci_design_candidate_prices", counted_preview
+    )
 
     def device_state(_session, *, actor):
         return {
@@ -835,6 +847,29 @@ def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready
             item["upfront_rebate_aud_ex_gst"] > 0
             for item in preview.json()["solutions"]
         )
+        restored_preview = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
+        )
+        assert restored_preview.status_code == 200, restored_preview.json()
+        assert restored_preview.json() == preview.json()
+        assert preview_calls == 2
+        changed_stc = client.put(
+            f"/api/commercial-industrial/projects/{project_id}"
+            "/rebate-profile/stc-settings",
+            json={
+                **_stc_settings(),
+                "solar_stc_price_aud_ex_gst": 40.0,
+            },
+        )
+        assert changed_stc.status_code == 200, changed_stc.json()
+        stale_preview = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
+        )
+        assert stale_preview.status_code == 409
+        assert stale_preview.json()["detail"]["code"] == (
+            "ci_design_price_preview_stale"
+        )
+        assert preview_calls == 2
 
     with session_factory() as session:
         project = session.get(CiProjectModel, UUID(project_id))
@@ -848,6 +883,37 @@ def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready
         assert calculation["design_candidates_sha256"] == canonical_sha256(
             project.design_candidates_json
         )
+        assert project.design_price_preview_json == preview.json()
+
+
+def test_price_preview_get_never_calculates_when_snapshot_is_missing(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "missing-price-preview.sqlite3")
+    preview_calls = 0
+
+    def unexpected_preview(**_kwargs):
+        nonlocal preview_calls
+        preview_calls += 1
+        raise AssertionError("GET must not calculate a Net CAPEX preview")
+
+    monkeypatch.setattr(
+        "api.ci_routes.preview_ci_design_candidate_prices", unexpected_preview
+    )
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "No saved price preview"},
+        )
+        assert created.status_code == 201
+        response = client.get(
+            "/api/commercial-industrial/projects/"
+            f"{created.json()['project_id']}/design-price-preview"
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "ci_design_price_preview_required"
+    assert preview_calls == 0
 
 
 def test_custom_route_rolls_back_candidate_when_atomic_stc_save_fails(

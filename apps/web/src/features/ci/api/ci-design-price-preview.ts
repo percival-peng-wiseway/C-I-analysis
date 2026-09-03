@@ -23,6 +23,7 @@ export interface CiDesignPricePreview {
   project_id: string;
   status: "ready";
   pricing_basis: "workspace_device_profile_less_approved_rebates";
+  design_candidates_sha256: string;
   device_profile_sha256: string;
   rebate_profile_sha256: string | null;
   equipment_selection: CiEquipmentSelection;
@@ -60,6 +61,7 @@ export function assertCiDesignPricePreview(value: unknown, projectId: string): C
     payload.project_id !== projectId ||
     payload.status !== "ready" ||
     payload.pricing_basis !== "workspace_device_profile_less_approved_rebates" ||
+    !isSha256(payload.design_candidates_sha256) ||
     !isSha256(payload.device_profile_sha256) ||
     !(payload.rebate_profile_sha256 === null || isSha256(payload.rebate_profile_sha256)) ||
     !Number.isInteger(payload.candidate_count) ||

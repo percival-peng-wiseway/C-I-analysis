@@ -37,7 +37,7 @@ describe("CiRebateProfilePanel", () => {
     const user = userEvent.setup();
     await screen.findByRole("heading", { name: "STC" });
 
-    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await user.click(await screen.findByLabelText("Include Solar STCs"));
     await user.clear(screen.getByLabelText("Solar STCs price"));
     await user.type(screen.getByLabelText("Solar STCs price"), "41.5");
     await user.click(screen.getByLabelText("Include Battery STCs"));
@@ -56,18 +56,15 @@ describe("CiRebateProfilePanel", () => {
     });
   });
 
-  it("waits for the active Net CAPEX preview to refresh before reporting saved", async () => {
+  it("invalidates the saved Net CAPEX snapshot after STC inputs change", async () => {
     mockApi(state("not_configured"));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     let previewFetches = 0;
-    let releaseRefresh: () => void = () => undefined;
-    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
     function PreviewObserver() {
       const preview = useQuery({
         queryKey: ciDesignPricePreviewQueryKey("project-1"),
         queryFn: async () => {
           previewFetches += 1;
-          if (previewFetches === 2) await refreshGate;
           return previewFetches;
         },
       });
@@ -76,14 +73,12 @@ describe("CiRebateProfilePanel", () => {
     render(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-1" /><PreviewObserver /></QueryClientProvider>);
     const user = userEvent.setup();
     await screen.findByText("preview-1");
-    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await user.click(await screen.findByLabelText("Include Solar STCs"));
     await user.click(screen.getByRole("button", { name: "Save STC settings" }));
 
-    await waitFor(() => expect(previewFetches).toBe(2));
-    expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy();
-    releaseRefresh();
     expect(await screen.findByText("Saved")).toBeTruthy();
     expect(await screen.findByText("preview-2")).toBeTruthy();
+    expect(previewFetches).toBe(2);
   });
 
   it("requires positive prices before saving", async () => {
