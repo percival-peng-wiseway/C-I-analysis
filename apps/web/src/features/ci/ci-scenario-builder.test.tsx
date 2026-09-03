@@ -27,7 +27,7 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByRole("region", { name: "Solar PV profile" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Battery profile" })).toBeTruthy();
     expect(screen.queryByText("Existing site assets")).toBeNull();
-    expect(screen.getByText("30 requested · Python will snap & validate")).toBeTruthy();
+    expect(screen.queryByText(/Python will snap & validate/)).toBeNull();
     await userEvent.type(screen.getByLabelText("Fixed inverter quantity (optional)"), "3");
     expect(screen.getByText("3 × 125 kW = 375 kW")).toBeTruthy();
 
@@ -51,13 +51,16 @@ describe("CiScenarioBuilder", () => {
       connection_options: {
         inverter_quantity: 3,
         site_ac_headroom_kw: 250,
-        allow_grid_charging: false,
+        allow_grid_charging: true,
         grid_emissions_factor_kg_co2e_per_kwh: null,
         initial_soc_basis: "full_soc_physical_upper_bound",
       },
     });
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("scenarios");
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("existing_solar");
+    expect(screen.queryByLabelText("Allow grid charging")).toBeNull();
+    expect(screen.getByText("PV modules").parentElement?.textContent).toContain("167–834");
+    expect(screen.getByText("Battery units").parentElement?.textContent).toContain("0–5");
   });
 
   it("uses another published profile selected from the workspace library", async () => {
@@ -76,6 +79,23 @@ describe("CiScenarioBuilder", () => {
 
     expect(onSubmit.mock.calls[0][0].solar_profile_id).toBe("high_power_pv_v1");
     expect(screen.getByText("700 W")).toBeTruthy();
+  });
+
+  it("shows battery unit counts using the profile minimum and maximum constraints", async () => {
+    const constrainedProfile: CiDeviceProfile = structuredClone(deviceProfile);
+    constrainedProfile.solution_profiles.battery_profiles[0].minimum_units = 3;
+    constrainedProfile.solution_profiles.battery_profiles[0].maximum_units = 4;
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={constrainedProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" });
+    const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" });
+
+    await user.clear(minimums[1]); await user.type(minimums[1], "50");
+    await user.clear(maximums[1]); await user.type(maximums[1], "350");
+    expect(screen.getByText("Battery units").parentElement?.textContent).toContain("3–4");
+
+    await user.clear(maximums[1]); await user.type(maximums[1], "500");
+    expect(screen.getByText("Battery units").parentElement?.textContent).toContain("—");
   });
 
   it("adopts a newly saved published battery profile without remounting", async () => {
@@ -113,7 +133,7 @@ describe("CiScenarioBuilder", () => {
 
     render(<CiScenarioBuilder deviceProfile={dcOnly} error={null} isPending={false} onSubmit={vi.fn()} />);
 
-    expect(screen.getByText(/current Python dispatch engine does not model them/i)).toBeTruthy();
+    expect(screen.getByText("Published Solar, AC Battery and Inverter profiles are required.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save configuration & generate 30 cases" })).toHaveProperty("disabled", true);
   });
 
@@ -131,7 +151,7 @@ describe("CiScenarioBuilder", () => {
     await user.clear(maximums[1]); await user.type(maximums[1], "1000");
     await user.clear(steps[1]); await user.type(steps[1], "100");
 
-    expect(await screen.findByText("200 requested · up to 400 candidates (maximum 200)")).toBeTruthy();
+    expect(await screen.findByText("Maximum 200 candidates. Current request: up to 400.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save configuration & generate 200 cases" })).toHaveProperty("disabled", true);
   });
 });

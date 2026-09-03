@@ -86,7 +86,7 @@ const defaultConnectionOptions = (): ConnectionOptionsForm => ({
   inverter_block_size_kw: "5",
   inverter_quantity: "",
   site_ac_headroom_kw: "250",
-  allow_grid_charging: false,
+  allow_grid_charging: true,
   reactive_support_enabled: false,
   reactive_support_max_kvar: "",
   grid_emissions_factor_kg_co2e_per_kwh: "",
@@ -100,6 +100,7 @@ export function CiScenarioBuilder({
   isPending,
   onSubmit,
   siteAddress,
+  stcSettings,
 }: {
   deviceProfile: CiDeviceProfile;
   error: string | null;
@@ -108,6 +109,7 @@ export function CiScenarioBuilder({
   isPending: boolean;
   onSubmit: (request: CiSolutionGenerationRequest) => void;
   siteAddress?: string | null;
+  stcSettings?: ReactNode;
 }) {
   const publishedSolar = useMemo(
     () => deviceProfile.solution_profiles.solar_profiles.filter((profile) => profile.status === "published"),
@@ -190,7 +192,6 @@ export function CiScenarioBuilder({
   const requestedCount = rangeCount(pvRange, true) * rangeCount(batteryRange, false);
   const candidateUpperBound = canonicalCandidateUpperBound(pvRange, batteryRange);
   const effectiveYield = effectiveSpecificYield(site);
-  const status = generatorStatus(request, requestedCount, candidateUpperBound, publishedSolar.length, publishedBattery.length, publishedInverter.length);
 
   const selectInverterProfile = (profileId: string) => {
     const selected = publishedInverter.find((profile) => profile.profile_id === profileId);
@@ -207,12 +208,7 @@ export function CiScenarioBuilder({
 
   return (
     <section aria-labelledby="search-space-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Build the solution search space</h2>
-        </div>
-        <span className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium tabular-nums text-slate-700">{status}</span>
-      </div>
+      <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Build the solution search space</h2>
 
       <form
         className="mt-7 space-y-8"
@@ -221,7 +217,7 @@ export function CiScenarioBuilder({
           if (request && candidateUpperBound <= 200) onSubmit(request);
         }}
       >
-        <WorkflowSection step="01" title="Location & solar resource">
+        <WorkflowSection title="Location & solar resource">
           <div className="grid gap-4 xl:grid-cols-[minmax(260px,.8fr)_minmax(0,2.2fr)]">
             <LocationCard address={siteAddress} />
             <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
@@ -259,14 +255,14 @@ export function CiScenarioBuilder({
                 </div>
               </details>
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-950">
-                <span>Calculation-active site yield after authored losses</span>
+                <span>Effective yield</span>
                 <strong className="tabular-nums">{effectiveYield === null ? "Complete site factors" : `${formatNumber(effectiveYield)} kWh/kWp`}</strong>
               </div>
             </section>
           </div>
         </WorkflowSection>
 
-        <WorkflowSection step="02" title="Solar, battery & inverter profiles">
+        <WorkflowSection title="Setup Solar, Battery, Inverter & STC">
           <div className="grid gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
@@ -279,7 +275,7 @@ export function CiScenarioBuilder({
             />
           </div>
           {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
-            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Publish at least one Solar profile, one AC-coupled Battery profile and one Inverter profile in Settings before generating solutions. DC-coupled battery profiles can remain in the library, but the current Python dispatch engine does not model them.</p>
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Published Solar, AC Battery and Inverter profiles are required.</p>
           ) : null}
           <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
             <div className="flex items-center gap-3">
@@ -295,18 +291,18 @@ export function CiScenarioBuilder({
                 <CheckField checked={connection.reactive_support_enabled} label="Model inverter reactive support" onChange={(reactive_support_enabled) => setConnection({ ...connection, reactive_support_enabled })} />
                 {connection.reactive_support_enabled ? <NumberField label="Reactive support cap (kvar)" onChange={(reactive_support_max_kvar) => setConnection({ ...connection, reactive_support_max_kvar })} value={connection.reactive_support_max_kvar} /> : null}
               </OptionGroup>
-              <OptionGroup title="Battery & environmental assumptions">
-                <CheckField checked={connection.allow_grid_charging} label="Allow grid charging" onChange={(allow_grid_charging) => setConnection({ ...connection, allow_grid_charging })} />
+              <OptionGroup title="Environmental assumptions">
                 <NumberField allowBlank label="Grid emissions factor (kg CO2-e/kWh)" onChange={(grid_emissions_factor_kg_co2e_per_kwh) => setConnection({ ...connection, grid_emissions_factor_kg_co2e_per_kwh })} value={connection.grid_emissions_factor_kg_co2e_per_kwh} />
               </OptionGroup>
             </div>
           </section>
+          {stcSettings ? <div className="mt-4">{stcSettings}</div> : null}
         </WorkflowSection>
 
         <div className="flex flex-wrap items-center justify-end gap-4 border-t border-slate-200 pt-5">
           <div className="flex flex-wrap items-center justify-end gap-3">
             {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
-            {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Reduce the PV or battery range. Battery cases can add matched PV-only comparators, so this request could create up to {candidateUpperBound} canonical candidates; the saved limit is 200.</p> : null}
+            {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Maximum 200 candidates. Current request: up to {candidateUpperBound}.</p> : null}
             <Button className="min-w-64" disabled={!request || candidateUpperBound > 200 || isPending} type="submit">
               {isPending ? "Saving & generating in Python…" : `Save configuration & generate ${requestedCount || ""} cases`}
               <Play className="size-4" />
@@ -351,6 +347,7 @@ function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, r
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
+      {profile ? <UnitCountSummary label="PV modules" maximum={range.maximum} minimum={range.minimum} unitSize={profile.rated_power_w / 1000} /> : null}
     </ProfileCard>
   );
 }
@@ -376,6 +373,7 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
+      {profile ? <UnitCountSummary label="Battery units" maximum={range.maximum} maximumAllowedUnits={profile.maximum_units} minimum={range.minimum} minimumAllowedUnits={profile.minimum_units} unitSize={profile.nominal_capacity_kwh_per_unit} /> : null}
     </ProfileCard>
   );
 }
@@ -429,8 +427,25 @@ function RangeFields({ label, onChange, range, unit }: { label: string; onChange
   );
 }
 
-function WorkflowSection({ children, step, title }: { children: ReactNode; step: string; title: string }) {
-  return <section><div className="mb-3 flex gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">{step}</span><h3 className="font-semibold text-slate-950">{title}</h3></div>{children}</section>;
+function WorkflowSection({ children, title }: { children: ReactNode; title: string }) {
+  return <section><h3 className="mb-3 font-semibold text-slate-950">{title}</h3>{children}</section>;
+}
+
+function UnitCountSummary({ label, maximum, maximumAllowedUnits = Number.POSITIVE_INFINITY, minimum, minimumAllowedUnits = 0, unitSize }: { label: string; maximum: string; maximumAllowedUnits?: number; minimum: string; minimumAllowedUnits?: number; unitSize: number }) {
+  const minimumUnits = snappedUnitCount(minimum, unitSize, minimumAllowedUnits, maximumAllowedUnits);
+  const maximumUnits = snappedUnitCount(maximum, unitSize, minimumAllowedUnits, maximumAllowedUnits);
+  const value = minimumUnits === null || maximumUnits === null
+    ? "—"
+    : minimumUnits === maximumUnits ? String(minimumUnits) : `${minimumUnits}–${maximumUnits}`;
+  return <div className="flex items-center justify-between rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-950"><span>{label}</span><strong className="tabular-nums">{value}</strong></div>;
+}
+
+function snappedUnitCount(capacity: string, unitSize: number, minimumAllowedUnits: number, maximumAllowedUnits: number) {
+  const parsed = parseNumber(capacity);
+  if (!Number.isFinite(parsed) || parsed < 0 || unitSize <= 0) return null;
+  if (parsed === 0) return 0;
+  const unitCount = Math.max(minimumAllowedUnits, Math.ceil((parsed - 1e-9) / unitSize));
+  return unitCount <= maximumAllowedUnits ? unitCount : null;
 }
 
 function OptionGroup({ children, title }: { children: ReactNode; title: string }) {
@@ -544,7 +559,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
       inverter_block_size_kw: block,
       ...(inverterQuantity === null ? {} : { inverter_quantity: inverterQuantity }),
       site_ac_headroom_kw: headroom,
-      allow_grid_charging: connection.allow_grid_charging,
+      allow_grid_charging: true,
       reactive_support_enabled: connection.reactive_support_enabled,
       reactive_support_max_kvar: reactive,
       grid_emissions_factor_kg_co2e_per_kwh: emissions,
@@ -639,7 +654,7 @@ function connectionFormFromTechnical(options: CiDesignContext["technical_options
     inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
     inverter_quantity: options.inverter_quantity === undefined ? "" : String(options.inverter_quantity),
     site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
-    allow_grid_charging: options.allow_grid_charging,
+    allow_grid_charging: true,
     reactive_support_enabled: options.reactive_support_enabled,
     reactive_support_max_kvar: options.reactive_support_enabled ? formatNumber(options.reactive_support_max_kvar) : "",
     grid_emissions_factor_kg_co2e_per_kwh: options.grid_emissions_factor_kg_co2e_per_kwh ? formatNumber(options.grid_emissions_factor_kg_co2e_per_kwh) : "",
@@ -695,13 +710,6 @@ function effectiveSpecificYield(site: SiteFactorsForm) {
   const losses = [site.shading_loss_percent, site.soiling_loss_percent, site.temperature_loss_percent, site.wiring_mismatch_loss_percent, site.other_system_loss_percent].map(parseNumber);
   if (!positive(annual) || !between(availability, 1, 100) || losses.some((loss) => !between(loss, 0, 99))) return null;
   return annual * availability / 100 * losses.reduce((factor, loss) => factor * (1 - loss / 100), 1);
-}
-
-function generatorStatus(request: CiSolutionGenerationRequest | null, count: number, candidateUpperBound: number, solarProfiles: number, batteryProfiles: number, inverterProfiles: number) {
-  if (!solarProfiles || !batteryProfiles || !inverterProfiles) return "Publish profiles in Settings";
-  if (!request) return "Complete required assumptions";
-  if (candidateUpperBound > 200) return `${count} requested · up to ${candidateUpperBound} candidates (maximum 200)`;
-  return `${count} requested · Python will snap & validate`;
 }
 
 function parseNumber(value: string) {

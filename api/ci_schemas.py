@@ -4,7 +4,14 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class CiFinancialAssumptionsRequest(BaseModel):
@@ -178,6 +185,23 @@ class CiIntervalActivityRequest(BaseModel):
     scenario_id: str = Field(min_length=1, max_length=120)
     start_date: date
     days: Literal[1, 3, 7]
+
+
+class CiScenarioSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scenario_ids: list[StrictStr] = Field(min_length=1, max_length=200)
+
+    @field_validator("scenario_ids")
+    @classmethod
+    def validate_scenario_ids(
+        cls, scenario_ids: list[str]
+    ) -> list[str]:
+        if any(not scenario_id.strip() for scenario_id in scenario_ids):
+            raise ValueError("scenario_ids must contain non-empty strings")
+        if len(set(scenario_ids)) != len(scenario_ids):
+            raise ValueError("scenario_ids must be unique")
+        return scenario_ids
 
 
 class CiBillReviewRequest(BaseModel):

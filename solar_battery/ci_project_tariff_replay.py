@@ -36,6 +36,7 @@ def record_ci_tariff_replay_result(
     expected_interval_sha256: str,
     expected_design_candidates_sha256: str,
     expected_tariff_profile_sha256: str,
+    expected_scenario_ids: list[str],
     active_tariff_profile: dict[str, object],
     result: dict[str, object],
 ) -> dict[str, object]:
@@ -56,7 +57,11 @@ def record_ci_tariff_replay_result(
             "The project inputs changed while tariff replay was running. Run it again.",
         )
 
-    _validate_result_for_storage(result, candidates=list(candidates))
+    _validate_result_for_storage(
+        result,
+        candidates=list(candidates),
+        expected_scenario_ids=expected_scenario_ids,
+    )
     stored_result = json.loads(json.dumps(result, sort_keys=True, allow_nan=False))
     result_digest = canonical_sha256(stored_result)
     now = datetime.now(timezone.utc)
@@ -178,18 +183,25 @@ def _evidence_row(
 
 
 def _validate_result_for_storage(
-    result: dict[str, object], *, candidates: list[dict[str, object]]
+    result: dict[str, object],
+    *,
+    candidates: list[dict[str, object]],
+    expected_scenario_ids: list[str] | None = None,
 ) -> None:
     scenarios = result.get("scenarios")
     report_preview = result.get("report_preview")
-    expected_scenario_ids = {
+    candidate_scenario_ids = [
         item.get("scenario_id") for item in candidates if isinstance(item, dict)
-    }
-    actual_scenario_ids = {
-        item.get("scenario_id")
-        for item in scenarios
-        if isinstance(scenarios, list) and isinstance(item, dict)
-    } if isinstance(scenarios, list) else set()
+    ]
+    actual_scenario_ids = (
+        [
+            item.get("scenario_id")
+            for item in scenarios
+            if isinstance(item, dict)
+        ]
+        if isinstance(scenarios, list)
+        else []
+    )
     safe_scenarios = isinstance(scenarios, list) and all(
         isinstance(item, dict)
         and item.get("recommendation_permitted", False) is False
@@ -206,7 +218,23 @@ def _validate_result_for_storage(
         or result.get("currency_values_permitted") is not True
         or not isinstance(scenarios, list)
         or not 1 <= len(scenarios) <= 200
-        or actual_scenario_ids != expected_scenario_ids
+        or len(candidate_scenario_ids) != len(candidates)
+        or any(
+            not isinstance(scenario_id, str) or not scenario_id
+            for scenario_id in candidate_scenario_ids
+        )
+        or len(set(candidate_scenario_ids)) != len(candidate_scenario_ids)
+        or len(actual_scenario_ids) != len(scenarios)
+        or any(
+            not isinstance(scenario_id, str) or not scenario_id
+            for scenario_id in actual_scenario_ids
+        )
+        or len(set(actual_scenario_ids)) != len(actual_scenario_ids)
+        or not set(actual_scenario_ids).issubset(set(candidate_scenario_ids))
+        or (
+            expected_scenario_ids is not None
+            and set(actual_scenario_ids) != set(expected_scenario_ids)
+        )
         or not safe_scenarios
         or not isinstance(report_preview, dict)
         or report_preview.get("download_available") is not False

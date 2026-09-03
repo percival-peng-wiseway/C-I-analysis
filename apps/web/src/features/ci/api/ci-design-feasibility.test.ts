@@ -58,6 +58,21 @@ describe("C&I design feasibility API", () => {
     await expect(runCiDesignFeasibility("project-1", invalidPercentageFetch)).rejects.toThrow("unsafe result contract");
   });
 
+  it("posts an explicit selected solution set when provided", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload()), { status: 200 }));
+
+    await runCiDesignFeasibility("project-1", fetcher, undefined, ["scenario-b", "scenario-a"]);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/commercial-industrial/projects/project-1/design-feasibility",
+      expect.objectContaining({
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ scenario_ids: ["scenario-b", "scenario-a"] }),
+      }),
+    );
+  });
+
   it("restores a saved project result and fails closed on stale state shape", async () => {
     const ready = {
       contract_version: "ci_project_feasibility_state_v1",

@@ -118,13 +118,13 @@ export function CiProductShell({ children }: { children: ReactNode }) {
               <div><p className="text-[10px] font-semibold uppercase tracking-[.18em] text-cyan-700">Active project</p><h1 className="mt-1 text-2xl font-semibold text-slate-950">{active?.display_name ?? "Select or create a project"}</h1></div>
             </div>
             <div className="overflow-x-auto"><nav aria-label="Analysis modules" className="grid min-w-[580px] grid-cols-4 gap-1 lg:min-w-0">
-              {modules.map((module, index) => {
+              {modules.map((module) => {
                 const Icon = module.icon;
                 const selected = workspace.stage === module.stage;
                 return (
                   <button aria-current={selected ? "page" : undefined} className={`relative flex min-h-16 items-center gap-2.5 rounded-t-xl border-x border-t px-3 py-2.5 text-left transition ${selected ? "border-slate-200 bg-slate-50 text-slate-950" : "border-transparent bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`} disabled={!active} key={module.stage} onClick={() => workspace.setStage(module.stage)} type="button">
                     <span className={`grid size-8 shrink-0 place-items-center rounded-lg ${selected ? "bg-cyan-100 text-cyan-800" : "bg-slate-100 text-slate-500"}`}><Icon className="size-4" /></span>
-                    <span className="min-w-0"><span className="block text-[10px] font-semibold tabular-nums text-slate-400">0{index + 1}</span><strong className="mt-0.5 block text-sm font-bold leading-5 xl:text-base">{module.label}</strong></span>
+                    <strong className="min-w-0 text-sm font-bold leading-5 xl:text-base">{module.label}</strong>
                     {selected ? <span className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-cyan-500" /> : null}
                   </button>
                 );

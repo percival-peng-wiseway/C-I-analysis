@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
-import { CiRebateProfilePanel } from "./ci-rebate-profile-panel";
+import { ciDesignPricePreviewQueryKey } from "./api/ci-design-price-preview";
+import { CiRebateProfilePanel, type CiRebateProfilePanelHandle } from "./ci-rebate-profile-panel";
 
 afterEach(() => {
   cleanup();
@@ -18,7 +20,7 @@ describe("CiRebateProfilePanel", () => {
     mockApi(state("not_configured"));
     renderPanel();
 
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
+    await screen.findByRole("heading", { name: "STC" });
     expect(screen.getByLabelText("Include Solar STCs")).toBeTruthy();
     expect(screen.getByLabelText("Solar STCs price")).toHaveProperty("value", "39");
     expect(screen.getByLabelText("Include Battery STCs")).toBeTruthy();
@@ -33,7 +35,7 @@ describe("CiRebateProfilePanel", () => {
     const requests = mockApi(state("not_configured"));
     renderPanel();
     const user = userEvent.setup();
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
+    await screen.findByRole("heading", { name: "STC" });
 
     await user.click(screen.getByLabelText("Include Solar STCs"));
     await user.clear(screen.getByLabelText("Solar STCs price"));
@@ -43,7 +45,7 @@ describe("CiRebateProfilePanel", () => {
     await user.type(screen.getByLabelText("Battery STCs price"), "38");
     await user.click(screen.getByRole("button", { name: "Save STC settings" }));
 
-    expect(await screen.findByText(/Gross\/Net CAPEX prices have been refreshed/)).toBeTruthy();
+    expect(await screen.findByText("Saved")).toBeTruthy();
     const saved = requests.find((item) => item.method === "PUT");
     expect(saved?.url.endsWith("/rebate-profile/stc-settings")).toBe(true);
     expect(saved?.body).toEqual({
@@ -54,15 +56,78 @@ describe("CiRebateProfilePanel", () => {
     });
   });
 
+  it("waits for the active Net CAPEX preview to refresh before reporting saved", async () => {
+    mockApi(state("not_configured"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    let previewFetches = 0;
+    let releaseRefresh: () => void = () => undefined;
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    function PreviewObserver() {
+      const preview = useQuery({
+        queryKey: ciDesignPricePreviewQueryKey("project-1"),
+        queryFn: async () => {
+          previewFetches += 1;
+          if (previewFetches === 2) await refreshGate;
+          return previewFetches;
+        },
+      });
+      return <output>{preview.data ? `preview-${preview.data}` : "preview-loading"}</output>;
+    }
+    render(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-1" /><PreviewObserver /></QueryClientProvider>);
+    const user = userEvent.setup();
+    await screen.findByText("preview-1");
+    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await user.click(screen.getByRole("button", { name: "Save STC settings" }));
+
+    await waitFor(() => expect(previewFetches).toBe(2));
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy();
+    releaseRefresh();
+    expect(await screen.findByText("Saved")).toBeTruthy();
+    expect(await screen.findByText("preview-2")).toBeTruthy();
+  });
+
   it("requires positive prices before saving", async () => {
     mockApi(state("not_configured"));
     renderPanel();
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
+    await screen.findByRole("heading", { name: "STC" });
 
     await userEvent.click(screen.getByLabelText("Include Solar STCs"));
     await userEvent.clear(screen.getByLabelText("Solar STCs price"));
     expect(screen.getByText(/price greater than \$0 for each included/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save STC settings" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("rejects an invalid dirty draft through the generation save handle", async () => {
+    const requests = mockApi(state("not_configured"));
+    const ref = createRef<CiRebateProfilePanelHandle>();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-1" ref={ref} /></QueryClientProvider>);
+    await screen.findByRole("heading", { name: "STC" });
+
+    await userEvent.click(screen.getByLabelText("Include Solar STCs"));
+    await userEvent.clear(screen.getByLabelText("Solar STCs price"));
+
+    await expect(ref.current?.saveIfDirty()).rejects.toThrow("Enter a price greater than $0 for each included STC type.");
+    expect(requests.filter((request) => request.method === "PUT")).toHaveLength(0);
+  });
+
+  it("allows Enter on the save button while containing Enter in an STC price input", async () => {
+    const requests = mockApi(state("not_configured"));
+    const outerSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><form onSubmit={outerSubmit}><CiRebateProfilePanel projectId="project-1" /></form></QueryClientProvider>);
+    const user = userEvent.setup();
+    await screen.findByRole("heading", { name: "STC" });
+    await user.click(screen.getByLabelText("Include Solar STCs"));
+
+    screen.getByLabelText("Solar STCs price").focus();
+    await user.keyboard("{Enter}");
+    expect(outerSubmit).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: "Save STC settings" }).focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("Saved")).toBeTruthy();
+    expect(requests.filter((request) => request.method === "PUT")).toHaveLength(1);
   });
 
   it("does not carry an unsaved STC choice into another project", async () => {
@@ -75,7 +140,7 @@ describe("CiRebateProfilePanel", () => {
     }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const view = render(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-1" /></QueryClientProvider>);
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
+    await screen.findByRole("heading", { name: "STC" });
     await userEvent.click(screen.getByLabelText("Include Solar STCs"));
 
     view.rerender(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-2" /></QueryClientProvider>);

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Save } from "lucide-react";
-import { useEffect, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useState, type KeyboardEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ciDesignPricePreviewQueryKey } from "@/features/ci/api/ci-design-price-preview";
@@ -13,7 +13,11 @@ import {
   type CiProjectStcSettings,
 } from "@/features/ci/api/ci-rebate-profile";
 
-export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
+export interface CiRebateProfilePanelHandle {
+  saveIfDirty: () => Promise<void>;
+}
+
+export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { projectId: string }>(function CiRebateProfilePanel({ projectId }, ref) {
   const queryClient = useQueryClient();
   const state = useQuery({
     queryKey: ciProjectRebateProfileQueryKey(projectId),
@@ -45,19 +49,39 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
     },
   });
 
+  const activeProfile = state.data?.profile ?? state.data?.suggested_profile ?? null;
+  const savedSettings = activeProfile ? settingsFromProfile(activeProfile) : null;
+  const legacyVeecEnabled = activeProfile?.programs.vic_deemed_veec.enabled ?? false;
+  const isDirty = Boolean(draft && savedSettings) && (JSON.stringify(draft) !== JSON.stringify(savedSettings) || legacyVeecEnabled);
+  const invalidPrice = draft ? (
+    (draft.solarStcEnabled && !isPositiveFinite(draft.solarStcPriceAudExGst)) ||
+    (draft.batteryStcEnabled && !isPositiveFinite(draft.batteryStcPriceAudExGst))
+  ) : false;
+  const enabledCount = draft ? Number(draft.solarStcEnabled) + Number(draft.batteryStcEnabled) : 0;
+  const needsSave = isDirty || (enabledCount > 0 && state.data?.status !== "approved");
+
+  useImperativeHandle(ref, () => ({
+    async saveIfDirty() {
+      if (state.isError) {
+        throw new Error("The project STC settings could not be loaded safely.");
+      }
+      if (state.isPending || !draft || draftProjectId !== projectId || !savedSettings) {
+        throw new Error("The project STC settings are not ready yet.");
+      }
+      if (invalidPrice) {
+        throw new Error("Enter a price greater than $0 for each included STC type.");
+      }
+      if (!needsSave) return;
+      await save.mutateAsync({ settings: draft, targetProjectId: projectId });
+    },
+  }));
+
   if (state.isError) {
     return <PanelState error text="The project STC settings could not be loaded safely." />;
   }
   if (state.isPending || !draft || draftProjectId !== projectId) {
     return <PanelState text="Loading the project STC settings…" />;
   }
-
-  const savedSettings = settingsFromProfile(state.data.profile ?? state.data.suggested_profile);
-  const legacyVeecEnabled = (state.data.profile ?? state.data.suggested_profile).programs.vic_deemed_veec.enabled;
-  const isDirty = JSON.stringify(draft) !== JSON.stringify(savedSettings) || legacyVeecEnabled;
-  const invalidPrice = (draft.solarStcEnabled && draft.solarStcPriceAudExGst <= 0) ||
-    (draft.batteryStcEnabled && draft.batteryStcPriceAudExGst <= 0);
-  const enabledCount = Number(draft.solarStcEnabled) + Number(draft.batteryStcEnabled);
 
   const update = (patch: Partial<CiProjectStcSettings>) => {
     save.reset();
@@ -66,10 +90,7 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
 
   return (
     <section aria-labelledby="rebate-profile-title">
-      <div className="mb-3 flex gap-3">
-        <span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">03</span>
-        <h2 className="font-semibold text-slate-950" id="rebate-profile-title" tabIndex={-1}>Rebates &amp; certificates</h2>
-      </div>
+      <h4 className="mb-3 font-semibold text-slate-950" id="rebate-profile-title" tabIndex={-1}>STC</h4>
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
         <header className="flex justify-end border-b border-slate-200 px-5 py-3 sm:px-6">
         <StatusBadge dirty={isDirty} enabledCount={enabledCount} status={state.data.status} />
@@ -96,11 +117,11 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
         {state.data.blockers.length && !isDirty ? <BlockerList blockers={state.data.blockers} /> : null}
         {invalidPrice ? <p className="text-sm text-red-700" role="alert">Enter a price greater than $0 for each included STC type.</p> : null}
         {save.error instanceof Error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{save.error.message}</p> : null}
-        {save.isSuccess && !isDirty ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />STC settings saved. Solution Gross/Net CAPEX prices have been refreshed.</p> : null}
+        {save.isSuccess && !needsSave ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />Saved</p> : null}
 
         <div className="flex justify-end border-t border-slate-200 pt-5">
           <Button
-            disabled={save.isPending || invalidPrice || !isDirty}
+            disabled={save.isPending || invalidPrice || !needsSave}
             onClick={() => save.mutate({ settings: draft, targetProjectId: projectId })}
             type="button"
           >
@@ -111,7 +132,7 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
       </div>
     </section>
   );
-}
+});
 
 function StcCard({ checked, label, onChecked, onPrice, price }: { checked: boolean; label: string; onChecked: (checked: boolean) => void; onPrice: (price: number) => void; price: number }) {
   return (
@@ -122,7 +143,7 @@ function StcCard({ checked, label, onChecked, onPrice, price }: { checked: boole
       </label>
       <label className="mt-4 grid gap-1 text-xs font-medium text-slate-600">
         <span>{label} price (AUD ex GST / certificate)</span>
-        <span className="relative"><span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span><input aria-label={`${label} price`} className={`${inputClass} w-full pl-7`} min="0.01" onChange={(event) => onPrice(Number(event.target.value))} step="0.01" type="number" value={price} /></span>
+        <span className="relative"><span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span><input aria-label={`${label} price`} className={`${inputClass} w-full pl-7`} min="0.01" onChange={(event) => onPrice(Number(event.target.value))} onKeyDown={preventParentFormSubmit} step="0.01" type="number" value={price} /></span>
       </label>
     </section>
   );
@@ -149,3 +170,13 @@ function settingsFromProfile(profile: CiProjectRebateProfile): CiProjectStcSetti
 function PanelState({ error = false, text }: { error?: boolean; text: string }) { return <section className={`rounded-xl border p-5 text-sm ${error ? "border-red-200 bg-red-50 text-red-800" : "border-slate-200 bg-white text-slate-500"}`}>{text}</section>; }
 
 const inputClass = "min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-950";
+
+function preventParentFormSubmit(event: KeyboardEvent<HTMLInputElement>) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function isPositiveFinite(value: number) {
+  return Number.isFinite(value) && value > 0;
+}

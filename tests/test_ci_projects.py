@@ -338,6 +338,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
             },
             "scenarios": [
                 {
+                    "scenario_id": scenarios[0]["scenario_id"],
                     "physical_review_rank": 1,
                     "recommendation_permitted": False,
                 }
@@ -617,6 +618,259 @@ def test_ci_projects_are_isolated_by_local_identity(tmp_path) -> None:
             json={"display_name": "  "},
         )
         assert response.status_code == 422
+
+
+def test_project_analysis_accepts_only_saved_selected_solution_subsets(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda _bill, _nem12, **kwargs: {
+            "contract_version": "ci_evidence_intake_v7",
+            "intake_status": "ready_for_profile_review",
+            "bill": {
+                "review_status": "analyst_confirmed",
+                "network_tariff_code": "TEST-TARIFF",
+            },
+            "nem12": {"full_tariff_analysis_ready": True},
+            "privacy": {
+                "files_persisted": kwargs.get("files_persisted", False),
+                "customer_identifiers_returned": False,
+                "customer_facing_permission": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "api.ci_routes.approved_ci_project_tariff_calculation_profile",
+        lambda *_args, **_kwargs: {"profile_id": "test"},
+    )
+    feasibility_mode = {"value": "valid"}
+    captured_feasibility: list[list[str]] = []
+
+    def feasibility(_interval_bytes, *, scenarios):
+        scenario_ids = [scenario["scenario_id"] for scenario in scenarios]
+        captured_feasibility.append(scenario_ids)
+        result_ids = scenario_ids
+        if feasibility_mode["value"] == "duplicate":
+            result_ids = [scenario_ids[0], scenario_ids[0]]
+        elif feasibility_mode["value"] == "unknown":
+            result_ids = ["unknown-scenario"]
+        elif feasibility_mode["value"] == "wrong_known":
+            result_ids = ["scenario-b"]
+        elif feasibility_mode["value"] == "omitted_selected":
+            result_ids = scenario_ids[:1]
+        return {
+            "contract_version": "ci_design_feasibility_v5",
+            "status": "ready",
+            "analysis_mode": "pre_tariff_physical_feasibility",
+            "customer_facing_permission": False,
+            "recommendation_permitted": False,
+            "tariff_evaluated": False,
+            "currency_values_permitted": False,
+            "physical_review_order": {
+                "algorithm_id": "ci_pre_tariff_physical_review_order_v2",
+                "shortlist_count": min(10, len(result_ids)),
+                "basis": "Physical review only.",
+                "recommendation_permitted": False,
+            },
+            "scenarios": [
+                {
+                    "scenario_id": scenario_id,
+                    "physical_review_rank": index,
+                    "recommendation_permitted": False,
+                }
+                for index, scenario_id in enumerate(result_ids, start=1)
+            ],
+        }
+
+    monkeypatch.setattr(
+        "api.ci_routes.analyze_ci_design_feasibility", feasibility
+    )
+    tariff_mode = {"value": "valid"}
+    captured_tariff: list[list[str]] = []
+
+    def tariff_replay(_interval_bytes, *, profile, scenarios):
+        assert profile == {"profile_id": "test"}
+        scenario_ids = [scenario["scenario_id"] for scenario in scenarios]
+        captured_tariff.append(scenario_ids)
+        result_ids = scenario_ids
+        if tariff_mode["value"] == "duplicate":
+            result_ids = [scenario_ids[0], scenario_ids[0]]
+        elif tariff_mode["value"] == "unknown":
+            result_ids = ["unknown-scenario"]
+        elif tariff_mode["value"] == "wrong_known":
+            result_ids = ["scenario-b"]
+        elif tariff_mode["value"] == "omitted_selected":
+            result_ids = scenario_ids[:1]
+        return {
+            "contract_version": "ci_physical_scenario_review_v6",
+            "analysis_status": "ready",
+            "analysis_mode": "evidence_limited_internal_review",
+            "customer_facing_permission": False,
+            "recommendation_permitted": False,
+            "currency_values_permitted": True,
+            "scenarios": [
+                {
+                    "scenario_id": scenario_id,
+                    "recommendation_permitted": False,
+                    "annual_tariff_value": {
+                        "customer_facing_permission": False,
+                    },
+                }
+                for scenario_id in result_ids
+            ],
+            "report_preview": {"download_available": False},
+        }
+
+    monkeypatch.setattr(
+        "api.ci_routes.analyze_ci_physical_scenarios", tariff_replay
+    )
+    scenarios = [
+        {
+            **_scenario(),
+            "scenario_id": "scenario-a",
+            "battery_system_id": "battery-a",
+            "label": "A",
+        },
+        {
+            **_scenario(),
+            "scenario_id": "scenario-b",
+            "battery_system_id": "battery-b",
+            "label": "B",
+        },
+        {
+            **_scenario(),
+            "scenario_id": "scenario-c",
+            "battery_system_id": "battery-c",
+            "label": "C",
+        },
+    ]
+
+    with create_test_client(
+        sqlite_url_for_path(tmp_path / "selected-solutions.sqlite3"),
+        object_store_root=tmp_path / "selected-solutions-objects",
+    ) as client:
+        project = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Selected solution analysis"},
+        ).json()
+        project_url = (
+            f"/api/commercial-industrial/projects/{project['project_id']}"
+        )
+        evidence = client.post(
+            f"{project_url}/evidence-intake/inspect",
+            files={
+                "bill": ("bill.pdf", b"synthetic", "application/pdf"),
+                "nem12": ("nem12.csv", b"synthetic", "text/csv"),
+            },
+        )
+        assert evidence.status_code == 200
+        design = client.post(
+            f"{project_url}/design-candidates",
+            json={"scenarios": scenarios, "design_context": _design_context()},
+        )
+        assert design.status_code == 200, design.json()
+
+        for invalid_ids in (
+            [],
+            ["scenario-a", "scenario-a"],
+            [" "],
+            [1],
+            [f"scenario-{index}" for index in range(201)],
+        ):
+            invalid = client.post(
+                f"{project_url}/design-feasibility",
+                json={"scenario_ids": invalid_ids},
+            )
+            assert invalid.status_code == 422
+        unknown = client.post(
+            f"{project_url}/design-feasibility",
+            json={"scenario_ids": ["missing"]},
+        )
+        assert unknown.status_code == 422
+        assert unknown.json()["detail"]["code"] == (
+            "ci_project_scenario_selection_invalid"
+        )
+
+        selection = ["scenario-c", "scenario-a"]
+        selected_feasibility = client.post(
+            f"{project_url}/design-feasibility",
+            json={"scenario_ids": selection},
+        )
+        assert selected_feasibility.status_code == 200
+        assert captured_feasibility[-1] == ["scenario-a", "scenario-c"]
+        assert [
+            scenario["scenario_id"]
+            for scenario in selected_feasibility.json()["scenarios"]
+        ] == ["scenario-a", "scenario-c"]
+        assert client.get(f"{project_url}/design-feasibility").json()[
+            "status"
+        ] == "ready"
+
+        for invalid_result_mode in (
+            "duplicate",
+            "unknown",
+            "wrong_known",
+            "omitted_selected",
+        ):
+            feasibility_mode["value"] = invalid_result_mode
+            rejected_result = client.post(
+                f"{project_url}/design-feasibility",
+                json={"scenario_ids": selection},
+            )
+            assert rejected_result.status_code == 422
+            assert rejected_result.json()["detail"]["code"] == (
+                "ci_project_feasibility_result_invalid"
+            )
+        feasibility_mode["value"] = "valid"
+
+        unknown_tariff_selection = client.post(
+            f"{project_url}/tariff-replay",
+            json={"scenario_ids": ["missing"]},
+        )
+        assert unknown_tariff_selection.status_code == 422
+        assert unknown_tariff_selection.json()["detail"]["code"] == (
+            "ci_project_scenario_selection_invalid"
+        )
+
+        unanalysed_tariff_selection = client.post(
+            f"{project_url}/tariff-replay",
+            json={"scenario_ids": ["scenario-b"]},
+        )
+        assert unanalysed_tariff_selection.status_code == 422
+        assert unanalysed_tariff_selection.json()["detail"]["code"] == (
+            "ci_project_dispatch_required"
+        )
+
+        selected_tariff = client.post(
+            f"{project_url}/tariff-replay",
+            json={"scenario_ids": selection},
+        )
+        assert selected_tariff.status_code == 200
+        assert captured_tariff[-1] == ["scenario-a", "scenario-c"]
+        assert [
+            scenario["scenario_id"]
+            for scenario in selected_tariff.json()["scenarios"]
+        ] == ["scenario-a", "scenario-c"]
+        assert client.get(f"{project_url}/tariff-replay").json()["status"] == (
+            "ready"
+        )
+
+        for invalid_result_mode in (
+            "duplicate",
+            "unknown",
+            "wrong_known",
+            "omitted_selected",
+        ):
+            tariff_mode["value"] = invalid_result_mode
+            rejected_result = client.post(
+                f"{project_url}/tariff-replay",
+                json={"scenario_ids": selection},
+            )
+            assert rejected_result.status_code == 422
+            assert rejected_result.json()["detail"]["code"] == (
+                "ci_project_tariff_replay_result_invalid"
+            )
 
 
 def test_replacing_project_evidence_replaces_private_objects_and_resets_setup(

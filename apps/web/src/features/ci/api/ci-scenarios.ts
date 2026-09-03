@@ -261,10 +261,20 @@ export async function analyzeCiPhysicalScenarios(
 export async function runCiProjectTariffReplay(
   projectId: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+  scenarioIds?: string[],
 ): Promise<CiPhysicalScenarioResult> {
   const response = await fetcher(
     `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-replay`,
-    { method: "POST", headers: { Accept: "application/json" } },
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        ...(scenarioIds === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(scenarioIds === undefined ? {} : { body: JSON.stringify({ scenario_ids: scenarioIds }) }),
+      signal,
+    },
   );
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as

@@ -187,10 +187,20 @@ export const ciSavedFeasibilityQueryKey = (projectId: string) => ["ci-project-fe
 export async function runCiDesignFeasibility(
   projectId: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+  scenarioIds?: string[],
 ): Promise<CiDesignFeasibilityResult> {
   const response = await fetcher(
     `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-feasibility`,
-    { method: "POST", headers: { Accept: "application/json" } },
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        ...(scenarioIds === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(scenarioIds === undefined ? {} : { body: JSON.stringify({ scenario_ids: scenarioIds }) }),
+      signal,
+    },
   );
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as { detail?: { message?: string } } | null;

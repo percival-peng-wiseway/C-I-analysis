@@ -44,6 +44,7 @@ def record_ci_design_feasibility_result(
     actor: LocalActorContext,
     expected_interval_sha256: str,
     expected_design_candidates_sha256: str,
+    expected_scenario_ids: list[str],
     result: dict[str, object],
 ) -> dict[str, object]:
     project = require_ci_project(session, project_id=project_id, actor=actor)
@@ -60,7 +61,11 @@ def record_ci_design_feasibility_result(
             "ci_project_feasibility_inputs_changed",
             "The project inputs changed while feasibility was running. Run the analysis again.",
         )
-    _validate_result_for_storage(result)
+    _validate_result_for_storage(
+        result,
+        candidates=list(candidates),
+        expected_scenario_ids=expected_scenario_ids,
+    )
     stored_result = json.loads(
         json.dumps(result, sort_keys=True, allow_nan=False)
     )
@@ -155,7 +160,9 @@ def ci_design_feasibility_state(
             result=None,
             stale_reasons=stale_reasons,
         )
-    _validate_result_for_storage(row.result_json)
+    _validate_result_for_storage(
+        row.result_json, candidates=list(candidates or [])
+    )
     return _state_contract(status="ready", row=row, result=dict(row.result_json))
 
 
@@ -171,9 +178,26 @@ def _evidence_row(
     )
 
 
-def _validate_result_for_storage(result: dict[str, object]) -> None:
+def _validate_result_for_storage(
+    result: dict[str, object],
+    *,
+    candidates: list[dict[str, object]],
+    expected_scenario_ids: list[str] | None = None,
+) -> None:
     order = result.get("physical_review_order")
     scenarios = result.get("scenarios")
+    candidate_scenario_ids = [
+        item.get("scenario_id") for item in candidates if isinstance(item, dict)
+    ]
+    result_scenario_ids = (
+        [
+            item.get("scenario_id")
+            for item in scenarios
+            if isinstance(item, dict)
+        ]
+        if isinstance(scenarios, list)
+        else []
+    )
     if (
         result.get("contract_version")
         != CI_DESIGN_FEASIBILITY_CONTRACT_VERSION
@@ -188,6 +212,23 @@ def _validate_result_for_storage(result: dict[str, object]) -> None:
         or order.get("recommendation_permitted") is not False
         or not isinstance(scenarios, list)
         or not 1 <= len(scenarios) <= 200
+        or len(candidate_scenario_ids) != len(candidates)
+        or any(
+            not isinstance(scenario_id, str) or not scenario_id
+            for scenario_id in candidate_scenario_ids
+        )
+        or len(set(candidate_scenario_ids)) != len(candidate_scenario_ids)
+        or len(result_scenario_ids) != len(scenarios)
+        or any(
+            not isinstance(scenario_id, str) or not scenario_id
+            for scenario_id in result_scenario_ids
+        )
+        or len(set(result_scenario_ids)) != len(result_scenario_ids)
+        or not set(result_scenario_ids).issubset(set(candidate_scenario_ids))
+        or (
+            expected_scenario_ids is not None
+            and set(result_scenario_ids) != set(expected_scenario_ids)
+        )
         or order.get("shortlist_count") != min(10, len(scenarios))
         or any(
             not isinstance(item, dict)

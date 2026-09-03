@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -112,9 +112,10 @@ function renderPage() {
   render(<QueryClientProvider client={new QueryClient()}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
 }
 
-function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture, holdAnalysis = false) {
+function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture, holdAnalysis = false, failStcSave = false) {
   let currentSavedDesign = savedDesign;
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  let currentRebateState = rebateState;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path.endsWith("/settings/device-profile")) {
       const suggested = deviceProfileFixture;
@@ -130,6 +131,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
       currentSavedDesign = { ...currentSavedDesign, candidate_count: currentSavedDesign.candidate_count + 1, candidates: [...currentSavedDesign.candidates, { scenario_id: scenarioId, label: request.label, pv_capacity_kwp_dc: request.pv_capacity_kwp_dc, nominal_capacity_kwh: request.battery_capacity_kwh, pv_inverter_capacity_kw_ac: request.inverter_capacity_kw_ac, max_discharge_kw: request.battery_capacity_kwh / 2 }] };
       return new Response(JSON.stringify({ ...currentSavedDesign, added_scenario_id: scenarioId, quoted_net_capex_aud_ex_gst: request.quoted_net_capex_aud_ex_gst, normalization: { requested_pv_capacity_kwp_dc: request.pv_capacity_kwp_dc, actual_pv_capacity_kwp_dc: request.pv_capacity_kwp_dc, requested_battery_capacity_kwh: request.battery_capacity_kwh, actual_battery_capacity_kwh: request.battery_capacity_kwh, requested_inverter_capacity_kw_ac: request.inverter_capacity_kw_ac, actual_inverter_capacity_kw_ac: request.inverter_capacity_kw_ac } }), { status: 200 });
     }
+    if (path.endsWith("/design-candidates") && init?.method === "POST" && currentSavedDesign) return new Response(JSON.stringify(currentSavedDesign), { status: 200 });
     if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(currentSavedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: currentSavedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
     if (path.endsWith("/design-price-preview") && currentSavedDesign) return new Response(JSON.stringify({
       contract_version: "ci_design_price_preview_v1",
@@ -158,17 +160,37 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
       recommendation_permitted: false,
     }), { status: 200 });
     if (path.endsWith("/design-feasibility")) {
-      if (init?.method === "POST" && holdAnalysis) return new Promise<Response>(() => undefined);
+      if (init?.method === "POST" && holdAnalysis) return new Promise<Response>((resolve) => window.setTimeout(() => resolve(new Response(JSON.stringify({ detail: { message: "Synthetic delayed analysis stopped." } }), { status: 422 })), 500));
       return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     }
     if (path.endsWith("/tariff-profile")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_profile_state_v1", status: "not_available", updated_at: null, approved_at: null, profile_sha256: null, profile: null, suggested_profile: null, evidence_basis: null, blockers: [{ code: "tariff_profile_evidence_required", message: "Upload and review bill evidence before approving a tariff profile." }] }), { status: 200 });
-    if (path.endsWith("/rebate-profile")) return new Response(JSON.stringify(rebateState), { status: 200 });
+    if (path.endsWith("/rebate-profile/stc-settings") && init?.method === "PUT") {
+      if (failStcSave) return new Response(JSON.stringify({ detail: { message: "Synthetic STC save failed." } }), { status: 422 });
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const nextProfile = structuredClone(currentRebateState.profile ?? currentRebateState.suggested_profile);
+      nextProfile.programs.solar_stc.enabled = Boolean(body.solar_stc_enabled);
+      nextProfile.programs.solar_stc.certificate_price_aud_ex_gst = Number(body.solar_stc_price_aud_ex_gst);
+      nextProfile.programs.battery_stc.enabled = Boolean(body.battery_stc_enabled);
+      nextProfile.programs.battery_stc.certificate_price_aud_ex_gst = Number(body.battery_stc_price_aud_ex_gst);
+      currentRebateState = {
+        ...currentRebateState,
+        status: "approved",
+        updated_at: "2026-09-03T00:00:00Z",
+        approved_at: "2026-09-03T00:00:00Z",
+        profile_sha256: "d".repeat(64),
+        profile: nextProfile,
+      };
+      return new Response(JSON.stringify(currentRebateState), { status: 200 });
+    }
+    if (path.endsWith("/rebate-profile")) return new Response(JSON.stringify(currentRebateState), { status: 200 });
     if (path.endsWith("/tariff-replay")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/annual-financial-comparison")) return new Response(JSON.stringify({ contract_version: "ci_project_annual_financial_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     if (path.endsWith("/projects") && init?.method === "POST") return new Response(JSON.stringify({ contract_version: "ci_project_v1", ...project, project_id: "project-new", display_name: JSON.parse(String(init.body)).display_name }), { status: 201 });
     if (path.endsWith("/projects")) return new Response(JSON.stringify({ contract_version: "ci_project_registry_v1", projects }), { status: 200 });
     throw new Error(`Unexpected request: ${path}`);
-  }));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 describe("C&I project workspace", () => {
@@ -179,8 +201,8 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("button", { name: "Open project Commercial feasibility" })).toBeTruthy();
     expect(screen.getByRole("complementary", { name: "Project workspace" }).className).toContain("lg:sticky");
     expect(screen.getAllByRole("button", { name: "New project" }).length).toBeGreaterThan(0);
-    for (const [index, label] of ["Evidence", "Solution Generator", "Scenario Analysis", "Finance Analysis"].entries()) {
-      expect(screen.getByRole("button", { name: `${String(index + 1).padStart(2, "0")} ${label}` })).toBeTruthy();
+    for (const label of ["Evidence", "Solution Generator", "Scenario Analysis", "Finance Analysis"]) {
+      expect(screen.getByRole("button", { name: label })).toBeTruthy();
     }
     expect(screen.queryByRole("button", { name: /Comparison/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Next: Solution Generator" })).toBeTruthy();
@@ -240,14 +262,14 @@ describe("C&I project workspace", () => {
     renderPage();
     await screen.findByRole("region", { name: "Evidence sources" });
 
-    await user.click(screen.getByRole("button", { name: "02 Solution Generator" }));
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
     const firstPvMinimum = screen.getAllByRole("spinbutton", { name: "Minimum" })[0] as HTMLInputElement;
     await user.clear(firstPvMinimum);
     await user.type(firstPvMinimum, "321");
     expect(firstPvMinimum.value).toBe("321");
 
     await user.click(screen.getByRole("button", { name: "Open project Warehouse two" }));
-    await user.click(screen.getByRole("button", { name: "02 Solution Generator" }));
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
     expect((screen.getAllByRole("spinbutton", { name: "Minimum" })[0] as HTMLInputElement).value).toBe("100");
   });
 
@@ -257,17 +279,17 @@ describe("C&I project workspace", () => {
     renderPage();
     await screen.findByRole("region", { name: "Evidence sources" });
 
-    await user.click(screen.getByRole("button", { name: /03 Scenario Analysis/ }));
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
     expect(await screen.findByRole("heading", { name: "Dispatch" })).toBeTruthy();
     expect(screen.getByText(/Generate and save the PV and battery solution space/)).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: /04 Finance Analysis/ }));
+    await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
     expect(await screen.findByRole("heading", { name: "Annual bill reconstruction" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Tariff replay needs project inputs" })).toBeTruthy();
     expect(screen.getByText("Upload and review bill evidence before approving a tariff profile.")).toBeTruthy();
     expect(screen.getByText("365 consecutive-day annual interval")).toBeTruthy();
     expect(screen.getByText("Upload at least 365 consecutive complete days of interval data.")).toBeTruthy();
-    const runButton = screen.getByRole("button", { name: "Start analysis · 03 + 04" });
+    const runButton = screen.getByRole("button", { name: "Start analysis" });
     expect(runButton.hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Review tariff profile in Evidence" })).toBeTruthy();
     expect(screen.getByText("No rebate programs selected; Finance will use $0 upfront rebates.")).toBeTruthy();
@@ -297,10 +319,10 @@ describe("C&I project workspace", () => {
     renderPage();
     await screen.findByRole("region", { name: "Evidence sources" });
 
-    await user.click(screen.getByRole("button", { name: /04 Finance Analysis/ }));
+    await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
     expect(await screen.findByText("Solar STCs require a current price and source before approval.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Review rebates in Solution Generator" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start analysis · 03 + 04" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Start analysis" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("opens generated solutions in the Dispatch left-and-right workspace", async () => {
@@ -310,7 +332,7 @@ describe("C&I project workspace", () => {
     renderPage();
     await screen.findByRole("region", { name: "Evidence sources" });
 
-    await user.click(screen.getByRole("button", { name: /03 Scenario Analysis/ }));
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
     expect(await screen.findByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Run 2 solutions" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
@@ -318,17 +340,18 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("Solution 2")).toBeTruthy();
   });
 
-  it("lists every feasible Net CAPEX quotation in step 04 after rebates", async () => {
+  it("lists every feasible Net CAPEX quotation after STC settings", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
     mockApi([readyProject], generatedDesign);
     renderPage();
     await screen.findByRole("region", { name: "Evidence sources" });
 
-    await user.click(screen.getByRole("button", { name: /02 Solution Generator/ }));
-    const rebateHeading = await screen.findByRole("heading", { name: "Rebates & certificates" });
-    const quoteHeading = screen.getByRole("heading", { name: "Solution preview & quotations" });
-    expect(screen.getByText("2 feasible")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    const rebateHeading = await screen.findByRole("heading", { name: "STC" });
+    const quoteHeading = screen.getByRole("heading", { name: "All feasible solutions & Net CAPEX" });
+    expect(screen.queryByRole("heading", { name: "Solution preview & quotations" })).toBeNull();
+    expect(screen.getByText("2 / 2 selected")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("100000");
     await user.click(screen.getByRole("button", { name: "Add custom solution" }));
@@ -345,7 +368,7 @@ describe("C&I project workspace", () => {
     await user.type(screen.getByLabelText("PCS capacity"), "110");
     await user.type(screen.getByLabelText("Quoted Net CAPEX"), "245000");
     await user.click(screen.getByRole("button", { name: "Add to comparison" }));
-    expect(await screen.findByText("3 feasible")).toBeTruthy();
+    expect(await screen.findByText("3 / 3 selected")).toBeTruthy();
     expect(screen.getByText("Client option A")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 3") as HTMLInputElement).value).toBe("245000");
     await user.click(screen.getByRole("button", { name: "Add custom solution" }));
@@ -356,12 +379,102 @@ describe("C&I project workspace", () => {
     await user.type(screen.getByLabelText("Quoted Net CAPEX"), "290000");
     await user.click(screen.getByRole("button", { name: "Add to comparison" }));
     expect(await screen.findByText(/290 kW AC, above the current 250 kW AC Site AC headroom/)).toBeTruthy();
-    expect(screen.getByText("3 feasible")).toBeTruthy();
+    expect(screen.getByText("3 / 3 selected")).toBeTruthy();
     expect(Boolean(rebateHeading.compareDocumentPosition(quoteHeading) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 2"));
     await user.type(screen.getByLabelText("Quoted Net CAPEX for Solution 2"), "123456");
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("123456");
     expect(screen.getByRole("button", { name: "Analysis" }).hasAttribute("disabled")).toBe(false);
+    await user.click(screen.getByLabelText("Select Solution 2"));
+    expect(screen.getByText("2 / 3 selected")).toBeTruthy();
+    await user.click(screen.getByLabelText("Select all solutions"));
+    expect(screen.getByText("3 / 3 selected")).toBeTruthy();
+    await user.click(screen.getByLabelText("Select all solutions"));
+    expect(screen.getByText("0 / 3 selected")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Analysis" }).hasAttribute("disabled")).toBe(true);
+    await user.click(screen.getByLabelText("Select all solutions"));
+    expect(screen.getByText("3 / 3 selected")).toBeTruthy();
+  });
+
+  it("restores model quotes and default selections after regenerating the same solutions", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    mockApi([readyProject], generatedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "All feasible solutions & Net CAPEX" });
+    await user.click(screen.getByRole("button", { name: /Save configuration & generate/ }));
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
+      expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("100000");
+      expect(screen.getByText("2 / 2 selected")).toBeTruthy();
+    });
+  });
+
+  it("saves dirty STC settings before generating solutions", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi([readyProject], generatedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "STC" });
+    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await user.click(screen.getByRole("button", { name: /Save configuration & generate/ }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/design-candidates") && init?.method === "POST")).toBe(true));
+    const requests = fetchMock.mock.calls.map(([input, init]) => ({ path: String(input), method: init?.method ?? "GET" }));
+    const stcSaveIndex = requests.findIndex((request) => request.path.endsWith("/rebate-profile/stc-settings") && request.method === "PUT");
+    const designSaveIndex = requests.findIndex((request) => request.path.endsWith("/design-candidates") && request.method === "POST");
+    expect(stcSaveIndex).toBeGreaterThan(-1);
+    expect(designSaveIndex).toBeGreaterThan(stcSaveIndex);
+  });
+
+  it("does not generate solutions when the required STC save fails", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi([readyProject], generatedDesign, rebateStateFixture, false, true);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "STC" });
+    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await user.click(screen.getByRole("button", { name: /Save configuration & generate/ }));
+
+    expect(await screen.findAllByText("Synthetic STC save failed.")).not.toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/rebate-profile/stc-settings") && init?.method === "PUT")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-candidates") && init?.method === "POST")).toHaveLength(0);
+  });
+
+  it("runs and remembers only the solutions selected for analysis", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi([readyProject], generatedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "All feasible solutions & Net CAPEX" });
+    await user.click(screen.getByLabelText("Select Solution 2"));
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/design-feasibility") && init?.method === "POST");
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ scenario_ids: ["pv-1__battery-1"] });
+    });
+    expect(await screen.findByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
+    expect(screen.queryByText("Solution 2")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
+    expect(await screen.findByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
+    expect(screen.queryByText("Solution 2")).toBeNull();
   });
 
   it("opens Scenario Analysis immediately and displays analysis progress", async () => {
@@ -371,13 +484,30 @@ describe("C&I project workspace", () => {
     renderPage();
     await screen.findByRole("region", { name: "Evidence sources" });
 
-    await user.click(screen.getByRole("button", { name: /02 Solution Generator/ }));
-    await screen.findByRole("heading", { name: "Solution preview & quotations" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "All feasible solutions & Net CAPEX" });
     await user.click(screen.getByRole("button", { name: "Analysis" }));
 
     expect(await screen.findByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
     expect((await screen.findByRole("progressbar", { name: "Running scenario dispatch" })).getAttribute("aria-valuenow")).toBe("12");
-    expect(screen.getByText(/Processing 2 saved solutions/)).toBeTruthy();
+    expect(screen.queryByText(/Processing 2 saved solutions/)).toBeNull();
+  });
+
+  it("can retry the complete analysis after a failed stage", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    const fetchMock = mockApi([readyProject], generatedDesign);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByRole("heading", { name: "All feasible solutions & Net CAPEX" });
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+
+    expect(await screen.findByText("Feasibility analysis returned an unsafe result contract.")).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Run full analysis" });
+    await user.click(retry);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-feasibility") && init?.method === "POST")).toHaveLength(2));
   });
 
 });

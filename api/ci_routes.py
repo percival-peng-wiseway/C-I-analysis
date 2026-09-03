@@ -23,6 +23,7 @@ from api.ci_schemas import (
     CiPricingCatalogReplaceRequest,
     CiProjectCreateRequest,
     CiProjectRebateProfileSaveRequest,
+    CiScenarioSelectionRequest,
     CiProjectStcSettingsSaveRequest,
     CiProjectTariffProfileSaveRequest,
 )
@@ -970,6 +971,7 @@ def post_ci_design_feasibility(
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
     object_store: ObjectStore = Depends(get_object_store),
+    payload: CiScenarioSelectionRequest | None = None,
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
@@ -988,6 +990,10 @@ def post_ci_design_feasibility(
                     "ci_project_design_required",
                     "Save and validate the system design before running feasibility.",
                 )
+            selected_candidates = _select_ci_design_candidates(
+                candidates,
+                scenario_ids=(payload.scenario_ids if payload is not None else None),
+            )
             _, interval = load_ci_project_evidence_sources(
                 session,
                 object_store,
@@ -997,7 +1003,7 @@ def post_ci_design_feasibility(
         interval_sha256 = hashlib.sha256(interval.data).hexdigest()
         candidates_sha256 = design_candidates_sha256(candidates)
         result = analyze_ci_design_feasibility(
-            interval.data, scenarios=candidates
+            interval.data, scenarios=selected_candidates
         )
         with session_factory() as session:
             with session.begin():
@@ -1007,6 +1013,10 @@ def post_ci_design_feasibility(
                     actor=actor,
                     expected_interval_sha256=interval_sha256,
                     expected_design_candidates_sha256=candidates_sha256,
+                    expected_scenario_ids=[
+                        str(candidate["scenario_id"])
+                        for candidate in selected_candidates
+                    ],
                     result=result,
                 )
         return result
@@ -1125,8 +1135,9 @@ def post_ci_project_tariff_replay(
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
     object_store: ObjectStore = Depends(get_object_store),
+    payload: CiScenarioSelectionRequest | None = None,
 ) -> dict[str, object]:
-    """Replay every saved design against the approved evidence-bound tariff."""
+    """Replay the selected saved designs against the approved evidence-bound tariff."""
     actor = identity_provider.current()
     try:
         with session_factory() as session:
@@ -1150,10 +1161,35 @@ def post_ci_project_tariff_replay(
                     "ci_project_design_required",
                     "Generate the solution space before running tariff replay.",
                 )
-            if feasibility["status"] != "ready":
+            selected_candidates = _select_ci_design_candidates(
+                candidates,
+                scenario_ids=(payload.scenario_ids if payload is not None else None),
+            )
+            feasibility_result = feasibility.get("result")
+            feasibility_scenarios = (
+                feasibility_result.get("scenarios")
+                if isinstance(feasibility_result, dict)
+                else None
+            )
+            feasible_scenario_ids = (
+                {
+                    scenario.get("scenario_id")
+                    for scenario in feasibility_scenarios
+                    if isinstance(scenario, dict)
+                }
+                if isinstance(feasibility_scenarios, list)
+                else set()
+            )
+            selected_scenario_ids = {
+                candidate.get("scenario_id") for candidate in selected_candidates
+            }
+            if (
+                feasibility["status"] != "ready"
+                or not selected_scenario_ids.issubset(feasible_scenario_ids)
+            ):
                 raise CiProjectError(
                     "ci_project_dispatch_required",
-                    "Run Dispatch for the current solution space before tariff replay.",
+                    "Run Dispatch for every selected solution before tariff replay.",
                 )
             saved_evidence = evidence.get("evidence")
             inspection = (
@@ -1200,7 +1236,7 @@ def post_ci_project_tariff_replay(
         result = analyze_ci_physical_scenarios(
             interval.data,
             profile=profile,
-            scenarios=candidates,
+            scenarios=selected_candidates,
         )
         with session_factory() as session:
             with session.begin():
@@ -1223,6 +1259,10 @@ def post_ci_project_tariff_replay(
                     expected_interval_sha256=expected_interval_sha256,
                     expected_design_candidates_sha256=expected_design_sha256,
                     expected_tariff_profile_sha256=expected_profile_sha256,
+                    expected_scenario_ids=[
+                        str(candidate["scenario_id"])
+                        for candidate in selected_candidates
+                    ],
                     active_tariff_profile=current_profile,
                     result=result,
                 )
@@ -2052,3 +2092,27 @@ def _rebate_profile_blocks_finance(state: dict[str, object]) -> bool:
         state.get("status") in {"draft", "stale"}
         and rebate_profile_has_enabled_program(state.get("profile"))
     )
+
+
+def _select_ci_design_candidates(
+    candidates: list[dict[str, object]], *, scenario_ids: list[str] | None
+) -> list[dict[str, object]]:
+    if scenario_ids is None:
+        return candidates
+    requested_ids = set(scenario_ids)
+    saved_ids = {
+        candidate.get("scenario_id")
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    }
+    unknown_ids = requested_ids - saved_ids
+    if unknown_ids:
+        raise CiProjectError(
+            "ci_project_scenario_selection_invalid",
+            "Every selected solution must belong to the saved solution space.",
+        )
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.get("scenario_id") in requested_ids
+    ]

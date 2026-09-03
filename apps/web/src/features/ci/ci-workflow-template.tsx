@@ -15,7 +15,6 @@ type TemplateStage = Extract<CiWorkspaceStage, "dispatch" | "tariff_replay">;
 
 const definitions = {
   dispatch: {
-    number: "03",
     eyebrow: "Interval operations",
     title: "Dispatch",
     description: "Review how Solar and Battery operate through each interval before applying tariff charges.",
@@ -25,7 +24,6 @@ const definitions = {
     outputs: ["Solar generation", "Battery charge / discharge", "State of charge", "Grid import / export"],
   },
   tariff_replay: {
-    number: "04",
     eyebrow: "Cost reconstruction",
     title: "Tariff replay",
     description: "Replay every physical scenario against approved retail, network and demand-charge rules to rebuild the annual bill.",
@@ -41,7 +39,7 @@ export function CiWorkflowTemplate({ project, stage }: { project: CiProject; sta
   return (
     <div className="space-y-5">
       <section aria-label={`${definition.title} workflow`} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-5 sm:px-6"><div><p className="text-xs font-semibold uppercase tracking-[.16em] text-cyan-700">{definition.number} · {definition.title}</p><h2 className="mt-1 text-xl font-semibold text-slate-950">Inputs → module logic → outputs</h2><p className="mt-1 text-sm text-slate-500">This establishes the review structure now; calculation contracts can be connected later without changing the navigation.</p></div><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-500">Calculation pending</span></div>
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-5 sm:px-6"><div><p className="text-xs font-semibold uppercase tracking-[.16em] text-cyan-700">{definition.title}</p><h2 className="mt-1 text-xl font-semibold text-slate-950">Inputs → module logic → outputs</h2><p className="mt-1 text-sm text-slate-500">This establishes the review structure now; calculation contracts can be connected later without changing the navigation.</p></div><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-500">Calculation pending</span></div>
         <div className="grid gap-px bg-slate-200 lg:grid-cols-[1fr_auto_1fr_auto_1fr]">
           <FlowColumn items={definition.inputs} label="Inputs" />
           <FlowArrow />
@@ -61,10 +59,10 @@ export function CiWorkflowTemplate({ project, stage }: { project: CiProject; sta
   );
 }
 
-export function ModulePrerequisite({ description, project, stage, title }: { description: string; project: CiProject; stage: string; title: string }) {
+export function ModulePrerequisite({ description, project, title }: { description: string; project: CiProject; title: string }) {
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-5 py-5 sm:px-6"><p className="text-xs font-semibold uppercase tracking-[.18em] text-cyan-700">{stage} · workflow module</p><h2 className="mt-1 text-xl font-semibold text-slate-950">{title}</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">{description}</p></div>
+      <div className="border-b border-slate-200 px-5 py-5 sm:px-6"><h2 className="text-xl font-semibold text-slate-950">{title}</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">{description}</p></div>
       <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div><h3 className="text-lg font-semibold text-slate-950">Template available</h3><p className="mt-2 text-sm leading-6 text-slate-600">This module is part of the five-step flow and remains accessible. Complete the prerequisite evidence to replace this template with project-specific analysis.</p><div className="mt-5 grid gap-3 sm:grid-cols-3"><PlaceholderMetric label="Project" value={project.display_name} /><PlaceholderMetric label="Status" value="Input required" /><PlaceholderMetric label="Calculation" value="Not started" /></div></div>
         <div className="rounded-xl bg-amber-50 p-4 text-amber-950"><div className="flex items-center gap-2 font-semibold"><CircleDashed className="size-4" />Prerequisite</div><p className="mt-2 text-sm leading-6">Bill, NEM12 and the relevant system inputs must be available before Python can produce this module&apos;s project result.</p></div>

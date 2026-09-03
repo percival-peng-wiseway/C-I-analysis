@@ -213,7 +213,7 @@ export function CiTariffReplay({
     : tariffProfile.data?.blockers.map((blocker) => blocker.message).join(" ") || (tariffApproved ? `Approved: ${profileLabel ?? "project tariff"}.` : "Review and approve the project tariff profile in Evidence.");
   const checks = [
     { label: "Solution space saved", ready: designReady },
-    { detail: dispatchReady ? "The saved result will be recalculated." : "03 will run before tariff and Finance.", label: "03 Dispatch ready to run", ready: designReady },
+    { detail: dispatchReady ? "The saved result will be recalculated." : "Scenario Analysis will run before tariff and Finance.", label: "Scenario Analysis ready to run", ready: designReady },
     { label: "Bill reviewed", ready: billApproved },
     { label: "Tariff code identified", ready: tariffIdentified },
     { label: "E1 / B1 / Q1 / K1 aligned", ready: intervalReady },
@@ -610,7 +610,7 @@ function TariffBasis({ evidenceCode, profileLabel, result, scenario }: { evidenc
 }
 
 function FinanceRunHeader({ canRun, count, hasResult, onRun, pending }: { canRun: boolean; count: number; hasResult: boolean; onRun: () => void; pending: boolean }) {
-  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates 03 Dispatch, then 04 tariff and Finance for all {count} solutions.</p></div></div><Button disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Running 03 + 04…" : hasResult ? "Re-run 03 + 04" : "Start analysis · 03 + 04"}</Button></header>;
+  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates Scenario Analysis, tariff and Finance for all {count} solutions.</p></div></div><Button disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Analysis running…" : hasResult ? "Re-run analysis" : "Start analysis"}</Button></header>;
 }
 
 function ReplayLoading() { return <section className="grid min-h-[420px] place-items-center rounded-xl border border-slate-200 bg-white"><div className="text-center"><RefreshCw className="mx-auto size-6 animate-spin text-cyan-700" /><h2 className="mt-4 font-semibold text-slate-950">Loading tariff replay</h2><p className="mt-1 text-sm text-slate-500">Checking project evidence and completed scenarios.</p></div></section>; }

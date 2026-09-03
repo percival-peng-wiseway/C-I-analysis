@@ -55,9 +55,11 @@ describe("analyzeCiPhysicalScenarios", () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBe("/api/commercial-industrial/projects/project-1/tariff-replay");
       expect(init?.method).toBe("POST");
+      expect(init?.headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
+      expect(init?.body).toBe(JSON.stringify({ scenario_ids: ["b", "a"] }));
       return new Response(JSON.stringify({ detail: { message: "Approved tariff evidence is required." } }), { status: 409 });
     };
-    await expect(runCiProjectTariffReplay("project-1", fetcher as typeof fetch)).rejects.toThrow("Approved tariff evidence is required.");
+    await expect(runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["b", "a"])).rejects.toThrow("Approved tariff evidence is required.");
   });
 
   it("restores the project tariff replay state without starting a new run", async () => {
