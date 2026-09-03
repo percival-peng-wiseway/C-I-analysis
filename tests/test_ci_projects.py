@@ -734,6 +734,9 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
     def tariff_replay(_interval_bytes, *, profile, scenarios):
         assert profile == {"profile_id": "test"}
         scenario_ids = [scenario["scenario_id"] for scenario in scenarios]
+        scenario_by_id = {
+            scenario["scenario_id"]: scenario for scenario in scenarios
+        }
         captured_tariff.append(scenario_ids)
         result_ids = scenario_ids
         if tariff_mode["value"] == "duplicate":
@@ -751,17 +754,47 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
             "customer_facing_permission": False,
             "recommendation_permitted": False,
             "currency_values_permitted": True,
+            "profile": {"profile_id": "test"},
+            "baseline": {"raw_rolling_demand_kva": 300.0},
+            "ranking_basis": "Physical review only.",
             "scenarios": [
                 {
                     "scenario_id": scenario_id,
+                    "physical_review_rank": index,
                     "recommendation_permitted": False,
+                    "authored_inputs": {
+                        "pv_capacity_kwp_dc": float(
+                            scenario_by_id.get(scenario_id, {}).get(
+                                "pv_capacity_kwp_dc", 100.0
+                            )
+                        ),
+                        "nominal_capacity_kwh": float(
+                            scenario_by_id.get(scenario_id, {}).get(
+                                "nominal_capacity_kwh", 200.0
+                            )
+                        ),
+                    },
+                    "post_dispatch": {
+                        "raw_rolling_demand_kva": {
+                            "scenario-a": 200.0,
+                            "scenario-b": 150.0,
+                            "scenario-c": 100.0,
+                        }.get(scenario_id, 250.0)
+                    },
                     "annual_tariff_value": {
                         "customer_facing_permission": False,
+                        "baseline_cost_ex_gst_aud": 1_000.0,
+                        "scenario_cost_ex_gst_aud": {
+                            "scenario-a": 800.0,
+                            "scenario-b": 750.0,
+                            "scenario-c": 700.0,
+                        }.get(scenario_id, 900.0),
                     },
                 }
-                for scenario_id in result_ids
+                for index, scenario_id in enumerate(result_ids, start=1)
             ],
             "report_preview": {"download_available": False},
+            "assumptions": [],
         }
 
     monkeypatch.setattr(
@@ -833,6 +866,14 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
         assert unknown.json()["detail"]["code"] == (
             "ci_project_scenario_selection_invalid"
         )
+        feasibility_rejects_tariff_mode = client.post(
+            f"{project_url}/design-feasibility",
+            json={
+                "scenario_ids": ["scenario-a"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert feasibility_rejects_tariff_mode.status_code == 422
 
         selection = ["scenario-c", "scenario-a"]
         selected_feasibility = client.post(
@@ -883,6 +924,55 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
         assert unanalysed_tariff_selection.json()["detail"]["code"] == (
             "ci_project_dispatch_required"
         )
+        invalid_persistence_mode = client.post(
+            f"{project_url}/tariff-replay",
+            json={
+                "scenario_ids": ["scenario-a"],
+                "persistence_mode": "append",
+            },
+        )
+        assert invalid_persistence_mode.status_code == 422
+
+        checkpoint_c = client.post(
+            f"{project_url}/tariff-replay",
+            json={
+                "scenario_ids": ["scenario-c"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert checkpoint_c.status_code == 200, checkpoint_c.json()
+        assert [
+            scenario["scenario_id"] for scenario in checkpoint_c.json()["scenarios"]
+        ] == ["scenario-c"]
+
+        checkpoint_a = client.post(
+            f"{project_url}/tariff-replay",
+            json={
+                "scenario_ids": ["scenario-a"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert checkpoint_a.status_code == 200, checkpoint_a.json()
+        assert [
+            (scenario["scenario_id"], scenario["physical_review_rank"])
+            for scenario in checkpoint_a.json()["scenarios"]
+        ] == [("scenario-c", 1), ("scenario-a", 2)]
+        checkpoint_state = client.get(f"{project_url}/tariff-replay").json()
+        assert checkpoint_state["status"] == "ready"
+        checkpoint_saved_at = checkpoint_state["saved_at"]
+
+        repeated_checkpoint = client.post(
+            f"{project_url}/tariff-replay",
+            json={
+                "scenario_ids": ["scenario-a"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert repeated_checkpoint.status_code == 200
+        assert repeated_checkpoint.json() == checkpoint_a.json()
+        assert client.get(f"{project_url}/tariff-replay").json()[
+            "saved_at"
+        ] == checkpoint_saved_at
 
         selected_tariff = client.post(
             f"{project_url}/tariff-replay",

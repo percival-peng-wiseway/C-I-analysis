@@ -136,8 +136,10 @@ export function CiTariffReplay({
         ? finance.data.result.solutions.map((solution) => ({ scenarioId: solution.scenario_id, upfrontCostAudExGst: solution.upfront_cost_aud_ex_gst }))
         : null;
       if (!savedManualPrices && !equipmentSelection) throw new Error("Select the supported PV, battery and hybrid inverter / PCS before calculating.");
-      const feasibilityResult = await runCiDesignFeasibility(project.project_id);
-      const tariffResult = await runCiProjectTariffReplay(project.project_id);
+      const scenarioIds = design.data?.candidates.map((candidate) => candidate.scenario_id) ?? [];
+      if (!scenarioIds.length) throw new Error("Generate at least one solution before calculating.");
+      const feasibilityResult = await runCiDesignFeasibility(project.project_id, fetch, undefined, scenarioIds);
+      const tariffResult = await runCiProjectTariffReplay(project.project_id, fetch, undefined, scenarioIds);
       const financeResult = await compareCiAnnualFinancialScenarios({
         projectId: project.project_id,
         pricingMode: savedManualPrices ? "manual_quotes" : "device_profile",

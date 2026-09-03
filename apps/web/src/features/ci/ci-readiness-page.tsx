@@ -535,7 +535,18 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
         ? savedTariffReplay.result
         : await (async () => {
           setProgress({ projectId, percent: 52, label: "Reconstructing tariffs" });
-          return runCiProjectTariffReplay(projectId, fetch, undefined, scenarioIds);
+          return runCiProjectTariffReplay(projectId, fetch, undefined, scenarioIds, {
+            onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+              const fraction = totalScenarioCount > 0
+                ? completedScenarioCount / totalScenarioCount
+                : 0;
+              setProgress({
+                projectId,
+                percent: Math.min(74, 52 + Math.round(fraction * 22)),
+                label: `Reconstructing tariffs (${completedScenarioCount}/${totalScenarioCount})`,
+              });
+            },
+          });
         })();
       setProgress({ projectId, percent: 74, label: "Revalidating Net CAPEX" });
       let currentPreview: CiDesignPricePreview;

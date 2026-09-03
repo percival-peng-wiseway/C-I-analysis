@@ -158,17 +158,7 @@ def validate_ci_design_candidates(scenarios: object) -> dict[str, object]:
 def _physical_scenario_result(
     *, tariff_result: dict[str, object], results: list[dict[str, object]]
 ) -> dict[str, object]:
-    ranked = sorted(
-        results,
-        key=lambda item: (
-            item["post_dispatch"]["raw_rolling_demand_kva"],
-            item["authored_inputs"]["pv_capacity_kwp_dc"],
-            item["authored_inputs"]["nominal_capacity_kwh"],
-            item["scenario_id"],
-        ),
-    )
-    for rank, item in enumerate(ranked, start=1):
-        item["physical_review_rank"] = rank
+    ranked = rank_ci_physical_scenario_results(results)
 
     return {
         "contract_version": CI_PHYSICAL_SCENARIO_CONTRACT_VERSION,
@@ -227,6 +217,25 @@ def _physical_scenario_result(
             "The active evidence profile and bill reconciliation must pass before scenarios run.",
         ],
     }
+
+
+def rank_ci_physical_scenario_results(
+    results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return the authoritative physical-review order and rewrite contiguous ranks."""
+
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            item["post_dispatch"]["raw_rolling_demand_kva"],
+            item["authored_inputs"]["pv_capacity_kwp_dc"],
+            item["authored_inputs"]["nominal_capacity_kwh"],
+            item["scenario_id"],
+        ),
+    )
+    for rank, item in enumerate(ranked, start=1):
+        item["physical_review_rank"] = rank
+    return ranked
 
 
 def analyze_ci_three_case_comparison(

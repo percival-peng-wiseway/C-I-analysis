@@ -49,6 +49,19 @@ Wrangler builds the frontend, bundles the Worker, builds the linux/amd64
 container image and rolls out the container. Initial provisioning can take a
 few minutes.
 
+Do not start a production analysis while a deployment is still propagating.
+A Worker code update can restart its Durable Object, so every long calculation
+must persist resumable checkpoints rather than depend on one uninterrupted
+proxy request. Tariff replay uses small, idempotent scenario batches for this
+reason. A failed batch can be resumed from PostgreSQL without re-running the
+completed batches or accumulating a rebate or financial value twice.
+
+The production container configuration keeps capacity for rollout overlap and
+uses an active rollout grace period. These settings reduce cold-start and
+container-replacement failures, but they do not replace application-level
+checkpoints: Durable Objects can also restart because of platform or Worker
+updates.
+
 The production Worker starts the API container in the background on an HTML
 navigation and keeps the single instance available for two hours after its
 last activity. This reduces repeated project-list cold starts during a working

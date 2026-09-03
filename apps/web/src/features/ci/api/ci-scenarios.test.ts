@@ -50,16 +50,284 @@ const reviewProjection = (battery: boolean, index = 0) => ({
   points: [{ interval_timestamp: "2026-02-02T17:00:00+11:00", local_timestamp: "2026-02-02T17:00:00+11:00", local_time_label: "17:00 AEDT", baseline_import_kw: 100, post_dispatch_import_kw: 90, baseline_kva: 110, post_dispatch_kva: 100, site_reactive_import_kvar: 45.8, inverter_reactive_support_kvar: 0, post_grid_reactive_kvar: 45.8, grid_charge_kw: 0, pv_charge_kw: 0, battery_discharge_kw: battery ? 10 : 0, soc_end_kwh: battery ? 90 : null }],
 });
 
+const physicalResultFor = (inputs: CiScenarioInput[]) => ({
+  contract_version: "ci_physical_scenario_review_v6",
+  analysis_status: "ready",
+  analysis_mode: "evidence_limited_internal_review",
+  customer_facing_permission: false,
+  recommendation_permitted: false,
+  currency_values_permitted: true,
+  ranking_basis: "Physical order only",
+  baseline: {},
+  scenarios: inputs.map((scenario, index) => ({
+    scenario_id: scenario.scenario_id,
+    label: scenario.label,
+    physical_review_rank: index + 1,
+    authored_inputs: scenario,
+    post_dispatch: {
+      authority_source: "ci_peak_shaving_rolling_replay_v2",
+      incentive_demand_kva: 10,
+      billing_period_max_kva: 10,
+      billing_period_max_kw: 8,
+      maximum_reactive_support_kvar: 0,
+      maximum_post_grid_reactive_kvar: 45.8,
+      maximum_shared_inverter_apparent_power_kva: 80,
+      billing_period_peak_kw_reduction: 2,
+      billing_period_peak_effect: "reduction",
+      billing_period_peak_change_kw: 2,
+      billing_period_projection_status: "evaluated",
+    },
+    annual_tariff_value: {
+      calculation_method: "representative_year_repeat_v1",
+      first_year_value_ex_gst_aud: 1000,
+      first_year_value_inc_gst_aud: 1100,
+      customer_facing_permission: false,
+    },
+    selected_monthly_thresholds_kw: Array(12).fill(1),
+    optimizer_run_snapshot: {
+      contract_version: "ci_optimizer_run_snapshot_v2",
+      snapshot_sha256: `${index}`.padStart(64, "0"),
+      algorithm_id: "ci_peak_shaving_rolling_replay_v2",
+      customer_facing_permission: false,
+      recommendation_permitted: false,
+      input_projection: {},
+      physical_assumptions: {},
+      result_projection: { interval_dispatch_sha256: "b".repeat(64) },
+    },
+    optimizer_audit_projection: {
+      contract_version: "ci_optimizer_audit_projection_v2",
+      snapshot_sha256: `${index}`.padStart(64, "0"),
+      customer_facing_permission: false,
+      recommendation_permitted: false,
+    },
+    dispatch_review_projection: reviewProjection(true, index),
+  })),
+  report_preview: {
+    status: "ready",
+    output_kind: "in_app_evidence_preview",
+    download_available: false,
+    sections: [],
+    disclaimer: "Internal only",
+  },
+  assumptions: [],
+});
+
 describe("analyzeCiPhysicalScenarios", () => {
   it("keeps project tariff replay fail-closed when the API rejects the evidence", async () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBe("/api/commercial-industrial/projects/project-1/tariff-replay");
-      expect(init?.method).toBe("POST");
+      if (!init?.method) {
+        return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+      }
+      expect(init.method).toBe("POST");
       expect(init?.headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
-      expect(init?.body).toBe(JSON.stringify({ scenario_ids: ["b", "a"] }));
+      expect(init?.body).toBe(JSON.stringify({ scenario_ids: ["b", "a"], persistence_mode: "merge_checkpoint" }));
       return new Response(JSON.stringify({ detail: { message: "Approved tariff evidence is required." } }), { status: 409 });
     };
     await expect(runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["b", "a"])).rejects.toThrow("Approved tariff evidence is required.");
+  });
+
+  it("retries an uncommitted idempotent batch only once and reports an actionable 503", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") return new Response("Backend container unavailable", { status: 503 });
+      return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toThrow(
+      "The cloud analysis service became temporarily unavailable before completion could be confirmed. Wait a moment, then run Analysis again.",
+    );
+    expect(calls).toEqual(["GET", "POST", "GET", "POST", "GET"]);
+  });
+
+  it("shows the structured Worker recovery message for a container 503", async () => {
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (!init?.method) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+      return new Response(JSON.stringify({
+        error_code: "ci_backend_container_starting",
+        message: "The analysis service is starting. Please run Analysis again shortly.",
+        request_id: "request-1",
+      }), { status: 503, headers: { "Content-Type": "application/json" } });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toThrow("The analysis service is starting. Please run Analysis again shortly.");
+  });
+
+  it("does not retry a non-transient Worker configuration 503", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+      return new Response(JSON.stringify({
+        error_code: "backend_unconfigured",
+        message: "The analysis service is not configured.",
+        request_id: "request-1",
+      }), { status: 503, headers: { "Content-Type": "application/json" } });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toThrow("The analysis service is not configured.");
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("recovers a committed batch by GET after a 503 without repeating the POST", async () => {
+    const calls: string[] = [];
+    let committed = false;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        committed = true;
+        return new Response("Backend container unavailable", { status: 503 });
+      }
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: committed ? "ready" : "not_saved",
+        saved_at: committed ? "2026-09-04T00:00:00+00:00" : null,
+        stale_reasons: [],
+        result: committed ? physicalResultFor(scenarios) : null,
+      }), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["b", "a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }, { scenario_id: "b" }] });
+    expect(calls).toEqual(["GET", "POST", "GET"]);
+  });
+
+  it("retries the same merge batch once when the first 503 did not commit", async () => {
+    const calls: string[] = [];
+    let postCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        postCount += 1;
+        if (postCount === 1) return new Response("Backend container unavailable", { status: 503 });
+        expect(JSON.parse(String(init.body))).toEqual({
+          scenario_ids: ["a"],
+          persistence_mode: "merge_checkpoint",
+        });
+        return new Response(JSON.stringify(physicalResultFor([scenarios[0]])), { status: 200 });
+      }
+      return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "POST", "GET", "POST"]);
+  });
+
+  it("resumes a partial checkpoint, batches missing scenarios, and reports progress", async () => {
+    const requested = ["a", "b", "c", "d", "e"].map((scenarioId) => ({
+      ...scenarios[0],
+      scenario_id: scenarioId,
+      label: `Scenario ${scenarioId}`,
+    }));
+    const completed = new Set(["a"]);
+    const postedBatches: Array<{ persistence_mode: string; scenario_ids: string[] }> = [];
+    const progress: Array<[number, number]> = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { persistence_mode: string; scenario_ids: string[] };
+        postedBatches.push(body);
+        body.scenario_ids.forEach((scenarioId) => completed.add(scenarioId));
+        const included = requested.filter((scenario) => completed.has(scenario.scenario_id));
+        return new Response(JSON.stringify(physicalResultFor(included)), { status: 200 });
+      }
+      const included = requested.filter((scenario) => completed.has(scenario.scenario_id));
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "ready",
+        saved_at: "2026-09-04T00:00:00+00:00",
+        stale_reasons: [],
+        result: physicalResultFor(included),
+      }), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay(
+        "project-1",
+        fetcher as typeof fetch,
+        undefined,
+        requested.map((scenario) => scenario.scenario_id),
+        {
+          batchSize: 2,
+          onProgress: ({ completedScenarioCount, totalScenarioCount }) => progress.push([completedScenarioCount, totalScenarioCount]),
+        },
+      ),
+    ).resolves.toMatchObject({ scenarios: requested.map((scenario) => ({ scenario_id: scenario.scenario_id })) });
+    expect(postedBatches).toEqual([
+      { persistence_mode: "merge_checkpoint", scenario_ids: ["b", "c"] },
+      { persistence_mode: "merge_checkpoint", scenario_ids: ["d", "e"] },
+    ]);
+    expect(progress).toEqual([[1, 5], [3, 5], [5, 5]]);
+  });
+
+  it("uses the same read-only recovery after a non-abort network disconnect", async () => {
+    const calls: string[] = [];
+    let committed = false;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        committed = true;
+        throw new TypeError("Failed to fetch");
+      }
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: committed ? "ready" : "not_saved",
+        saved_at: committed ? "2026-09-04T00:00:00+00:00" : null,
+        stale_reasons: [],
+        result: committed ? physicalResultFor([scenarios[0]]) : null,
+      }), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "POST", "GET"]);
+  });
+
+  it("does not recover or retry an explicitly aborted tariff replay", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+      const error = new Error("The operation was aborted.");
+      error.name = "AbortError";
+      throw error;
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("returns an already complete current checkpoint without starting a POST", async () => {
+    const calls: string[] = [];
+    const progress: number[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "ready",
+        saved_at: "2026-09-04T00:00:00+00:00",
+        stale_reasons: [],
+        result: physicalResultFor(scenarios),
+      }), { status: 200 });
+    };
+
+    await expect(runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a", "b"], {
+      onProgress: ({ completedScenarioCount }) => progress.push(completedScenarioCount),
+    })).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }, { scenario_id: "b" }] });
+    expect(calls).toEqual(["GET"]);
+    expect(progress).toEqual([2]);
   });
 
   it("restores the project tariff replay state without starting a new run", async () => {
@@ -81,67 +349,7 @@ describe("analyzeCiPhysicalScenarios", () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBe("/api/commercial-industrial/powercor-llvt2-physical-scenarios");
       expect((init?.body as FormData).get("scenarios")).toBe(JSON.stringify(scenarios));
-      return new Response(JSON.stringify({
-        contract_version: "ci_physical_scenario_review_v6",
-        analysis_status: "ready",
-        analysis_mode: "evidence_limited_internal_review",
-        customer_facing_permission: false,
-        recommendation_permitted: false,
-        currency_values_permitted: true,
-        ranking_basis: "Physical order only",
-        baseline: {},
-        scenarios: scenarios.map((scenario, index) => ({
-          scenario_id: scenario.scenario_id,
-          label: scenario.label,
-          physical_review_rank: index + 1,
-          authored_inputs: scenario,
-          post_dispatch: {
-            authority_source: "ci_peak_shaving_rolling_replay_v2",
-            incentive_demand_kva: 10,
-            billing_period_max_kva: 10,
-            billing_period_max_kw: 8,
-            maximum_reactive_support_kvar: 0,
-            maximum_post_grid_reactive_kvar: 45.8,
-            maximum_shared_inverter_apparent_power_kva: 80,
-            billing_period_peak_kw_reduction: 2,
-            billing_period_peak_effect: "reduction",
-            billing_period_peak_change_kw: 2,
-            billing_period_projection_status: "evaluated",
-          },
-          annual_tariff_value: {
-            calculation_method: "representative_year_repeat_v1",
-            first_year_value_ex_gst_aud: 1000,
-            first_year_value_inc_gst_aud: 1100,
-            customer_facing_permission: false,
-          },
-          selected_monthly_thresholds_kw: Array(12).fill(1),
-          optimizer_run_snapshot: {
-            contract_version: "ci_optimizer_run_snapshot_v2",
-            snapshot_sha256: `${index}`.padStart(64, "0"),
-            algorithm_id: "ci_peak_shaving_rolling_replay_v2",
-            customer_facing_permission: false,
-            recommendation_permitted: false,
-            input_projection: {},
-            physical_assumptions: {},
-            result_projection: { interval_dispatch_sha256: "b".repeat(64) },
-          },
-          optimizer_audit_projection: {
-            contract_version: "ci_optimizer_audit_projection_v2",
-            snapshot_sha256: `${index}`.padStart(64, "0"),
-            customer_facing_permission: false,
-            recommendation_permitted: false,
-          },
-          dispatch_review_projection: reviewProjection(true, index),
-        })),
-        report_preview: {
-          status: "ready",
-          output_kind: "in_app_evidence_preview",
-          download_available: false,
-          sections: [],
-          disclaimer: "Internal only",
-        },
-        assumptions: [],
-      }), { status: 200 });
+      return new Response(JSON.stringify(physicalResultFor(scenarios)), { status: 200 });
     };
 
     await expect(

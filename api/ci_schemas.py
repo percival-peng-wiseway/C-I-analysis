@@ -212,6 +212,10 @@ class CiScenarioSelectionRequest(BaseModel):
         return scenario_ids
 
 
+class CiTariffReplayRequest(CiScenarioSelectionRequest):
+    persistence_mode: Literal["replace", "merge_checkpoint"] = "replace"
+
+
 class CiBillReviewRequest(BaseModel):
     confirmed: Literal[True]
     retailer: str = Field(min_length=1, max_length=120)

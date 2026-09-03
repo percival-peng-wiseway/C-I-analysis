@@ -1,4 +1,4 @@
-import { Container } from "@cloudflare/containers";
+import { Container, type StopParams } from "@cloudflare/containers";
 export { ContainerProxy } from "@cloudflare/containers";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
@@ -22,10 +22,164 @@ const accessJwks = new Map<
   ReturnType<typeof createRemoteJWKSet>
 >();
 
+const API_PORT = 8080;
+const CONTAINER_INSTANCE_TIMEOUT_MS = 60_000;
+const CONTAINER_PORT_TIMEOUT_MS = 120_000;
+const CONTAINER_WAIT_INTERVAL_MS = 500;
+const INFRASTRUCTURE_RETRY_AFTER_SECONDS = 5;
+const REQUEST_ID_HEADER = "X-E3-Request-ID";
+const OPERATION_HEADER = "X-E3-Operation";
+
+type InfrastructureErrorCode =
+  | "access_unconfigured"
+  | "backend_unconfigured"
+  | "container_provisioning"
+  | "container_start_timeout"
+  | "container_unavailable";
+
+interface OperationalLog {
+  request_id: string;
+  operation: string;
+  status: string | number;
+  elapsed: number;
+}
+
+function logOperation(level: "error" | "info", event: OperationalLog): void {
+  const logger = level === "error" ? console.error : console.log;
+  logger("e3_cloudflare", event);
+}
+
+function infrastructureErrorResponse(
+  errorCode: InfrastructureErrorCode,
+  message: string,
+  requestId: string,
+): Response {
+  return new Response(
+    JSON.stringify({ error_code: errorCode, message, request_id: requestId }),
+    {
+      status: 503,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json; charset=utf-8",
+        "Retry-After": String(INFRASTRUCTURE_RETRY_AFTER_SECONDS),
+      },
+    },
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).toLowerCase();
+}
+
+function classifyContainerError(error: unknown): InfrastructureErrorCode {
+  const message = errorMessage(error);
+  if (
+    message.includes(
+      "there is no container instance that can be provided to this durable object",
+    ) ||
+    message.includes("there is no container instance available at this time") ||
+    message.includes("currently provisioning the container")
+  ) {
+    return "container_provisioning";
+  }
+  if (
+    message.includes("container did not start after") ||
+    message.includes("the container is not listening") ||
+    message.includes("failed to verify port")
+  ) {
+    return "container_start_timeout";
+  }
+  return "container_unavailable";
+}
+
+function infrastructureMessage(errorCode: InfrastructureErrorCode): string {
+  switch (errorCode) {
+    case "access_unconfigured":
+      return "Cloudflare Access is not configured.";
+    case "backend_unconfigured":
+      return "The analysis service is not configured.";
+    case "container_provisioning":
+      return "The analysis service is starting. Try again shortly.";
+    case "container_start_timeout":
+      return "The analysis service did not become ready in time. Wait a moment, then run Analysis again.";
+    case "container_unavailable":
+      return "The analysis connection was interrupted before completion could be confirmed. Wait a moment, then run Analysis again.";
+  }
+}
+
+async function infrastructureErrorCode(
+  response: Response,
+): Promise<InfrastructureErrorCode | null> {
+  if (response.status !== 500 && response.status !== 503) {
+    return null;
+  }
+  const body = await response.clone().text();
+  if (
+    response.status === 500 &&
+    (
+      body === "Container suddenly disconnected, try again" ||
+      body.startsWith("Error proxying request to container:")
+    )
+  ) {
+    return "container_unavailable";
+  }
+  if (response.status !== 503) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(body) as { error_code?: unknown };
+    if (
+      payload.error_code === "access_unconfigured" ||
+      payload.error_code === "backend_unconfigured" ||
+      payload.error_code === "container_provisioning" ||
+      payload.error_code === "container_start_timeout" ||
+      payload.error_code === "container_unavailable"
+    ) {
+      return payload.error_code;
+    }
+  } catch {
+    // The container library's provisioning response is plain text.
+  }
+  return body.includes("There is no Container instance available at this time")
+    ? "container_provisioning"
+    : null;
+}
+
+function operationForRequest(request: Request): string {
+  const url = new URL(request.url);
+  if (url.pathname === "/api/health") {
+    return "health";
+  }
+  if (url.pathname.endsWith("/tariff-replay")) {
+    return request.method === "POST" ? "tariff_replay_run" : "tariff_replay_state";
+  }
+  if (url.pathname.endsWith("/feasibility")) {
+    return request.method === "POST" ? "dispatch_run" : "dispatch_state";
+  }
+  if (url.pathname.includes("/annual-financial")) {
+    return request.method === "POST" ? "finance_run" : "finance_state";
+  }
+  return "api_request";
+}
+
+function canRetryContainerProvisioning(
+  request: Request,
+  operation: string,
+): boolean {
+  return request.method === "GET" || request.method === "HEAD" || [
+    "dispatch_run",
+    "tariff_replay_run",
+    "finance_run",
+  ].includes(operation);
+}
+
 export class E3ApiContainer extends Container<Env> {
+  private lifecycleRequestId: string = crypto.randomUUID();
+  private lifecycleStartedAt = Date.now();
+
   constructor(ctx: DurableObjectState<{}>, env: Env) {
     super(ctx, env, {
-      defaultPort: 8080,
+      defaultPort: API_PORT,
       sleepAfter: "2h",
       envVars: {
         DATABASE_URL: env.DATABASE_URL,
@@ -39,6 +193,85 @@ export class E3ApiContainer extends Container<Env> {
         LOCAL_ACTOR_DISPLAY_NAME: env.LOCAL_ACTOR_DISPLAY_NAME,
       },
     });
+  }
+
+  override async fetch(request: Request): Promise<Response> {
+    const requestId = request.headers.get(REQUEST_ID_HEADER) ?? crypto.randomUUID();
+    const operation = request.headers.get(OPERATION_HEADER) ?? "api_request";
+    const startedAt = Date.now();
+    try {
+      const state = await this.getState();
+      if (state.status !== "healthy") {
+        this.lifecycleRequestId = requestId;
+        this.lifecycleStartedAt = startedAt;
+        await this.startAndWaitForPorts({
+          ports: API_PORT,
+          cancellationOptions: {
+            abort: request.signal,
+            instanceGetTimeoutMS: CONTAINER_INSTANCE_TIMEOUT_MS,
+            portReadyTimeoutMS: CONTAINER_PORT_TIMEOUT_MS,
+            waitInterval: CONTAINER_WAIT_INTERVAL_MS,
+          },
+        });
+      }
+      const response = await super.fetch(request);
+      const failureCode = await infrastructureErrorCode(response);
+      if (failureCode !== null) {
+        logOperation("error", {
+          request_id: requestId,
+          operation,
+          status: failureCode,
+          elapsed: Date.now() - startedAt,
+        });
+        return infrastructureErrorResponse(
+          failureCode,
+          infrastructureMessage(failureCode),
+          requestId,
+        );
+      }
+      return response;
+    } catch (error) {
+      const failureCode = classifyContainerError(error);
+      logOperation("error", {
+        request_id: requestId,
+        operation,
+        status: failureCode,
+        elapsed: Date.now() - startedAt,
+      });
+      return infrastructureErrorResponse(
+        failureCode,
+        infrastructureMessage(failureCode),
+        requestId,
+      );
+    }
+  }
+
+  override onStart(): void {
+    logOperation("info", {
+      request_id: this.lifecycleRequestId,
+      operation: "container_start",
+      status: "ready",
+      elapsed: Date.now() - this.lifecycleStartedAt,
+    });
+  }
+
+  override onStop(params: StopParams): void {
+    logOperation("info", {
+      request_id: crypto.randomUUID(),
+      operation: "container_stop",
+      status: `${params.reason}:${params.exitCode}`,
+      elapsed: 0,
+    });
+  }
+
+  override onError(error: unknown): never {
+    logOperation("error", {
+      request_id: this.lifecycleRequestId,
+      operation: "container_lifecycle",
+      status: classifyContainerError(error),
+      elapsed: Date.now() - this.lifecycleStartedAt,
+    });
+    throw error;
   }
 }
 
@@ -98,9 +331,17 @@ function accessIssuer(teamDomain: string): string {
     : `https://${normalized}`;
 }
 
-async function verifyAccess(request: Request, env: Env): Promise<Response | null> {
+async function verifyAccess(
+  request: Request,
+  env: Env,
+  requestId: string,
+): Promise<Response | null> {
   if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) {
-    return new Response("Cloudflare Access is not configured", { status: 503 });
+    return infrastructureErrorResponse(
+      "access_unconfigured",
+      infrastructureMessage("access_unconfigured"),
+      requestId,
+    );
   }
   const token = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!token) {
@@ -127,8 +368,22 @@ async function verifyAccess(request: Request, env: Env): Promise<Response | null
 }
 
 async function proxyApi(request: Request, env: Env): Promise<Response> {
+  const requestId = crypto.randomUUID();
+  const operation = operationForRequest(request);
+  const startedAt = Date.now();
   if (!env.DATABASE_URL || !env.DURABLE_API_BEARER_TOKEN) {
-    return new Response("Backend secrets are not configured", { status: 503 });
+    const response = infrastructureErrorResponse(
+      "backend_unconfigured",
+      infrastructureMessage("backend_unconfigured"),
+      requestId,
+    );
+    logOperation("error", {
+      request_id: requestId,
+      operation,
+      status: response.status,
+      elapsed: Date.now() - startedAt,
+    });
+    return response;
   }
 
   const url = new URL(request.url);
@@ -136,42 +391,137 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
     url.pathname !== "/api/health" &&
     env.ACCESS_AUTH_MODE !== "disabled"
   ) {
-    const accessFailure = await verifyAccess(request, env);
+    const accessFailure = await verifyAccess(request, env, requestId);
     if (accessFailure !== null) {
+      logOperation("error", {
+        request_id: requestId,
+        operation,
+        status: accessFailure.status,
+        elapsed: Date.now() - startedAt,
+      });
       return accessFailure;
     }
   }
 
   const headers = new Headers(request.headers);
   headers.set("Authorization", `Bearer ${env.DURABLE_API_BEARER_TOKEN}`);
+  headers.set(REQUEST_ID_HEADER, requestId);
+  headers.set(OPERATION_HEADER, operation);
   headers.delete("Cf-Access-Jwt-Assertion");
+  const retrySource = canRetryContainerProvisioning(request, operation)
+    ? request.clone()
+    : null;
   const upstreamRequest = new Request(request, { headers });
+  const retryRequest = retrySource === null
+    ? null
+    : new Request(retrySource as unknown as RequestInfo, { headers });
+  const container = primaryContainer(env);
+  let didRetry = false;
   try {
-    const response = await primaryContainer(env).fetch(upstreamRequest);
-    if (!response.ok) {
-      console.error("E3 container upstream failed", {
-        status: response.status,
-        body: await response.clone().text(),
+    let response = await container.fetch(upstreamRequest);
+    if (
+      retryRequest !== null &&
+      await infrastructureErrorCode(response) === "container_provisioning"
+    ) {
+      didRetry = true;
+      logOperation("info", {
+        request_id: requestId,
+        operation,
+        status: "retrying_container_provisioning",
+        elapsed: Date.now() - startedAt,
       });
+      response = await container.fetch(retryRequest);
     }
+    const failureCode = await infrastructureErrorCode(response);
+    if (failureCode !== null) {
+      response = infrastructureErrorResponse(
+        failureCode,
+        infrastructureMessage(failureCode),
+        requestId,
+      );
+    }
+    logOperation(response.ok ? "info" : "error", {
+      request_id: requestId,
+      operation,
+      status: response.status,
+      elapsed: Date.now() - startedAt,
+    });
     return response;
   } catch (error) {
-    console.error(
-      "E3 Durable Object proxy failed",
-      error instanceof Error ? error.message : String(error),
+    let failureCode = classifyContainerError(error);
+    if (
+      retryRequest !== null &&
+      !didRetry &&
+      failureCode === "container_provisioning"
+    ) {
+      didRetry = true;
+      logOperation("info", {
+        request_id: requestId,
+        operation,
+        status: "retrying_container_provisioning",
+        elapsed: Date.now() - startedAt,
+      });
+      try {
+        let response = await container.fetch(retryRequest);
+        const retryFailureCode = await infrastructureErrorCode(response);
+        if (retryFailureCode !== null) {
+          response = infrastructureErrorResponse(
+            retryFailureCode,
+            infrastructureMessage(retryFailureCode),
+            requestId,
+          );
+        }
+        logOperation(response.ok ? "info" : "error", {
+          request_id: requestId,
+          operation,
+          status: response.status,
+          elapsed: Date.now() - startedAt,
+        });
+        return response;
+      } catch (retryError) {
+        failureCode = classifyContainerError(retryError);
+      }
+    }
+    const response = infrastructureErrorResponse(
+      failureCode,
+      infrastructureMessage(failureCode),
+      requestId,
     );
-    return new Response("Backend container unavailable", { status: 503 });
+    logOperation("error", {
+      request_id: requestId,
+      operation,
+      status: response.status,
+      elapsed: Date.now() - startedAt,
+    });
+    return response;
   }
 }
 
 async function prewarmApiContainer(env: Env): Promise<void> {
+  const requestId = crypto.randomUUID();
+  const startedAt = Date.now();
   try {
-    await primaryContainer(env).startAndWaitForPorts(8080);
-  } catch (error) {
-    console.error(
-      "E3 API container prewarm failed",
-      error instanceof Error ? error.message : String(error),
-    );
+    await primaryContainer(env).startAndWaitForPorts({
+      ports: API_PORT,
+      cancellationOptions: {
+        instanceGetTimeoutMS: CONTAINER_INSTANCE_TIMEOUT_MS,
+        portReadyTimeoutMS: CONTAINER_PORT_TIMEOUT_MS,
+        waitInterval: CONTAINER_WAIT_INTERVAL_MS,
+      },
+    });
+    logOperation("info", {
+      request_id: requestId,
+      operation: "container_prewarm",
+      status: "ready",
+      elapsed: Date.now() - startedAt,
+    });
+  } catch {
+    logOperation("error", {
+      request_id: requestId,
+      operation: "container_prewarm",
+      status: "error",
+      elapsed: Date.now() - startedAt,
+    });
   }
 }
 

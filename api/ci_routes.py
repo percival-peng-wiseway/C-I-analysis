@@ -26,6 +26,7 @@ from api.ci_schemas import (
     CiScenarioSelectionRequest,
     CiProjectStcSettingsSaveRequest,
     CiProjectTariffProfileSaveRequest,
+    CiTariffReplayRequest,
 )
 from api.dependencies import (
     get_durable_session_factory,
@@ -1244,7 +1245,7 @@ def post_ci_project_tariff_replay(
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
     object_store: ObjectStore = Depends(get_object_store),
-    payload: CiScenarioSelectionRequest | None = None,
+    payload: CiTariffReplayRequest | None = None,
 ) -> dict[str, object]:
     """Replay the selected saved designs against the approved evidence-bound tariff."""
     actor = identity_provider.current()
@@ -1347,6 +1348,7 @@ def post_ci_project_tariff_replay(
             profile=profile,
             scenarios=selected_candidates,
         )
+        stored_result = result
         with session_factory() as session:
             with session.begin():
                 current_profile = approved_ci_project_tariff_calculation_profile(
@@ -1361,7 +1363,7 @@ def post_ci_project_tariff_replay(
                         "ci_project_tariff_profile_changed",
                         "The approved tariff changed while replay was running. Run it again.",
                     )
-                record_ci_tariff_replay_result(
+                saved_state = record_ci_tariff_replay_result(
                     session,
                     project_id=project_id,
                     actor=actor,
@@ -1374,8 +1376,14 @@ def post_ci_project_tariff_replay(
                     ],
                     active_tariff_profile=current_profile,
                     result=result,
+                    merge_checkpoint=(
+                        payload is not None
+                        and payload.persistence_mode == "merge_checkpoint"
+                    ),
                 )
-        return result
+                if payload is not None and payload.persistence_mode == "merge_checkpoint":
+                    stored_result = saved_state["result"]
+        return stored_result
     except (CiEvidenceIntakeError, CiProjectError) as exc:
         if isinstance(exc, CiProjectError):
             raise _project_http_error(exc) from exc
