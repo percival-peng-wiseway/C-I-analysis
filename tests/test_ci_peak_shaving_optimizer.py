@@ -83,6 +83,33 @@ def _problem(
     )
 
 
+def test_battery_accepts_profile_authored_soc_bounds() -> None:
+    five_percent_reserve = _battery(min_soc_fraction=0.05)
+    reduced_upper_bound = _battery(
+        max_soc_fraction=0.9,
+        initial_soc_fraction=0.9,
+        terminal_soc_fraction=0.9,
+    )
+
+    assert five_percent_reserve.min_soc_fraction == 0.05
+    assert reduced_upper_bound.max_soc_fraction == 0.9
+
+
+def test_rolling_replay_accepts_a_non_january_annual_period() -> None:
+    problem = _calendar_year_problem()
+    shifted = replace(
+        problem,
+        intervals=tuple(
+            replace(row, timestamp=row.timestamp + timedelta(days=5))
+            for row in problem.intervals
+        ),
+    )
+
+    _horizon, _commit, cycle_delta = optimizer_module._rolling_shape(shifted)
+
+    assert cycle_delta == timedelta(days=365)
+
+
 def _calendar_year_problem(
     *,
     demand_basis: str = "kw",

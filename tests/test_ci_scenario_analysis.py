@@ -626,6 +626,26 @@ def test_physical_scenario_periods_use_explicit_analysis_period() -> None:
     assert periods[-1].period_id == "2026-03"
 
 
+def test_physical_scenario_periods_support_a_rolling_annual_start_date() -> None:
+    profile = _profile()
+    profile["rolling_period"] = {
+        "start_date": "2025-01-06",
+        "end_date": "2026-01-05",
+    }
+    profile["analysis_period"] = dict(profile["rolling_period"])
+    days = [date(2025, month, 6) for month in range(1, 13)]
+    streams = {
+        register: {day: [value] * 288 for day in days}
+        for register, value in {"B1": 0.0, "E1": 1.0, "K1": 0.0, "Q1": 0.75}.items()
+    }
+
+    periods, _evidence = _build_periods(streams, profile)
+
+    assert len(periods) == 12
+    assert periods[0].period_id == "2025-01"
+    assert periods[-1].period_id == "2025-12"
+
+
 def test_physical_scenario_review_fails_closed_on_noncontiguous_rolling_input(
     monkeypatch,
 ) -> None:

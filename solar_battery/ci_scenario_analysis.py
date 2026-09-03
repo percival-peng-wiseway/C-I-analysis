@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
@@ -1572,10 +1573,9 @@ def _annual_tariff_quantities(
         max(float(row[demand_key]) for row in rolling_rows),
         float(profile["minimum_chargeable_rolling_kva"]),
     )
-    monthly_incentive: dict[tuple[int, int], float] = {}
+    monthly_incentive: dict[str, float] = {}
     for row in incentive_rows:
-        local_start = row["local_start"]
-        key = (local_start.year, local_start.month)
+        key = _annual_period_id(row["meter_date"], rolling_start)
         monthly_incentive[key] = max(
             monthly_incentive.get(key, 0.0), float(row[demand_key])
         )
@@ -1611,6 +1611,22 @@ def _row_in_window(row: dict[str, object], window: dict[str, Any]) -> bool:
 
 def _analysis_period(profile: dict[str, Any]) -> dict[str, str]:
     return profile.get("analysis_period", profile["rolling_period"])
+
+
+def _annual_period_id(day: date, anchor: date) -> str:
+    month_offset = (day.year - anchor.year) * 12 + day.month - anchor.month
+    if day < _shift_month(anchor, month_offset):
+        month_offset -= 1
+    if not 0 <= month_offset < 12:
+        raise CiScenarioAnalysisError("scenario_horizon_invalid")
+    return _shift_month(anchor, month_offset).strftime("%Y-%m")
+
+
+def _shift_month(anchor: date, offset: int) -> date:
+    absolute_month = anchor.year * 12 + anchor.month - 1 + offset
+    year, zero_based_month = divmod(absolute_month, 12)
+    month = zero_based_month + 1
+    return date(year, month, min(anchor.day, monthrange(year, month)[1]))
 
 
 def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
@@ -1867,6 +1883,8 @@ def _build_periods(
     analysis_period = _analysis_period(profile)
     rolling_start = date.fromisoformat(analysis_period["start_date"])
     rolling_end = date.fromisoformat(analysis_period["end_date"])
+    if rolling_end != _shift_month(rolling_start, 12) - timedelta(days=1):
+        raise CiScenarioAnalysisError("scenario_horizon_invalid")
     grouped: dict[str, list[tuple[CleanedInterval, bool]]] = {}
     evidence: dict[datetime, dict[str, object]] = {}
     for meter_day in sorted(streams["E1"]):
@@ -1890,7 +1908,7 @@ def _build_periods(
                 source_stream_id="evidence_bound_active_import",
                 source_date=meter_day,
             )
-            period_id = meter_day.strftime("%Y-%m")
+            period_id = _annual_period_id(meter_day, rolling_start)
             grouped.setdefault(period_id, []).append((interval, in_window))
             evidence[timestamp] = {
                 "meter_date": meter_day,

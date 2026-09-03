@@ -61,8 +61,6 @@ class CiBatterySpec:
             _finite(name, getattr(self, name))
         if not 0 <= self.min_soc_fraction < self.max_soc_fraction <= 1:
             raise ValueError("battery SOC fractions must satisfy 0 <= min < max <= 1")
-        if self.min_soc_fraction != 0.1 or self.max_soc_fraction != 1.0:
-            raise ValueError("V1 battery SOC bounds are fixed at 10% and 100%")
         if not 0 < self.ac_round_trip_efficiency <= 1:
             raise ValueError("ac_round_trip_efficiency must be in (0, 1]")
         for name in ("initial_soc_fraction", "terminal_soc_fraction"):
@@ -73,8 +71,6 @@ class CiBatterySpec:
             raise ValueError(
                 "V1 requires equal initial and terminal SOC so battery_idle remains feasible"
             )
-        if self.initial_soc_fraction != 1.0:
-            raise ValueError("V1 initial and terminal SOC are fixed at 100%")
         if self.max_charge_kw != self.max_discharge_kw:
             raise ValueError("V1 charge and discharge power limits must be symmetric")
 
@@ -1405,31 +1401,14 @@ def _rolling_shape(
     ):
         raise ValueError("rolling replay requires contiguous elapsed intervals")
     boundary = problem.intervals[-1].timestamp + timedelta(hours=duration)
-    if (
-        first.month,
-        first.day,
-        first.hour,
-        first.minute,
-        first.second,
-        first.microsecond,
-    ) != (1, 1, 0, 0, 0, 0):
-        raise ValueError("rolling replay requires a complete calendar year from Jan 1")
-    if (
-        boundary.year != first.year + 1
-        or (
-            boundary.month,
-            boundary.day,
-            boundary.hour,
-            boundary.minute,
-            boundary.second,
-            boundary.microsecond,
-        )
-        != (1, 1, 0, 0, 0, 0)
-    ):
-        raise ValueError("rolling replay requires one complete calendar year")
+    if (first.hour, first.minute, first.second, first.microsecond) != (0, 0, 0, 0):
+        raise ValueError("rolling replay annual period must start at midnight")
+    cycle_delta = boundary - first
+    if cycle_delta not in {timedelta(days=365), timedelta(days=366)}:
+        raise ValueError("rolling replay requires one complete 365- or 366-day annual period")
     if horizon_count > len(problem.intervals):
         raise ValueError("rolling replay horizon exceeds the representative year")
-    return horizon_count, commit_count, boundary - first
+    return horizon_count, commit_count, cycle_delta
 
 
 def _rolling_interval(
@@ -1597,7 +1576,7 @@ def _solved_from_dispatch_rows(
     rows: tuple[CiDispatchInterval, ...],
 ) -> _SolvedDispatch:
     if len(rows) != len(problem.intervals):
-        raise ValueError("rolling dispatch must cover the complete calendar year")
+        raise ValueError("rolling dispatch must cover the complete annual period")
     demand_peaks = {}
     for component in problem.demand_charges:
         exact_peak = max(
