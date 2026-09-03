@@ -45,8 +45,8 @@ const generatedDesign = {
   validation_basis: "python_scenario_input_contract_v1",
   candidate_count: 2,
   candidates: [
-    { scenario_id: "pv-1__battery-1", pv_capacity_kwp_dc: 100, nominal_capacity_kwh: 200, pv_inverter_capacity_kw_ac: 90, max_discharge_kw: 100 },
-    { scenario_id: "pv-2__battery-1", pv_capacity_kwp_dc: 150, nominal_capacity_kwh: 200, pv_inverter_capacity_kw_ac: 130, max_discharge_kw: 100 },
+    { scenario_id: "pv-1__battery-1", label: "Option 1", pv_capacity_kwp_dc: 100, nominal_capacity_kwh: 200, pv_inverter_capacity_kw_ac: 90, max_discharge_kw: 100 },
+    { scenario_id: "pv-2__battery-1", label: "Option 2", pv_capacity_kwp_dc: 150, nominal_capacity_kwh: 200, pv_inverter_capacity_kw_ac: 130, max_discharge_kw: 100 },
   ],
   dispatch_evaluated: false,
   tariff_evaluated: false,
@@ -108,6 +108,7 @@ function renderPage() {
 }
 
 function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture) {
+  let currentSavedDesign = savedDesign;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path.endsWith("/settings/device-profile")) {
@@ -118,8 +119,14 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
     if (path.endsWith("/workspace-readiness")) return new Response(JSON.stringify(readiness), { status: 200 });
     if (path.endsWith("/site-material")) return new Response(JSON.stringify({ contract_version: "ci_project_site_material_v1", photos: [] }), { status: 200 });
     if (path.endsWith("/evidence-intake")) return new Response(JSON.stringify({ contract_version: "ci_project_evidence_state_v1", status: "not_saved", evidence: null }), { status: 200 });
-    if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(savedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: savedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
-    if (path.endsWith("/design-price-preview") && savedDesign) return new Response(JSON.stringify({
+    if (path.endsWith("/design-candidates/custom") && init?.method === "POST" && currentSavedDesign) {
+      const request = JSON.parse(String(init.body));
+      const scenarioId = "pv-custom__battery-custom";
+      currentSavedDesign = { ...currentSavedDesign, candidate_count: currentSavedDesign.candidate_count + 1, candidates: [...currentSavedDesign.candidates, { scenario_id: scenarioId, label: request.label, pv_capacity_kwp_dc: request.pv_capacity_kwp_dc, nominal_capacity_kwh: request.battery_capacity_kwh, pv_inverter_capacity_kw_ac: request.inverter_capacity_kw_ac, max_discharge_kw: request.battery_capacity_kwh / 2 }] };
+      return new Response(JSON.stringify({ ...currentSavedDesign, added_scenario_id: scenarioId, quoted_net_capex_aud_ex_gst: request.quoted_net_capex_aud_ex_gst, normalization: { requested_pv_capacity_kwp_dc: request.pv_capacity_kwp_dc, actual_pv_capacity_kwp_dc: request.pv_capacity_kwp_dc, requested_battery_capacity_kwh: request.battery_capacity_kwh, actual_battery_capacity_kwh: request.battery_capacity_kwh, requested_inverter_capacity_kw_ac: request.inverter_capacity_kw_ac, actual_inverter_capacity_kw_ac: request.inverter_capacity_kw_ac } }), { status: 200 });
+    }
+    if (path.endsWith("/design-candidates")) return new Response(JSON.stringify(currentSavedDesign ? { contract_version: "ci_saved_design_state_v1", status: "ready", design: currentSavedDesign } : { contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 });
+    if (path.endsWith("/design-price-preview") && currentSavedDesign) return new Response(JSON.stringify({
       contract_version: "ci_design_price_preview_v1",
       project_id: path.includes("project-2") ? "project-2" : "project-1",
       status: "ready",
@@ -127,10 +134,10 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
       device_profile_sha256: "c".repeat(64),
       rebate_profile_sha256: null,
       equipment_selection: deviceProfileFixture.default_equipment_selection,
-      candidate_count: savedDesign.candidate_count,
-      solutions: savedDesign.candidates.map((candidate, index) => ({
+      candidate_count: currentSavedDesign.candidate_count,
+      solutions: currentSavedDesign.candidates.map((candidate, index) => ({
         scenario_id: candidate.scenario_id,
-        label: `Option ${index + 1}`,
+        label: candidate.label ?? `Option ${index + 1}`,
         pv_capacity_kwp_dc: candidate.pv_capacity_kwp_dc,
         battery_capacity_kwh: candidate.nominal_capacity_kwh,
         inverter_capacity_kw_ac: candidate.pv_inverter_capacity_kw_ac,
@@ -315,6 +322,23 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("2 feasible")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("100000");
+    await user.click(screen.getByRole("button", { name: "Add custom solution" }));
+    expect(screen.getByRole("heading", { name: "Custom solution & quotation" })).toBeTruthy();
+    expect(screen.getByLabelText("Custom solution name")).toBeTruthy();
+    expect(screen.getByLabelText("PV capacity")).toBeTruthy();
+    expect(screen.getByLabelText("Battery capacity")).toBeTruthy();
+    expect(screen.getByLabelText("PCS capacity")).toBeTruthy();
+    expect(screen.getByLabelText("Quoted Net CAPEX")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add to comparison" })).toBeTruthy();
+    await user.type(screen.getByLabelText("Custom solution name"), "Client option A");
+    await user.type(screen.getByLabelText("PV capacity"), "120");
+    await user.type(screen.getByLabelText("Battery capacity"), "200");
+    await user.type(screen.getByLabelText("PCS capacity"), "110");
+    await user.type(screen.getByLabelText("Quoted Net CAPEX"), "245000");
+    await user.click(screen.getByRole("button", { name: "Add to comparison" }));
+    expect(await screen.findByText("3 feasible")).toBeTruthy();
+    expect(screen.getByText("Client option A")).toBeTruthy();
+    expect((screen.getByLabelText("Quoted Net CAPEX for Solution 3") as HTMLInputElement).value).toBe("245000");
     const pcsHeading = screen.getByRole("heading", { name: "PCS & connection constraints" });
     expect(Boolean(quoteHeading.compareDocumentPosition(pcsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 2"));

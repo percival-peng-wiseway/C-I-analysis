@@ -163,6 +163,28 @@ export interface CiSolutionGenerationSummary {
   rejection_reasons: Array<{ code: string; count: number }>;
 }
 
+export interface CiCustomDesignCandidateRequest {
+  contract_version: "ci_custom_design_candidate_request_v1";
+  label: string;
+  pv_capacity_kwp_dc: number;
+  battery_capacity_kwh: number;
+  inverter_capacity_kw_ac: number;
+  quoted_net_capex_aud_ex_gst: number;
+}
+
+export interface CiCustomDesignCandidateResult extends CiDesignCandidateResult {
+  added_scenario_id: string;
+  quoted_net_capex_aud_ex_gst: number;
+  normalization: {
+    requested_pv_capacity_kwp_dc: number;
+    actual_pv_capacity_kwp_dc: number;
+    requested_battery_capacity_kwh: number;
+    actual_battery_capacity_kwh: number;
+    requested_inverter_capacity_kw_ac: number;
+    actual_inverter_capacity_kw_ac: number;
+  };
+}
+
 export const ciProjectsQueryKey = ["ci-projects"] as const;
 export const ciSavedDesignQueryKey = (projectId: string) => ["ci-saved-design", projectId] as const;
 
@@ -219,6 +241,25 @@ export async function generateCiDesignCandidates(
   });
   if (!response.ok) throw new Error(await errorMessage(response, "Solution generation failed."));
   return assertCiDesignCandidateResult(await response.json());
+}
+
+export async function addCiCustomDesignCandidate(
+  projectId: string,
+  request: CiCustomDesignCandidateRequest,
+  fetcher: typeof fetch = fetch,
+): Promise<CiCustomDesignCandidateResult> {
+  const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-candidates/custom`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, "Custom solution could not be added."));
+  const payload = await response.json() as CiCustomDesignCandidateResult;
+  assertCiDesignCandidateResult(payload);
+  if (!payload.added_scenario_id || !Number.isFinite(payload.quoted_net_capex_aud_ex_gst)) {
+    throw new Error("Custom solution returned an unexpected contract.");
+  }
+  return payload;
 }
 
 export async function fetchCiSavedDesign(

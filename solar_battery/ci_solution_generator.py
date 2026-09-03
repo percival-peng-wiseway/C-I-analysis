@@ -168,6 +168,121 @@ def generate_ci_solutions(
     }
 
 
+def generate_ci_custom_solution(
+    custom_request: object,
+    *,
+    design_context: dict[str, object],
+) -> dict[str, object]:
+    """Build one profile-bound candidate using the saved Python design basis."""
+    if (
+        not isinstance(custom_request, dict)
+        or custom_request.get("contract_version")
+        != "ci_custom_design_candidate_request_v1"
+        or design_context.get("contract_version") != "ci_design_context_v2"
+    ):
+        raise _invalid(
+            "A generated profile-bound design is required before adding a custom solution."
+        )
+    selection = design_context.get("profile_selection")
+    site = design_context.get("site_factors")
+    technical = design_context.get("technical_options")
+    if (
+        not isinstance(selection, dict)
+        or not isinstance(site, dict)
+        or not isinstance(technical, dict)
+    ):
+        raise _invalid("The saved profile-bound design context is invalid.")
+    solar = selection.get("solar_profile")
+    battery = selection.get("battery_profile")
+    if not isinstance(solar, dict) or not isinstance(battery, dict):
+        raise _invalid("The saved equipment profile snapshots are unavailable.")
+
+    solar_performance = _solar_performance(solar)
+    battery_performance = _battery_performance(battery)
+    requested_pv = _bounded(custom_request.get("pv_capacity_kwp_dc"), 1e-9, 1_000_000)
+    requested_battery = _bounded(
+        custom_request.get("battery_capacity_kwh"), 0, 1_000_000
+    )
+    requested_inverter = _bounded(
+        custom_request.get("inverter_capacity_kw_ac"), 1e-9, 1_000_000
+    )
+    pv_actual = _ceil_to_unit(
+        requested_pv, float(solar_performance["rated_power_w"]) / 1000
+    )
+    battery_units = _battery_units(requested_battery, battery_performance)
+    battery_capacity = _clean_number(
+        battery_units * float(battery_performance["nominal_capacity_kwh_per_unit"])
+    )
+    battery_power = _clean_number(
+        battery_units * float(battery_performance["continuous_power_kw_per_unit"])
+    )
+    block_size = _bounded(technical.get("inverter_block_size_kw"), 0.1, 1000)
+    inverter_capacity = _ceil_to_unit(requested_inverter, block_size)
+    minimum_inverter = max(
+        pv_actual / float(solar_performance["default_dc_ac_ratio"]),
+        battery_power,
+    )
+    if inverter_capacity + 1e-9 < minimum_inverter:
+        required_inverter = _ceil_to_unit(minimum_inverter, block_size)
+        raise _invalid(
+            "The custom PCS is too small for the selected profiles; use at least "
+            f"{required_inverter:g} kW AC."
+        )
+    site_headroom = _bounded(technical.get("site_ac_headroom_kw"), 1e-9, 1_000_000)
+    if inverter_capacity > site_headroom + 1e-9:
+        raise _invalid(
+            f"The custom PCS exceeds the saved {site_headroom:g} kW AC site headroom."
+        )
+    connection = {
+        "allow_grid_charging": technical.get("allow_grid_charging"),
+        "reactive_support_enabled": technical.get("reactive_support_enabled"),
+        "reactive_support_max_kvar": technical.get("reactive_support_max_kvar"),
+        "grid_emissions_factor_kg_co2e_per_kwh": technical.get(
+            "grid_emissions_factor_kg_co2e_per_kwh"
+        ),
+    }
+    if not isinstance(connection["allow_grid_charging"], bool) or not isinstance(
+        connection["reactive_support_enabled"], bool
+    ):
+        raise _invalid("The saved connection switches are invalid.")
+    one_way_efficiency = (
+        _bounded(technical.get("charge_efficiency_percent"), 1, 100) / 100
+    )
+    minimum_soc = _bounded(technical.get("minimum_soc_percent"), 0, 99.999999) / 100
+    derating = _bounded(technical.get("effective_derating_percent"), 1e-9, 100) / 100
+    scenario = _scenario(
+        solar=solar,
+        battery=battery,
+        pv_capacity_kwp_dc=pv_actual,
+        inverter_capacity_kw_ac=inverter_capacity,
+        battery_units=battery_units,
+        battery_capacity_kwh=battery_capacity,
+        battery_power_kw=battery_power,
+        annual_specific_yield=_bounded(
+            site.get("annual_specific_yield_kwh_per_kw"), 500, 3000
+        ),
+        derating=derating,
+        one_way_efficiency=one_way_efficiency,
+        minimum_soc=minimum_soc,
+        connection=connection,
+    )
+    scenario["label"] = _text(custom_request.get("label"), "custom solution label")
+    return {
+        "candidate": scenario,
+        "quoted_net_capex_aud_ex_gst": _bounded(
+            custom_request.get("quoted_net_capex_aud_ex_gst"), 1e-9, 1_000_000_000_000
+        ),
+        "normalization": {
+            "requested_pv_capacity_kwp_dc": requested_pv,
+            "actual_pv_capacity_kwp_dc": pv_actual,
+            "requested_battery_capacity_kwh": requested_battery,
+            "actual_battery_capacity_kwh": battery_capacity,
+            "requested_inverter_capacity_kw_ac": requested_inverter,
+            "actual_inverter_capacity_kw_ac": inverter_capacity,
+        },
+    }
+
+
 def _generation_request(value: object) -> dict[str, Any]:
     if (
         not isinstance(value, dict)

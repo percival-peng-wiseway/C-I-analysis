@@ -329,6 +329,68 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             assert saved["candidate_count"] == 4
             assert saved["design_context"] == result["design_context"]
 
+            custom_payload = {
+                "contract_version": "ci_custom_design_candidate_request_v1",
+                "label": "Client option A",
+                "pv_capacity_kwp_dc": 120,
+                "battery_capacity_kwh": 20,
+                "inverter_capacity_kw_ac": 106,
+                "quoted_net_capex_aud_ex_gst": 245000,
+            }
+            custom = client.post(
+                f"/api/commercial-industrial/projects/{project_id}"
+                "/design-candidates/custom",
+                json=custom_payload,
+            )
+            assert custom.status_code == 200
+            custom_result = custom.json()
+            assert custom_result["candidate_count"] == 5
+            assert custom_result["quoted_net_capex_aud_ex_gst"] == 245000
+            added = next(
+                item
+                for item in custom_result["candidates"]
+                if item["scenario_id"] == custom_result["added_scenario_id"]
+            )
+            assert added["label"] == "Client option A"
+            assert added["pv_capacity_kwp_dc"] == 120.33
+            assert added["nominal_capacity_kwh"] == 21
+            assert added["pv_inverter_capacity_kw_ac"] == 110
+            assert (
+                custom_result["normalization"]["requested_inverter_capacity_kw_ac"]
+                == 106
+            )
+            assert (
+                custom_result["normalization"]["actual_inverter_capacity_kw_ac"]
+                == 110
+            )
+
+            undersized = client.post(
+                f"/api/commercial-industrial/projects/{project_id}"
+                "/design-candidates/custom",
+                json={
+                    **custom_payload,
+                    "label": "Undersized PCS",
+                    "pv_capacity_kwp_dc": 150,
+                    "battery_capacity_kwh": 0,
+                    "inverter_capacity_kw_ac": 50,
+                },
+            )
+            assert undersized.status_code == 422
+            assert "too small" in undersized.json()["detail"]["message"]
+
+            duplicate = client.post(
+                f"/api/commercial-industrial/projects/{project_id}"
+                "/design-candidates/custom",
+                json=custom_payload,
+            )
+            assert duplicate.status_code == 422
+            assert "already exists" in duplicate.json()["detail"]["message"]
+
+            restored_custom = client.get(
+                f"/api/commercial-industrial/projects/{project_id}/design-candidates"
+            )
+            assert restored_custom.json()["design"]["candidate_count"] == 5
+
             forged = client.post(
                 f"/api/commercial-industrial/projects/{project_id}/design-candidates",
                 json={

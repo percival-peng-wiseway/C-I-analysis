@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ArrowRight, BadgeDollarSign, Layers3, Play, RefreshCw } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, BadgeDollarSign, Layers3, Play, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -7,9 +7,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import {
   ciProjectsQueryKey,
   ciSavedDesignQueryKey,
+  addCiCustomDesignCandidate,
   fetchCiSavedDesign,
   generateCiDesignCandidates,
   listCiProjects,
+  type CiCustomDesignCandidateRequest,
   type CiDesignCandidateResult,
   type CiProject,
 } from "@/features/ci/api/ci-projects";
@@ -126,9 +128,11 @@ function PhysicalFeasibilityWorkspace({ onAnalysisComplete, onBack, onValidated,
   const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
   const evidence = useQuery({ queryKey: ciProjectEvidenceQueryKey(project.project_id), queryFn: () => fetchCiProjectEvidence(project.project_id) });
   const deviceProfile = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
+  const [quotedNetCapex, setQuotedNetCapex] = useState<Record<string, string>>({});
   const run = useMutation({
     mutationFn: (request: Parameters<typeof generateCiDesignCandidates>[1]) => generateCiDesignCandidates(project.project_id, request),
     onSuccess: (design) => {
+      setQuotedNetCapex({});
       queryClient.setQueryData(ciSavedDesignQueryKey(project.project_id), design);
       onValidated(design.candidate_count);
       void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
@@ -136,21 +140,31 @@ function PhysicalFeasibilityWorkspace({ onAnalysisComplete, onBack, onValidated,
       void queryClient.invalidateQueries({ queryKey: ciDesignPricePreviewQueryKey(project.project_id) });
     },
   });
-  const generatedDesign = run.data ?? savedDesign.data;
+  const generatedDesign = savedDesign.data;
   const pricePreview = useQuery({
     queryKey: ciDesignPricePreviewQueryKey(project.project_id),
     queryFn: () => fetchCiDesignPricePreview(project.project_id),
     enabled: Boolean(generatedDesign),
     retry: false,
   });
-  const [quotedNetCapex, setQuotedNetCapex] = useState<Record<string, string>>({});
   const quoteRevision = pricePreview.data
     ? `${pricePreview.data.device_profile_sha256}:${pricePreview.data.rebate_profile_sha256 ?? "none"}:${pricePreview.data.solutions.map((solution) => `${solution.scenario_id}:${solution.net_capex_aud_ex_gst}`).join("|")}`
     : "";
   useEffect(() => {
     if (!pricePreview.data) return;
-    setQuotedNetCapex(Object.fromEntries(pricePreview.data.solutions.map((solution) => [solution.scenario_id, String(solution.net_capex_aud_ex_gst)])));
+    setQuotedNetCapex((current) => Object.fromEntries(pricePreview.data.solutions.map((solution) => [solution.scenario_id, current[solution.scenario_id] ?? String(solution.net_capex_aud_ex_gst)])));
   }, [quoteRevision]);
+  const addCustom = useMutation({
+    mutationFn: (request: CiCustomDesignCandidateRequest) => addCiCustomDesignCandidate(project.project_id, request),
+    onSuccess: (design) => {
+      setQuotedNetCapex((current) => ({ ...current, [design.added_scenario_id]: String(design.quoted_net_capex_aud_ex_gst) }));
+      queryClient.setQueryData(ciSavedDesignQueryKey(project.project_id), design);
+      onValidated(design.candidate_count);
+      void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
+      void queryClient.invalidateQueries({ queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
+      void queryClient.invalidateQueries({ queryKey: ciDesignPricePreviewQueryKey(project.project_id) });
+    },
+  });
   const analyze = useMutation({
     mutationFn: async () => {
       if (!pricePreview.data) throw new Error("Calculate Net CAPEX before starting analysis.");
@@ -186,11 +200,11 @@ function PhysicalFeasibilityWorkspace({ onAnalysisComplete, onBack, onValidated,
   const siteAddress = evidence.data.status === "saved" ? evidence.data.evidence?.inspection.bill.site_address ?? null : null;
   return (
     <CiScenarioBuilder
-      beforeConnectionConstraints={<div className="space-y-6"><CiRebateProfilePanel projectId={project.project_id} />{generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}{generatedDesign ? <GeneratedSolutionQuotes analysisError={analyze.error instanceof Error ? analyze.error.message : null} isAnalysing={analyze.isPending} isLoading={pricePreview.isPending} onAnalyze={() => analyze.mutate()} onQuoteChange={(scenarioId, value) => { analyze.reset(); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} /> : null}</div>}
+      beforeConnectionConstraints={<div className="space-y-6"><CiRebateProfilePanel projectId={project.project_id} />{generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}{generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analyze.error instanceof Error ? analyze.error.message : null} isAddingCustom={addCustom.isPending} isAnalysing={analyze.isPending} isLoading={pricePreview.isPending} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={() => analyze.mutate()} onQuoteChange={(scenarioId, value) => { analyze.reset(); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} /> : null}</div>}
       deviceProfile={activeDeviceProfile}
       error={run.error instanceof Error ? run.error.message : null}
-      initialContext={run.data?.design_context ?? savedDesign.data?.design_context ?? undefined}
-      initialSolutions={run.data?.candidates ?? savedDesign.data?.candidates}
+      initialContext={generatedDesign?.design_context ?? undefined}
+      initialSolutions={generatedDesign?.candidates}
       isPending={run.isPending}
       onSubmit={(request) => run.mutate(request)}
       siteAddress={siteAddress}
@@ -221,10 +235,13 @@ function GeneratedDesignSummary({ design }: { design: CiDesignCandidateResult })
   );
 }
 
-function GeneratedSolutionQuotes({ analysisError, isAnalysing, isLoading, onAnalyze, onQuoteChange, onRetry, preview, previewError, quotes }: {
+function GeneratedSolutionQuotes({ addCustomError, analysisError, isAddingCustom, isAnalysing, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, preview, previewError, quotes }: {
+  addCustomError: string | null;
   analysisError: string | null;
+  isAddingCustom: boolean;
   isAnalysing: boolean;
   isLoading: boolean;
+  onAddCustom: (request: CiCustomDesignCandidateRequest) => Promise<void>;
   onAnalyze: () => void;
   onQuoteChange: (scenarioId: string, value: string) => void;
   onRetry: () => void;
@@ -232,6 +249,31 @@ function GeneratedSolutionQuotes({ analysisError, isAnalysing, isLoading, onAnal
   previewError: string | null;
   quotes: Record<string, string>;
 }) {
+  const [showCustom, setShowCustom] = useState(false);
+  const [custom, setCustom] = useState({ label: "", pv: "", battery: "", inverter: "", capex: "" });
+  const [customValidationError, setCustomValidationError] = useState<string | null>(null);
+  const submitCustom = async () => {
+    setCustomValidationError(null);
+    const request: CiCustomDesignCandidateRequest = {
+      contract_version: "ci_custom_design_candidate_request_v1",
+      label: custom.label.trim(),
+      pv_capacity_kwp_dc: Number(custom.pv),
+      battery_capacity_kwh: Number(custom.battery),
+      inverter_capacity_kw_ac: Number(custom.inverter),
+      quoted_net_capex_aud_ex_gst: Number(custom.capex),
+    };
+    if (!request.label || !Number.isFinite(request.pv_capacity_kwp_dc) || request.pv_capacity_kwp_dc <= 0 || !Number.isFinite(request.battery_capacity_kwh) || request.battery_capacity_kwh < 0 || !Number.isFinite(request.inverter_capacity_kw_ac) || request.inverter_capacity_kw_ac <= 0 || !Number.isFinite(request.quoted_net_capex_aud_ex_gst) || request.quoted_net_capex_aud_ex_gst <= 0) {
+      setCustomValidationError("Enter a name, positive PV and PCS capacities, a non-negative battery capacity, and a positive Net CAPEX.");
+      return;
+    }
+    try {
+      await onAddCustom(request);
+    } catch {
+      return;
+    }
+    setCustom({ label: "", pv: "", battery: "", inverter: "", capex: "" });
+    setShowCustom(false);
+  };
   if (isLoading) return <section className="rounded-xl border border-slate-200 bg-white p-6"><p className="flex items-center gap-2 text-sm text-slate-600"><RefreshCw className="size-4 animate-spin" />Calculating Net CAPEX for every feasible solution…</p></section>;
   if (previewError || !preview) return <section className="rounded-xl border border-amber-200 bg-amber-50 p-5"><h2 className="font-semibold text-amber-950">Net CAPEX is not ready</h2><p className="mt-1 text-sm leading-6 text-amber-900">{previewError ?? "Save the equipment and rebate assumptions, then try again."}</p><Button className="mt-4" onClick={onRetry} type="button" variant="outline"><RefreshCw className="size-4" />Retry pricing</Button></section>;
   const validQuotes = preview.solutions.every((solution) => {
@@ -242,8 +284,9 @@ function GeneratedSolutionQuotes({ analysisError, isAnalysing, isLoading, onAnal
     <section aria-labelledby="generated-solution-quotes-title" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
       <header className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 p-5 sm:p-6">
         <div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><BadgeDollarSign className="size-5" /></span><div><h2 className="text-xl font-semibold text-slate-950" id="generated-solution-quotes-title">Feasible solutions &amp; Net CAPEX quotations</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">Python calculated the default Net CAPEX from the saved equipment catalog less approved upfront rebates. Edit the quotation column when the offered price is different.</p></div></div>
-        <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{preview.candidate_count} feasible</span>
+        <div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{preview.candidate_count} feasible</span><Button onClick={() => { setCustomValidationError(null); setShowCustom((current) => !current); }} type="button" variant="outline"><Plus className="size-4" />Add custom solution</Button></div>
       </header>
+      {showCustom ? <div className="border-b border-slate-200 bg-cyan-50/40 p-5 sm:p-6"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold text-slate-950">Custom solution &amp; quotation</h3><p className="mt-1 text-xs leading-5 text-slate-600">Python will snap PV, battery and PCS sizes to the selected equipment blocks, then reject any configuration that is undersized or exceeds site AC headroom.</p></div><Button onClick={() => setShowCustom(false)} type="button" variant="outline">Cancel</Button></div><div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><label className="text-xs font-medium text-slate-700">Solution name<input aria-label="Custom solution name" className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100" maxLength={80} onChange={(event) => setCustom((current) => ({ ...current, label: event.target.value }))} placeholder="e.g. Client option A" value={custom.label} /></label><CustomNumberField label="PV capacity" onChange={(value) => setCustom((current) => ({ ...current, pv: value }))} suffix="kWp" value={custom.pv} /><CustomNumberField label="Battery capacity" min="0" onChange={(value) => setCustom((current) => ({ ...current, battery: value }))} suffix="kWh" value={custom.battery} /><CustomNumberField label="PCS capacity" onChange={(value) => setCustom((current) => ({ ...current, inverter: value }))} suffix="kW AC" value={custom.inverter} /><CustomNumberField label="Quoted Net CAPEX" onChange={(value) => setCustom((current) => ({ ...current, capex: value }))} prefix="$" suffix="ex GST" value={custom.capex} /></div>{customValidationError || addCustomError ? <p className="mt-3 text-sm text-red-700" role="alert">{customValidationError ?? addCustomError}</p> : null}<div className="mt-4 flex justify-end"><Button disabled={isAddingCustom} onClick={() => { void submitCustom(); }} type="button">{isAddingCustom ? <RefreshCw className="size-4 animate-spin" /> : <Plus className="size-4" />}{isAddingCustom ? "Validating…" : "Add to comparison"}</Button></div></div> : null}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Solution</th><th className="px-4 py-3">PV</th><th className="px-4 py-3">Battery</th><th className="px-4 py-3">PCS</th><th className="px-4 py-3 text-right">Gross CAPEX</th><th className="px-4 py-3 text-right">Upfront rebates</th><th className="px-4 py-3 text-right">Model Net CAPEX</th><th className="px-4 py-3">Quoted Net CAPEX (ex GST)</th></tr></thead>
@@ -254,6 +297,10 @@ function GeneratedSolutionQuotes({ analysisError, isAnalysing, isLoading, onAnal
       {analysisError ? <p className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-800" role="alert">{analysisError}</p> : null}
     </section>
   );
+}
+
+function CustomNumberField({ label, min = "0.01", onChange, prefix, suffix, value }: { label: string; min?: string; onChange: (value: string) => void; prefix?: string; suffix: string; value: string }) {
+  return <label className="text-xs font-medium text-slate-700">{label}<div className="relative mt-1"><input aria-label={label} className={`h-10 w-full rounded-md border border-slate-300 bg-white ${prefix ? "pl-7" : "pl-3"} pr-16 text-sm tabular-nums outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100`} min={min} onChange={(event) => onChange(event.target.value)} step="0.01" type="number" value={value} />{prefix ? <span className="pointer-events-none absolute left-3 top-2.5 text-slate-400">{prefix}</span> : null}<span className="pointer-events-none absolute right-3 top-2.5 text-[11px] text-slate-400">{suffix}</span></div></label>;
 }
 
 function RangeSummary({ label, unit, values }: { label: string; unit: string; values: number[] }) {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createCiProject, fetchCiSavedDesign, generateCiDesignCandidates, listCiProjects, validateCiDesignCandidates, type CiDesignContext, type CiSolutionGenerationRequest } from "./ci-projects";
+import { addCiCustomDesignCandidate, createCiProject, fetchCiSavedDesign, generateCiDesignCandidates, listCiProjects, validateCiDesignCandidates, type CiDesignContext, type CiSolutionGenerationRequest } from "./ci-projects";
 import type { CiScenarioInput } from "./ci-scenarios";
 
 const project = {
@@ -61,6 +61,24 @@ describe("C&I project API", () => {
     const body = JSON.parse(fetcher.mock.calls[0][1].body);
     expect(body).toEqual({ generation_request: generationRequest });
     expect(body).not.toHaveProperty("scenarios");
+  });
+
+  it("adds a quoted custom solution through the Python-owned endpoint", async () => {
+    const candidate = { scenario_id: "custom-1", label: "Client option A" } as CiScenarioInput;
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      contract_version: "ci_design_candidate_validation_v1", status: "ready",
+      validation_basis: "python_scenario_input_contract_v1", candidate_count: 1,
+      candidates: [candidate], dispatch_evaluated: false, tariff_evaluated: false,
+      customer_facing_permission: false, recommendation_permitted: false,
+      disclaimer: "Python validated custom candidate.", design_context: designContext,
+      added_scenario_id: "custom-1", quoted_net_capex_aud_ex_gst: 245000,
+      normalization: { requested_pv_capacity_kwp_dc: 120, actual_pv_capacity_kwp_dc: 120.6, requested_battery_capacity_kwh: 200, actual_battery_capacity_kwh: 200, requested_inverter_capacity_kw_ac: 110, actual_inverter_capacity_kw_ac: 110 },
+    }), { status: 200 }));
+    const request = { contract_version: "ci_custom_design_candidate_request_v1" as const, label: "Client option A", pv_capacity_kwp_dc: 120, battery_capacity_kwh: 200, inverter_capacity_kw_ac: 110, quoted_net_capex_aud_ex_gst: 245000 };
+
+    await expect(addCiCustomDesignCandidate("project-1", request, fetcher)).resolves.toMatchObject({ added_scenario_id: "custom-1", quoted_net_capex_aud_ex_gst: 245000 });
+    expect(fetcher.mock.calls[0][0]).toBe("/api/commercial-industrial/projects/project-1/design-candidates/custom");
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual(request);
   });
 
   it("loads a saved design and represents a project with no design as null", async () => {

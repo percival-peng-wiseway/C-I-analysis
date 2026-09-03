@@ -154,6 +154,15 @@ class CiDesignCandidatesRequest(BaseModel):
         return self
 
 
+class CiCustomDesignCandidateRequest(BaseModel):
+    contract_version: Literal["ci_custom_design_candidate_request_v1"]
+    label: str = Field(min_length=1, max_length=80)
+    pv_capacity_kwp_dc: float = Field(gt=0, le=1_000_000)
+    battery_capacity_kwh: float = Field(ge=0, le=1_000_000)
+    inverter_capacity_kw_ac: float = Field(gt=0, le=1_000_000)
+    quoted_net_capex_aud_ex_gst: float = Field(gt=0, le=1_000_000_000_000)
+
+
 class CiIntervalActivityRequest(BaseModel):
     scenario_id: str = Field(min_length=1, max_length=120)
     start_date: date

@@ -13,6 +13,7 @@ from api.ci_schemas import (
     CiAnnualFinancialSimulationRequest,
     CiBillReviewRequest,
     CiDesignCandidatesRequest,
+    CiCustomDesignCandidateRequest,
     CiDeviceProfileRequest,
     CiFinancialSolutionRequest,
     CiFinancialSolutionStarRequest,
@@ -144,7 +145,10 @@ from solar_battery.ci_project_rebate_profile import (
     rebate_profile_has_enabled_program,
     save_ci_project_rebate_profile,
 )
-from solar_battery.ci_solution_generator import generate_ci_solutions
+from solar_battery.ci_solution_generator import (
+    generate_ci_custom_solution,
+    generate_ci_solutions,
+)
 from solar_battery.ci_tariff_analysis import (
     CiTariffAnalysisError,
     MAX_CI_NEM12_UPLOAD_BYTES,
@@ -788,6 +792,80 @@ def get_ci_design_candidates(
                 ),
             },
         }
+    except (CiProjectError, CiScenarioAnalysisError) as exc:
+        if isinstance(exc, CiProjectError):
+            raise _project_http_error(exc) from exc
+        raise _analysis_http_error(exc) from exc
+
+
+@router.post(
+    "/commercial-industrial/projects/{project_id}/design-candidates/custom"
+)
+def post_ci_custom_design_candidate(
+    project_id: UUID,
+    payload: CiCustomDesignCandidateRequest,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            project = require_ci_project(session, project_id=project_id, actor=actor)
+            if project.setup_status != "ready":
+                raise CiProjectError(
+                    "ci_project_setup_required",
+                    "Complete Setup & catalog before adding a custom system design.",
+                )
+            candidates = saved_ci_design_candidates(
+                session, project_id=project_id, actor=actor
+            )
+            design_context = saved_ci_design_context(
+                session, project_id=project_id, actor=actor
+            )
+        if candidates is None or design_context is None:
+            raise CiProjectError(
+                "ci_solution_generation_invalid",
+                "Generate and save the profile-bound solution set before adding "
+                "a custom solution.",
+            )
+        context = validate_ci_design_context(design_context)
+        generated = generate_ci_custom_solution(
+            payload.model_dump(), design_context=context
+        )
+        candidate = generated["candidate"]
+        if not isinstance(candidate, dict):
+            raise CiProjectError(
+                "ci_solution_generation_invalid",
+                "The custom solution could not be created safely.",
+            )
+        scenario_id = str(candidate["scenario_id"])
+        if any(item.get("scenario_id") == scenario_id for item in candidates):
+            raise CiProjectError(
+                "ci_solution_generation_invalid",
+                "This technical configuration already exists. Enter its quotation "
+                "in the existing row.",
+            )
+        validated = validate_ci_design_candidates([*candidates, candidate])
+        result = {
+            **validated,
+            "design_context": context,
+            "added_scenario_id": scenario_id,
+            "quoted_net_capex_aud_ex_gst": generated[
+                "quoted_net_capex_aud_ex_gst"
+            ],
+            "normalization": generated["normalization"],
+        }
+        with session_factory() as session:
+            with session.begin():
+                record_ci_design_candidates(
+                    session,
+                    project_id=project_id,
+                    candidate_count=int(result["candidate_count"]),
+                    candidates=list(result["candidates"]),
+                    design_context=context,
+                    actor=actor,
+                )
+        return result
     except (CiProjectError, CiScenarioAnalysisError) as exc:
         if isinstance(exc, CiProjectError):
             raise _project_http_error(exc) from exc
