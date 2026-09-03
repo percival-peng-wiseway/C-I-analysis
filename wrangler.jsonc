@@ -14,7 +14,7 @@
     {
       "class_name": "E3ApiContainer",
       "image": "./Dockerfile",
-      "instance_type": "basic",
+      "instance_type": "standard-2",
       "max_instances": 1
     }
   ],
