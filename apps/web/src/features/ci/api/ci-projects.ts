@@ -298,6 +298,13 @@ function assertCiDesignCandidateResult(value: unknown): CiDesignCandidateResult 
 }
 
 async function errorMessage(response: Response, fallback: string) {
-  const payload = await response.json().catch(() => null) as { detail?: { message?: string } } | null;
-  return payload?.detail?.message ?? fallback;
+  const payload = await response.json().catch(() => null) as { detail?: { message?: string } | string | Array<{ msg?: string }> } | null;
+  const detail = payload?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => item.msg).filter((item): item is string => Boolean(item));
+    if (messages.length) return messages.join(" ");
+  }
+  if (detail && !Array.isArray(detail) && typeof detail === "object" && typeof detail.message === "string" && detail.message.trim()) return detail.message;
+  return fallback;
 }

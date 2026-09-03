@@ -200,7 +200,7 @@ function PhysicalFeasibilityWorkspace({ onAnalysisComplete, onBack, onValidated,
   const siteAddress = evidence.data.status === "saved" ? evidence.data.evidence?.inspection.bill.site_address ?? null : null;
   return (
     <CiScenarioBuilder
-      beforeConnectionConstraints={<div className="space-y-6"><CiRebateProfilePanel projectId={project.project_id} />{generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}{generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analyze.error instanceof Error ? analyze.error.message : null} isAddingCustom={addCustom.isPending} isAnalysing={analyze.isPending} isLoading={pricePreview.isPending} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={() => analyze.mutate()} onQuoteChange={(scenarioId, value) => { analyze.reset(); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} /> : null}</div>}
+      beforeConnectionConstraints={<div className="space-y-6"><CiRebateProfilePanel projectId={project.project_id} />{generatedDesign ? <GeneratedDesignSummary design={generatedDesign} /> : null}{generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analyze.error instanceof Error ? analyze.error.message : null} inverterBlockSizeKw={generatedDesign.design_context?.technical_options.inverter_block_size_kw ?? null} isAddingCustom={addCustom.isPending} isAnalysing={analyze.isPending} isLoading={pricePreview.isPending} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={() => analyze.mutate()} onQuoteChange={(scenarioId, value) => { analyze.reset(); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}</div>}
       deviceProfile={activeDeviceProfile}
       error={run.error instanceof Error ? run.error.message : null}
       initialContext={generatedDesign?.design_context ?? undefined}
@@ -235,9 +235,10 @@ function GeneratedDesignSummary({ design }: { design: CiDesignCandidateResult })
   );
 }
 
-function GeneratedSolutionQuotes({ addCustomError, analysisError, isAddingCustom, isAnalysing, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, preview, previewError, quotes }: {
+function GeneratedSolutionQuotes({ addCustomError, analysisError, inverterBlockSizeKw, isAddingCustom, isAnalysing, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, preview, previewError, quotes, siteAcHeadroomKw }: {
   addCustomError: string | null;
   analysisError: string | null;
+  inverterBlockSizeKw: number | null;
   isAddingCustom: boolean;
   isAnalysing: boolean;
   isLoading: boolean;
@@ -248,6 +249,7 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, isAddingCustom
   preview: CiDesignPricePreview | null;
   previewError: string | null;
   quotes: Record<string, string>;
+  siteAcHeadroomKw: number | null;
 }) {
   const [showCustom, setShowCustom] = useState(false);
   const [custom, setCustom] = useState({ label: "", pv: "", battery: "", inverter: "", capex: "" });
@@ -264,6 +266,12 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, isAddingCustom
     };
     if (!request.label || !Number.isFinite(request.pv_capacity_kwp_dc) || request.pv_capacity_kwp_dc <= 0 || !Number.isFinite(request.battery_capacity_kwh) || request.battery_capacity_kwh < 0 || !Number.isFinite(request.inverter_capacity_kw_ac) || request.inverter_capacity_kw_ac <= 0 || !Number.isFinite(request.quoted_net_capex_aud_ex_gst) || request.quoted_net_capex_aud_ex_gst <= 0) {
       setCustomValidationError("Enter a name, positive PV and PCS capacities, a non-negative battery capacity, and a positive Net CAPEX.");
+      return;
+    }
+    const blockSize = inverterBlockSizeKw && inverterBlockSizeKw > 0 ? inverterBlockSizeKw : 0;
+    const normalizedPcs = blockSize > 0 ? Math.ceil((request.inverter_capacity_kw_ac - 1e-9) / blockSize) * blockSize : request.inverter_capacity_kw_ac;
+    if (siteAcHeadroomKw && normalizedPcs > siteAcHeadroomKw + 1e-9) {
+      setCustomValidationError(`The requested PCS rounds to ${numberLabel(normalizedPcs)} kW AC, above the current ${numberLabel(siteAcHeadroomKw)} kW AC Site AC headroom. Reduce PCS or update the connection limit with approved evidence.`);
       return;
     }
     try {

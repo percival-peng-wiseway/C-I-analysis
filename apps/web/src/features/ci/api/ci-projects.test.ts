@@ -81,6 +81,14 @@ describe("C&I project API", () => {
     expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual(request);
   });
 
+  it("surfaces string and validation-list API errors instead of the generic fallback", async () => {
+    const request = { contract_version: "ci_custom_design_candidate_request_v1" as const, label: "Client option A", pv_capacity_kwp_dc: 120, battery_capacity_kwh: 200, inverter_capacity_kw_ac: 110, quoted_net_capex_aud_ex_gst: 245000 };
+    const stringError = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Custom route unavailable." }), { status: 405 }));
+    await expect(addCiCustomDesignCandidate("project-1", request, stringError)).rejects.toThrow("Custom route unavailable.");
+    const validationError = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: [{ msg: "PCS exceeds the allowed limit." }] }), { status: 422 }));
+    await expect(addCiCustomDesignCandidate("project-1", request, validationError)).rejects.toThrow("PCS exceeds the allowed limit.");
+  });
+
   it("loads a saved design and represents a project with no design as null", async () => {
     const candidate = { scenario_id: "one", label: "One" } as CiScenarioInput;
     const design = {

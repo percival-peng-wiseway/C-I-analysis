@@ -53,7 +53,12 @@ const generatedDesign = {
   customer_facing_permission: false,
   recommendation_permitted: false,
   disclaimer: "Inputs only.",
-  design_context: null,
+  design_context: {
+    contract_version: "ci_design_context_v1",
+    existing_solar: { installed: false, brand: "", model: "", panel_count: 0, panel_rating_w: 0, installed_capacity_kwp_dc: 0, inverter_brand: "", inverter_model: "", inverter_capacity_kw_ac: 0, installation_year: null, operating_status: "unknown", included_in_interval_baseline: false },
+    existing_battery: { installed: false, brand: "", model: "", nominal_capacity_kwh: 0, usable_capacity_kwh: 0, power_kw: 0, installation_year: null, operating_status: "unknown", included_in_interval_baseline: false },
+    technical_options: { annual_specific_yield_kwh_per_kw: 1500, shading_loss_percent: 3, soiling_loss_percent: 2, temperature_loss_percent: 5, wiring_mismatch_loss_percent: 2, other_system_loss_percent: 0, system_availability_percent: 99, effective_derating_percent: 87.6, target_dc_ac_ratio: 1.15, inverter_block_size_kw: 5, site_ac_headroom_kw: 250, battery_duration_hours: 2, charge_efficiency_percent: 95, discharge_efficiency_percent: 95, minimum_soc_percent: 10, maximum_soc_percent: 100, allow_grid_charging: false, reactive_support_enabled: false, reactive_support_max_kvar: 0 },
+  },
 };
 
 const deviceProfileFixture = {
@@ -339,6 +344,15 @@ describe("C&I project workspace", () => {
     expect(await screen.findByText("3 feasible")).toBeTruthy();
     expect(screen.getByText("Client option A")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 3") as HTMLInputElement).value).toBe("245000");
+    await user.click(screen.getByRole("button", { name: "Add custom solution" }));
+    await user.type(screen.getByLabelText("Custom solution name"), "Above headroom");
+    await user.type(screen.getByLabelText("PV capacity"), "141");
+    await user.type(screen.getByLabelText("Battery capacity"), "390");
+    await user.type(screen.getByLabelText("PCS capacity"), "290");
+    await user.type(screen.getByLabelText("Quoted Net CAPEX"), "290000");
+    await user.click(screen.getByRole("button", { name: "Add to comparison" }));
+    expect(await screen.findByText(/290 kW AC, above the current 250 kW AC Site AC headroom/)).toBeTruthy();
+    expect(screen.getByText("3 feasible")).toBeTruthy();
     const pcsHeading = screen.getByRole("heading", { name: "PCS & connection constraints" });
     expect(Boolean(quoteHeading.compareDocumentPosition(pcsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 2"));
