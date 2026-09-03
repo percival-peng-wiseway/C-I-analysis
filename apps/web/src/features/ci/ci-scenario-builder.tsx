@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BatteryCharging,
   Cpu,
@@ -144,6 +144,44 @@ export function CiScenarioBuilder({
   const solarProfile = publishedSolar.find((profile) => profile.profile_id === solarProfileId) ?? null;
   const batteryProfile = publishedBattery.find((profile) => profile.profile_id === batteryProfileId) ?? null;
   const inverterProfile = publishedInverter.find((profile) => profile.profile_id === inverterProfileId) ?? null;
+
+  useEffect(() => {
+    setSolarProfileId((current) => publishedId(
+      current || deviceProfile.default_solution_profile_selection.solar_profile_id,
+      publishedSolar,
+    ));
+    setBatteryProfileId((current) => publishedId(
+      current || deviceProfile.default_solution_profile_selection.battery_profile_id,
+      publishedBattery,
+    ));
+    setInverterProfileId((current) => publishedId(current, publishedInverter));
+  }, [
+    deviceProfile.default_solution_profile_selection.battery_profile_id,
+    deviceProfile.default_solution_profile_selection.solar_profile_id,
+    publishedBattery,
+    publishedInverter,
+    publishedSolar,
+  ]);
+
+  useEffect(() => {
+    if (!inverterProfile) return;
+    setConnection((current) => {
+      const blockSize = formatNumber(inverterProfile.rated_active_power_kw);
+      const reactiveCap = current.reactive_support_enabled
+        ? formatNumber(inverterProfile.maximum_reactive_power_kvar)
+        : "";
+      if (
+        current.inverter_block_size_kw === blockSize &&
+        current.reactive_support_max_kvar === reactiveCap
+      ) return current;
+      return {
+        ...current,
+        inverter_block_size_kw: blockSize,
+        reactive_support_max_kvar: reactiveCap,
+      };
+    });
+  }, [inverterProfile]);
+
   const request = useMemo(
     () => buildGenerationRequest({ batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile }),
     [batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile],

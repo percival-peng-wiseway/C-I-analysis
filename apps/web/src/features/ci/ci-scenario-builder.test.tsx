@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -73,6 +73,35 @@ describe("CiScenarioBuilder", () => {
 
     expect(onSubmit.mock.calls[0][0].solar_profile_id).toBe("high_power_pv_v1");
     expect(screen.getByText("700 W")).toBeTruthy();
+  });
+
+  it("adopts a newly saved published battery profile without remounting", async () => {
+    const beforeSave: CiDeviceProfile = structuredClone(deviceProfile);
+    const foxBattery = {
+      ...beforeSave.solution_profiles.battery_profiles[0],
+      profile_id: "fox_ess_cq7_l14_v1",
+      name: "Fox ESS CQ7-L14",
+      manufacturer: "Fox ESS",
+      model: "CQ7-L14",
+      nominal_capacity_kwh_per_unit: 97.44,
+      continuous_power_kw_per_unit: 64.51,
+      status: "draft" as const,
+    };
+    beforeSave.solution_profiles.battery_profiles[0].status = "draft";
+    beforeSave.solution_profiles.battery_profiles.push(foxBattery);
+
+    const afterSave: CiDeviceProfile = structuredClone(beforeSave);
+    afterSave.solution_profiles.battery_profiles[1].status = "published";
+    afterSave.default_solution_profile_selection.battery_profile_id = "fox_ess_cq7_l14_v1";
+
+    const view = render(<CiScenarioBuilder deviceProfile={beforeSave} error={null} isPending={false} onSubmit={vi.fn()} />);
+    expect(screen.getByText("No published profile is available.")).toBeTruthy();
+
+    view.rerender(<CiScenarioBuilder deviceProfile={afterSave} error={null} isPending={false} onSubmit={vi.fn()} />);
+
+    await waitFor(() => expect((screen.getByLabelText("Published Battery profile") as HTMLSelectElement).value).toBe("fox_ess_cq7_l14_v1"));
+    expect(screen.getByRole("region", { name: "Battery profile" }).textContent).toContain("Fox ESS CQ7-L14");
+    expect(screen.getByRole("button", { name: "Save configuration & generate 30 cases" })).toHaveProperty("disabled", false);
   });
 
   it("keeps DC-coupled battery profiles out of the current AC dispatch generator", () => {

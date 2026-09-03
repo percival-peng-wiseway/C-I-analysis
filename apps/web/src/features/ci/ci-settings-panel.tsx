@@ -30,7 +30,7 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
   const save = useMutation({
     mutationFn: (profile: CiDeviceProfile) => saveCiDeviceProfile(profile),
     onSuccess: (state) => {
-      queryClient.setQueryData(ciDeviceProfileQueryKey, state);
+      queryClient.setQueryData(ciDeviceProfileQueryKey, structuredClone(state));
       if (state.profile) setDraft(structuredClone(state.profile));
       void queryClient.invalidateQueries({ queryKey: ["ci-project-annual-financial-comparison"] });
     },
