@@ -52,9 +52,10 @@ few minutes.
 Do not start a production analysis while a deployment is still propagating.
 A Worker code update can restart its Durable Object, so every long calculation
 must persist resumable checkpoints rather than depend on one uninterrupted
-proxy request. Tariff replay uses small, idempotent scenario batches for this
-reason. A failed batch can be resumed from PostgreSQL without re-running the
-completed batches or accumulating a rebate or financial value twice.
+proxy request. Physical feasibility and tariff replay both use small,
+idempotent scenario batches for this reason. A failed batch can be resumed
+from PostgreSQL without re-running completed scenarios or accumulating a
+rebate or financial value twice.
 
 The production container configuration keeps capacity for rollout overlap and
 uses an active rollout grace period. These settings reduce cold-start and

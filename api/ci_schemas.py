@@ -212,6 +212,10 @@ class CiScenarioSelectionRequest(BaseModel):
         return scenario_ids
 
 
+class CiDesignFeasibilityRequest(CiScenarioSelectionRequest):
+    persistence_mode: Literal["replace", "merge_checkpoint"] = "replace"
+
+
 class CiTariffReplayRequest(CiScenarioSelectionRequest):
     persistence_mode: Literal["replace", "merge_checkpoint"] = "replace"
 

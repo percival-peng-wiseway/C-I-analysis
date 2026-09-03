@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   ArrowLeft,
@@ -17,7 +17,7 @@ import {
   ShieldCheck,
   SunMedium,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { invalidateCiCalculationHandbook } from "@/features/ci/api/ci-calculation-handbook";
@@ -47,6 +47,7 @@ import {
   compareCiAnnualFinancialScenarios,
   fetchCiSavedAnnualFinancialComparison,
   type CiAnnualFinancialComparisonResult,
+  type CiSavedAnnualFinancialState,
 } from "@/features/ci/api/ci-annual-financial-comparison";
 import {
   ciDeviceProfileQueryKey,
@@ -66,6 +67,41 @@ import {
 import { CiPortfolioReturnChart } from "@/features/ci/ci-annual-financial-workspace";
 
 type ReplayTab = "summary" | "bills" | "financial" | "demand" | "interval" | "assumptions";
+type FinanceAnalysisProgress = { percent: number; label: string };
+
+export const CI_ANALYSIS_MUTATION_KEY = ["ci-project-full-analysis"] as const;
+
+type FinanceManualPrice = { scenarioId: string; upfrontCostAudExGst: number };
+
+export function resolveCiFinanceAnalysisSelection(
+  design: Pick<CiDesignCandidateResult, "candidates"> | null | undefined,
+  savedFinance: CiSavedAnnualFinancialState | null | undefined,
+): { scenarioIds: string[]; savedManualPrices: FinanceManualPrice[] | null } {
+  const designScenarioIds = design?.candidates.map((candidate) => candidate.scenario_id) ?? [];
+  if (!designScenarioIds.length) {
+    throw new Error("Generate at least one solution before calculating.");
+  }
+  const savedManualPrices = savedFinance?.status === "ready"
+    && savedFinance.result?.assumptions.price_source === "analyst_entered_total_solution_price"
+    ? savedFinance.result.solutions.map((solution) => ({
+      scenarioId: solution.scenario_id,
+      upfrontCostAudExGst: solution.upfront_cost_aud_ex_gst,
+    }))
+    : null;
+  if (!savedManualPrices) {
+    return { scenarioIds: designScenarioIds, savedManualPrices: null };
+  }
+  const designIds = new Set(designScenarioIds);
+  const manualIds = savedManualPrices.map((price) => price.scenarioId);
+  if (
+    manualIds.length < 1
+    || new Set(manualIds).size !== manualIds.length
+    || manualIds.some((scenarioId) => !designIds.has(scenarioId))
+  ) {
+    throw new Error("The saved quotation selection no longer matches the current solution design. Return to Solution Generator and confirm the selected quotations.");
+  }
+  return { scenarioIds: manualIds, savedManualPrices };
+}
 
 const tabs: Array<{ id: ReplayTab; label: string }> = [
   { id: "summary", label: "Summary" },
@@ -120,6 +156,10 @@ export function CiTariffReplay({
     retry: false,
   });
   const [equipmentSelection, setEquipmentSelection] = useState<CiEquipmentSelection | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<FinanceAnalysisProgress | null>(null);
+  const localRunInFlight = useRef(false);
+  const activeAnalysisCount = useIsMutating({ mutationKey: CI_ANALYSIS_MUTATION_KEY });
+  const analysisBusy = activeAnalysisCount > 0;
 
   useEffect(() => {
     if (deviceProfile.data?.status === "ready" && deviceProfile.data.profile) {
@@ -130,22 +170,56 @@ export function CiTariffReplay({
   }, [deviceProfile.data?.profile_sha256, deviceProfile.data?.status]);
 
   const runReplay = useMutation({
+    mutationKey: CI_ANALYSIS_MUTATION_KEY,
+    onMutate: () => {
+      setAnalysisProgress(null);
+    },
     mutationFn: async () => {
       if (tariffProfile.data?.status !== "approved") throw new Error("Approve this project's tariff profile before calculating.");
-      const savedManualPrices = finance.data?.status === "ready" && finance.data.result?.assumptions.price_source === "analyst_entered_total_solution_price"
-        ? finance.data.result.solutions.map((solution) => ({ scenarioId: solution.scenario_id, upfrontCostAudExGst: solution.upfront_cost_aud_ex_gst }))
-        : null;
+      const { savedManualPrices, scenarioIds } = resolveCiFinanceAnalysisSelection(design.data, finance.data);
       if (!savedManualPrices && !equipmentSelection) throw new Error("Select the supported PV, battery and hybrid inverter / PCS before calculating.");
-      const scenarioIds = design.data?.candidates.map((candidate) => candidate.scenario_id) ?? [];
-      if (!scenarioIds.length) throw new Error("Generate at least one solution before calculating.");
-      const feasibilityResult = await runCiDesignFeasibility(project.project_id, fetch, undefined, scenarioIds);
-      const tariffResult = await runCiProjectTariffReplay(project.project_id, fetch, undefined, scenarioIds);
+      setAnalysisProgress({ percent: 12, label: `Running scenario dispatch (0/${scenarioIds.length})` });
+      const feasibilityResult = await runCiDesignFeasibility(project.project_id, fetch, undefined, scenarioIds, {
+        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+          const fraction = totalScenarioCount > 0 ? completedScenarioCount / totalScenarioCount : 0;
+          setAnalysisProgress({
+            percent: Math.min(52, 12 + Math.round(fraction * 40)),
+            label: `Running scenario dispatch (${completedScenarioCount}/${totalScenarioCount})`,
+          });
+        },
+      });
+      queryClient.setQueryData(ciSavedFeasibilityQueryKey(project.project_id), {
+        contract_version: "ci_project_feasibility_state_v1",
+        status: "ready",
+        saved_at: new Date().toISOString(),
+        stale_reasons: [],
+        result: feasibilityResult,
+      });
+      setAnalysisProgress({ percent: 52, label: `Reconstructing tariffs (0/${scenarioIds.length})` });
+      const tariffResult = await runCiProjectTariffReplay(project.project_id, fetch, undefined, scenarioIds, {
+        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+          const fraction = totalScenarioCount > 0 ? completedScenarioCount / totalScenarioCount : 0;
+          setAnalysisProgress({
+            percent: Math.min(74, 52 + Math.round(fraction * 22)),
+            label: `Reconstructing tariffs (${completedScenarioCount}/${totalScenarioCount})`,
+          });
+        },
+      });
+      queryClient.setQueryData(ciProjectTariffReplayQueryKey(project.project_id), {
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "ready",
+        saved_at: new Date().toISOString(),
+        stale_reasons: [],
+        result: tariffResult,
+      });
+      setAnalysisProgress({ percent: 78, label: `Calculating financial comparison (${scenarioIds.length}/${scenarioIds.length} scenarios complete)` });
       const financeResult = await compareCiAnnualFinancialScenarios({
         projectId: project.project_id,
         pricingMode: savedManualPrices ? "manual_quotes" : "device_profile",
         prices: savedManualPrices ?? undefined,
         equipmentSelection: savedManualPrices ? undefined : equipmentSelection ?? undefined,
       });
+      setAnalysisProgress({ percent: 100, label: "Analysis complete" });
       return { feasibilityResult, tariffResult, financeResult };
     },
     onSuccess: ({ feasibilityResult, financeResult, tariffResult }) => {
@@ -171,6 +245,13 @@ export function CiTariffReplay({
         result: financeResult,
       });
       void invalidateCiCalculationHandbook(queryClient, project.project_id);
+    },
+    onError: () => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
+      void queryClient.invalidateQueries({ exact: true, queryKey: ciProjectTariffReplayQueryKey(project.project_id) });
+    },
+    onSettled: () => {
+      localRunInFlight.current = false;
     },
   });
 
@@ -239,16 +320,32 @@ export function CiTariffReplay({
   const result = tariffApproved ? savedResult : null;
   const financeResult = tariffApproved ? savedFinanceResult : null;
   const error = runReplay.error instanceof Error ? runReplay.error.message : null;
+  const analysisScenarioCount = hasSavedManualQuotes
+    ? finance.data.result?.solutions.length ?? 0
+    : design.data?.candidate_count ?? 0;
+  const startAnalysis = () => {
+    if (analysisBusy || localRunInFlight.current) return;
+    localRunInFlight.current = true;
+    runReplay.mutate();
+  };
+  const changeEquipmentSelection = (selection: CiEquipmentSelection) => {
+    if (analysisBusy) return;
+    setEquipmentSelection(selection);
+    setAnalysisProgress(null);
+    runReplay.reset();
+  };
 
   return (
     <section aria-labelledby="tariff-replay-title" className="space-y-5">
-      <FinanceRunHeader blockedCount={checks.filter((item) => !item.ready).length} canRun={canRun} count={design.data?.candidate_count ?? 0} hasResult={Boolean(result)} onRun={() => runReplay.mutate()} pending={runReplay.isPending} />
+      <FinanceRunHeader blockedCount={checks.filter((item) => !item.ready).length} canRun={canRun} count={analysisScenarioCount} hasResult={Boolean(result)} onRun={startAnalysis} pending={analysisBusy} />
+
+      {analysisProgress ? <FinanceProgress failed={runReplay.isError} progress={analysisProgress} /> : null}
 
       {error ? <p aria-live="assertive" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{error}</p> : null}
       {replay.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved replay no longer matches the current project inputs. Run the scenarios again to refresh the annual bills.</p> : null}
       {finance.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{financeStaleMessage(finance.data.stale_reasons)}</p> : null}
 
-      <EquipmentSelectionPanel onChange={setEquipmentSelection} profile={savedDeviceProfile} selection={equipmentSelection} />
+      <EquipmentSelectionPanel disabled={analysisBusy} onChange={changeEquipmentSelection} profile={savedDeviceProfile} selection={equipmentSelection} />
 
       {result ? (
         financeResult ? <CiTariffReplayResult evidenceCode={inspection?.bill.network_tariff_code ?? "Not recorded"} financeResult={financeResult} profileLabel={profileLabel} result={result} /> : <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureRebates={onConfigureRebates} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed />
@@ -422,16 +519,16 @@ function RebateStatus({ status }: { status: CiAnnualFinancialComparisonResult["s
   return <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>{humanize(status)}</span>;
 }
 
-function EquipmentSelectionPanel({ onChange, profile, selection }: { onChange: (selection: CiEquipmentSelection) => void; profile: CiDeviceProfile | null; selection: CiEquipmentSelection | null }) {
+function EquipmentSelectionPanel({ disabled, onChange, profile, selection }: { disabled: boolean; onChange: (selection: CiEquipmentSelection) => void; profile: CiDeviceProfile | null; selection: CiEquipmentSelection | null }) {
   if (!profile || !selection) return <section className="rounded-xl border border-amber-200 bg-amber-50 p-5"><h2 className="font-semibold text-amber-950">Equipment catalog required</h2><p className="mt-1 text-sm text-amber-800">Open Settings and save the supported PV, battery and hybrid inverter / PCS catalog before calculating.</p></section>;
   const pv = profile.equipment_catalog.pv_products[0];
   const battery = profile.equipment_catalog.battery_products[0];
   const inverter = profile.equipment_catalog.inverter_products[0];
-  return <section aria-labelledby="equipment-selection-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-cyan-700">Equipment</p><h2 className="mt-1 text-lg font-semibold text-slate-950" id="equipment-selection-title">Select pricing references</h2></div><div className="mt-4 grid gap-3 lg:grid-cols-3"><EquipmentSelect label="PV" onChange={(productId) => onChange({ ...selection, pv_product_id: productId as CiEquipmentSelection["pv_product_id"] })} options={profile.equipment_catalog.pv_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary={`${aud(pv.capital_cost_aud_per_kwp_dc)} / kWp DC`} value={selection.pv_product_id} /><EquipmentSelect label="Battery" onChange={(productId) => onChange({ ...selection, battery_product_id: productId as CiEquipmentSelection["battery_product_id"] })} options={profile.equipment_catalog.battery_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary="Continuous capacity cost curve" value={selection.battery_product_id} /><EquipmentSelect label="Hybrid inverter / PCS" onChange={(productId) => onChange({ ...selection, inverter_product_id: productId as CiEquipmentSelection["inverter_product_id"] })} options={profile.equipment_catalog.inverter_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary="Continuous capacity cost curve" value={selection.inverter_product_id} /></div></section>;
+  return <section aria-busy={disabled} aria-labelledby="equipment-selection-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-cyan-700">Equipment</p><h2 className="mt-1 text-lg font-semibold text-slate-950" id="equipment-selection-title">Select pricing references</h2></div><div className="mt-4 grid gap-3 lg:grid-cols-3"><EquipmentSelect disabled={disabled} label="PV" onChange={(productId) => onChange({ ...selection, pv_product_id: productId as CiEquipmentSelection["pv_product_id"] })} options={profile.equipment_catalog.pv_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary={`${aud(pv.capital_cost_aud_per_kwp_dc)} / kWp DC`} value={selection.pv_product_id} /><EquipmentSelect disabled={disabled} label="Battery" onChange={(productId) => onChange({ ...selection, battery_product_id: productId as CiEquipmentSelection["battery_product_id"] })} options={profile.equipment_catalog.battery_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary="Continuous capacity cost curve" value={selection.battery_product_id} /><EquipmentSelect disabled={disabled} label="Hybrid inverter / PCS" onChange={(productId) => onChange({ ...selection, inverter_product_id: productId as CiEquipmentSelection["inverter_product_id"] })} options={profile.equipment_catalog.inverter_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary="Continuous capacity cost curve" value={selection.inverter_product_id} /></div></section>;
 }
 
-function EquipmentSelect({ label, onChange, options, summary, value }: { label: string; onChange: (value: string) => void; options: Array<{ id: string; label: string }>; summary: string; value: string }) {
-  return <label className="rounded-xl border border-slate-200 bg-slate-50/60 p-4"><span className="text-xs font-semibold text-slate-600">{label}</span><select aria-label={label} className="mt-2 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900" onChange={(event) => onChange(event.target.value)} value={value}>{options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><span className="mt-2 block text-xs text-slate-500">{summary}</span></label>;
+function EquipmentSelect({ disabled, label, onChange, options, summary, value }: { disabled: boolean; label: string; onChange: (value: string) => void; options: Array<{ id: string; label: string }>; summary: string; value: string }) {
+  return <label className="rounded-xl border border-slate-200 bg-slate-50/60 p-4"><span className="text-xs font-semibold text-slate-600">{label}</span><select aria-label={label} className="mt-2 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500" disabled={disabled} onChange={(event) => onChange(event.target.value)} value={value}>{options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><span className="mt-2 block text-xs text-slate-500">{summary}</span></label>;
 }
 
 function ReplayReadyState({
@@ -615,7 +712,11 @@ function TariffBasis({ evidenceCode, profileLabel, result, scenario }: { evidenc
 
 function FinanceRunHeader({ blockedCount = 0, canRun, count, hasResult, onRun, pending }: { blockedCount?: number; canRun: boolean; count: number; hasResult: boolean; onRun: () => void; pending: boolean }) {
   const blockerId = blockedCount > 0 ? "finance-run-blocker" : undefined;
-  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates Scenario Analysis, tariff and Finance for all {count} solutions.</p></div></div><div className="flex flex-col items-end gap-2">{blockedCount > 0 ? <p className="text-xs font-semibold text-amber-800" id={blockerId} role="status">{blockedCount} {blockedCount === 1 ? "input" : "inputs"} required</p> : null}<Button aria-describedby={blockerId} disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin motion-reduce:animate-none" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Analysis running…" : hasResult ? "Re-run analysis" : "Start analysis"}</Button></div></header>;
+  return <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><ReceiptText className="size-5" /></span><div><h1 className="text-xl font-semibold text-slate-950" id="tariff-replay-title">Annual bill reconstruction</h1><p className="mt-1 text-sm text-slate-500">One action recalculates Scenario Analysis, tariff and Finance for {count} selected {count === 1 ? "solution" : "solutions"}.</p></div></div><div className="flex flex-col items-end gap-2">{blockedCount > 0 ? <p className="text-xs font-semibold text-amber-800" id={blockerId} role="status">{blockedCount} {blockedCount === 1 ? "input" : "inputs"} required</p> : null}<Button aria-describedby={blockerId} disabled={!canRun || pending} onClick={onRun} type="button">{pending ? <RefreshCw className="size-4 animate-spin motion-reduce:animate-none" /> : hasResult ? <RefreshCw className="size-4" /> : <Play className="size-4" />}{pending ? "Analysis running…" : hasResult ? "Re-run analysis" : "Start analysis"}</Button></div></header>;
+}
+
+function FinanceProgress({ failed, progress }: { failed: boolean; progress: FinanceAnalysisProgress }) {
+  return <section aria-label="Analysis progress" className={`rounded-xl border p-5 ${failed ? "border-amber-200 bg-amber-50" : "border-cyan-200 bg-cyan-50"}`}><div className="flex items-center justify-between gap-4"><p className={`text-sm font-semibold ${failed ? "text-amber-950" : "text-cyan-950"}`}>{progress.label}</p><strong className={`text-sm tabular-nums ${failed ? "text-amber-950" : "text-cyan-950"}`}>{progress.percent}%</strong></div><div aria-label={progress.label} aria-valuemax={100} aria-valuemin={0} aria-valuenow={progress.percent} className={`mt-4 h-2.5 overflow-hidden rounded-full ${failed ? "bg-amber-100" : "bg-cyan-100"}`} role="progressbar"><div className={`h-full rounded-full transition-[width] duration-500 ${failed ? "bg-amber-500" : "bg-cyan-600"}`} style={{ width: `${progress.percent}%` }} /></div>{failed ? <p className="mt-3 text-xs font-medium text-amber-900">Completed checkpoints are saved. Run Analysis again to resume the remaining solutions.</p> : null}</section>;
 }
 
 function ReplayLoading() { return <section className="grid min-h-[420px] place-items-center rounded-xl border border-slate-200 bg-white"><div className="text-center"><RefreshCw className="mx-auto size-6 animate-spin text-cyan-700" /><h2 className="mt-4 font-semibold text-slate-950">Loading tariff replay</h2><p className="mt-1 text-sm text-slate-500">Checking project evidence and completed scenarios.</p></div></section>; }

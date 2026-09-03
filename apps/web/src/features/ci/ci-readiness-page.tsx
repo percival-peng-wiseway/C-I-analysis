@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowLeft, ArrowRight, Play, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -53,7 +53,7 @@ import { CiDesignFeasibility } from "@/features/ci/ci-design-feasibility";
 import { CiEvidenceIntake } from "@/features/ci/ci-evidence-intake";
 import { CiRebateProfilePanel, type CiRebateProfilePanelHandle } from "@/features/ci/ci-rebate-profile-panel";
 import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
-import { CiTariffReplay } from "@/features/ci/ci-tariff-replay";
+import { CI_ANALYSIS_MUTATION_KEY, CiTariffReplay } from "@/features/ci/ci-tariff-replay";
 import {
   clearCiSolutionWorkspaceDraft,
   loadCiSolutionWorkspaceDraft,
@@ -65,6 +65,8 @@ import { ModulePrerequisite } from "@/features/ci/ci-workflow-template";
 export function CiReadinessPage() {
   const queryClient = useQueryClient();
   const workspace = useCiWorkspace();
+  const activeAnalysisCount = useIsMutating({ mutationKey: CI_ANALYSIS_MUTATION_KEY });
+  const analysisBusy = activeAnalysisCount > 0;
   const readiness = useQuery({ queryKey: ciWorkspaceReadinessQueryKey, queryFn: () => fetchCiWorkspaceReadiness() });
   const projects = useQuery({ queryKey: ciProjectsQueryKey, queryFn: () => listCiProjects() });
   const [analysisLaunch, setAnalysisLaunch] = useState<AnalysisLaunch | null>(null);
@@ -117,11 +119,11 @@ export function CiReadinessPage() {
           />
         ) : workspace.stage === "physical_feasibility" ? (
           <PhysicalFeasibilityWorkspace
-            analysisPending={fullAnalysis.isPending}
+            analysisPending={analysisBusy}
             key={activeProject.project_id}
             onBack={() => workspace.setStage("evidence")}
             onAnalysisStart={(snapshot) => {
-              if (fullAnalysis.isBusy()) return false;
+              if (analysisBusy || fullAnalysis.isBusy()) return false;
               setProjectAnalysisSnapshot(activeProject.project_id, snapshot);
               analysisLaunchSequence.current += 1;
               setAnalysisLaunch({ launchId: analysisLaunchSequence.current, projectId: activeProject.project_id, snapshot });
@@ -138,6 +140,7 @@ export function CiReadinessPage() {
           />
         ) : workspace.stage === "dispatch" ? (
           <DispatchWorkspace
+            analysisBusy={analysisBusy}
             analysisLaunch={analysisLaunch?.projectId === activeProject.project_id ? analysisLaunch : null}
             analysisSnapshot={analysisSnapshotsByProject[activeProject.project_id] ?? null}
             claimAnalysisLaunch={claimAnalysisLaunch}
@@ -491,7 +494,7 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
   const inFlightRunId = useRef<number | null>(null);
   const [progress, setProgress] = useState<{ projectId: string; percent: number; label: string } | null>(null);
   const fullRun = useMutation<FullAnalysisResult, Error, FullAnalysisRequest>({
-    mutationKey: ["ci-project-full-analysis"],
+    mutationKey: CI_ANALYSIS_MUTATION_KEY,
     mutationFn: async ({ projectId, snapshot }) => {
       setProgress({ projectId, percent: 5, label: "Validating Net CAPEX" });
       let preview: CiDesignPricePreview;
@@ -526,15 +529,27 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
         && resultCoversScenarios(savedFeasibility.result, scenarioIds)
         ? savedFeasibility.result
         : await (async () => {
-          setProgress({ projectId, percent: 12, label: "Running scenario dispatch" });
-          return runCiDesignFeasibility(projectId, fetch, undefined, scenarioIds);
+          setProgress({ projectId, percent: 12, label: `Running scenario dispatch (0/${scenarioIds.length})` });
+          return runCiDesignFeasibility(projectId, fetch, undefined, scenarioIds, {
+            onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+              const fraction = totalScenarioCount > 0
+                ? completedScenarioCount / totalScenarioCount
+                : 0;
+              setProgress({
+                projectId,
+                percent: Math.min(52, 12 + Math.round(fraction * 40)),
+                label: `Running scenario dispatch (${completedScenarioCount}/${totalScenarioCount})`,
+              });
+            },
+          });
         })();
+      queryClient.setQueryData<CiSavedFeasibilityState>(ciSavedFeasibilityQueryKey(projectId), { contract_version: "ci_project_feasibility_state_v1", status: "ready", saved_at: new Date().toISOString(), stale_reasons: [], result: feasibilityResult });
       const tariffResult = savedTariffReplay.status === "ready"
         && savedTariffReplay.result !== null
         && resultCoversScenarios(savedTariffReplay.result, scenarioIds)
         ? savedTariffReplay.result
         : await (async () => {
-          setProgress({ projectId, percent: 52, label: "Reconstructing tariffs" });
+          setProgress({ projectId, percent: 52, label: `Reconstructing tariffs (0/${scenarioIds.length})` });
           return runCiProjectTariffReplay(projectId, fetch, undefined, scenarioIds, {
             onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
               const fraction = totalScenarioCount > 0
@@ -548,6 +563,7 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
             },
           });
         })();
+      queryClient.setQueryData(ciProjectTariffReplayQueryKey(projectId), { contract_version: "ci_project_tariff_replay_state_v1", status: "ready", saved_at: new Date().toISOString(), stale_reasons: [], result: tariffResult });
       setProgress({ projectId, percent: 74, label: "Revalidating Net CAPEX" });
       let currentPreview: CiDesignPricePreview;
       try {
@@ -579,6 +595,8 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
       void invalidateCiCalculationHandbook(queryClient, projectId);
     },
     onError: (error, variables) => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: ciSavedFeasibilityQueryKey(variables.projectId) });
+      void queryClient.invalidateQueries({ exact: true, queryKey: ciProjectTariffReplayQueryKey(variables.projectId) });
       if (error instanceof InvalidAnalysisPriceSnapshotError) onInvalidSnapshot(variables.projectId, null);
     },
     onSettled: (_data, _error, variables) => {
@@ -607,7 +625,8 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
   };
 }
 
-function DispatchWorkspace({ analysisLaunch, analysisSnapshot, claimAnalysisLaunch, fullAnalysis, onAnalysisSnapshotChange, project }: {
+function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, claimAnalysisLaunch, fullAnalysis, onAnalysisSnapshotChange, project }: {
+  analysisBusy: boolean;
   analysisLaunch: AnalysisLaunch | null;
   analysisSnapshot: AnalysisPriceSnapshot | null;
   claimAnalysisLaunch: (launchId: number) => boolean;
@@ -621,11 +640,29 @@ function DispatchWorkspace({ analysisLaunch, analysisSnapshot, claimAnalysisLaun
   const savedTariffReplay = useQuery({ queryKey: ciProjectTariffReplayQueryKey(project.project_id), queryFn: () => fetchCiSavedTariffReplay(project.project_id), retry: false });
   const pricePreview = useQuery({ queryKey: ciDesignPricePreviewQueryKey(project.project_id), queryFn: () => fetchCiDesignPricePreview(project.project_id), retry: false });
   const autoStarted = useRef(false);
+  const [dispatchProgress, setDispatchProgress] = useState<{ percent: number; label: string } | null>(null);
   const run = useMutation({
-    mutationFn: () => runCiDesignFeasibility(project.project_id),
+    mutationKey: CI_ANALYSIS_MUTATION_KEY,
+    mutationFn: () => {
+      const scenarioIds = savedDesign.data?.candidates.map((candidate) => candidate.scenario_id) ?? [];
+      if (!scenarioIds.length) throw new Error("Generate at least one solution before running scenario dispatch.");
+      setDispatchProgress({ percent: 0, label: `Running scenario dispatch (0/${scenarioIds.length})` });
+      return runCiDesignFeasibility(project.project_id, fetch, undefined, scenarioIds, {
+        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+          const fraction = totalScenarioCount > 0 ? completedScenarioCount / totalScenarioCount : 0;
+          setDispatchProgress({
+            percent: Math.round(fraction * 100),
+            label: `Running scenario dispatch (${completedScenarioCount}/${totalScenarioCount})`,
+          });
+        },
+      });
+    },
     onSuccess: (analysis) => {
       queryClient.setQueryData<CiSavedFeasibilityState>(ciSavedFeasibilityQueryKey(project.project_id), { contract_version: "ci_project_feasibility_state_v1", status: "ready", saved_at: new Date().toISOString(), stale_reasons: [], result: analysis });
       void invalidateCiCalculationHandbook(queryClient, project.project_id);
+    },
+    onError: () => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
     },
   });
   const sourceSnapshot = analysisLaunch?.snapshot ?? analysisSnapshot;
@@ -648,7 +685,7 @@ function DispatchWorkspace({ analysisLaunch, analysisSnapshot, claimAnalysisLaun
     if (
       !analysisLaunch
       || autoStarted.current
-      || fullAnalysis.isPending
+      || analysisBusy
       || !validatedSnapshot
       || savedDesign.isError
       || savedDesign.isPending
@@ -663,6 +700,7 @@ function DispatchWorkspace({ analysisLaunch, analysisSnapshot, claimAnalysisLaun
     claimAnalysisLaunch(analysisLaunch.launchId);
   }, [
     analysisLaunch,
+    analysisBusy,
     claimAnalysisLaunch,
     fullAnalysis.isPending,
     fullAnalysis.start,
@@ -700,12 +738,13 @@ function DispatchWorkspace({ analysisLaunch, analysisSnapshot, claimAnalysisLaun
           <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Activity className="size-5" /></span>
           <h1 className="text-xl font-semibold text-slate-950" id="dispatch-workspace-title">Scenario dispatch analysis</h1>
         </div>
-        <Button disabled={run.isPending || fullAnalysis.isPending || fullAnalysisBlocked} onClick={() => validatedSnapshot ? fullAnalysis.start({ projectId: project.project_id, snapshot: validatedSnapshot }) : run.mutate()} type="button">
-          {run.isPending || fullAnalysis.isPending ? <RefreshCw className="size-4 animate-spin" /> : analysis ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
-          {fullRunPending ? "Full analysis running…" : fullAnalysis.isPending ? "Another analysis is running…" : run.isPending ? `Analysing ${savedDesign.data.candidate_count} solutions…` : validatedSnapshot ? (analysis ? "Re-run full analysis" : "Run full analysis") : analysis ? "Re-run all solutions" : `Run ${savedDesign.data.candidate_count} solutions`}
+        <Button disabled={analysisBusy || fullAnalysisBlocked} onClick={() => validatedSnapshot ? fullAnalysis.start({ projectId: project.project_id, snapshot: validatedSnapshot }) : run.mutate()} type="button">
+          {analysisBusy ? <RefreshCw className="size-4 animate-spin" /> : analysis ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
+          {fullRunPending ? "Full analysis running…" : run.isPending ? `Analysing ${savedDesign.data.candidate_count} solutions…` : analysisBusy ? "Another analysis is running…" : validatedSnapshot ? (analysis ? "Re-run full analysis" : "Run full analysis") : analysis ? "Re-run all solutions" : `Run ${savedDesign.data.candidate_count} solutions`}
         </Button>
       </header>
-      {fullRunForProject && (fullAnalysis.isPending || fullAnalysis.isSuccess) && fullAnalysis.progress?.projectId === project.project_id ? <AnalysisProgress progress={fullAnalysis.progress} /> : null}
+      {fullRunForProject && (fullAnalysis.isPending || fullAnalysis.isSuccess || fullAnalysis.error) && fullAnalysis.progress?.projectId === project.project_id ? <AnalysisProgress progress={fullAnalysis.progress} /> : null}
+      {!fullRunPending && dispatchProgress && (run.isPending || run.isSuccess || run.isError) ? <AnalysisProgress progress={dispatchProgress} /> : null}
       {fullRunError ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{fullRunError.message}</p> : null}
       {pricePreview.isError ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved Net CAPEX snapshot is unavailable or out of date. Return to Solution Generator and refresh the quotations before running full analysis.</p> : null}
       {run.error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{run.error instanceof Error ? run.error.message : "Dispatch analysis failed."}</p> : null}

@@ -688,7 +688,10 @@ describe("C&I project workspace", () => {
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/design-feasibility") && init?.method === "POST");
       expect(call).toBeTruthy();
-      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ scenario_ids: ["pv-1__battery-1"] });
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        scenario_ids: ["pv-1__battery-1"],
+        persistence_mode: "merge_checkpoint",
+      });
     });
     expect(await screen.findByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
     expect(screen.queryByText("Solution 2")).toBeNull();
@@ -778,7 +781,7 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: "Analysis" }));
 
     expect(await screen.findByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
-    expect((await screen.findByRole("progressbar", { name: "Running scenario dispatch" })).getAttribute("aria-valuenow")).toBe("12");
+    expect((await screen.findByRole("progressbar", { name: "Running scenario dispatch (0/2)" })).getAttribute("aria-valuenow")).toBe("12");
     expect(screen.queryByText(/Processing 2 saved solutions/)).toBeNull();
   });
 
@@ -805,7 +808,7 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
     await screen.findByRole("heading", { name: "Solutions" });
     await user.click(screen.getByRole("button", { name: "Analysis" }));
-    await screen.findByRole("progressbar", { name: "Running scenario dispatch" });
+    await screen.findByRole("progressbar", { name: "Running scenario dispatch (0/2)" });
     await waitFor(() => expect(fullAnalysisPosts(fetchMock)).toHaveLength(1));
 
     try {
@@ -817,8 +820,12 @@ describe("C&I project workspace", () => {
       expect(fullAnalysisPosts(fetchMock)).toHaveLength(1);
 
       await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
+      const financePendingButton = await screen.findByRole("button", { name: "Analysis running…" });
+      expect(financePendingButton.hasAttribute("disabled")).toBe(true);
+      await user.click(financePendingButton);
+      expect(fullAnalysisPosts(fetchMock)).toHaveLength(1);
       await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
-      expect(await screen.findByRole("progressbar", { name: "Running scenario dispatch" })).toBeTruthy();
+      expect(await screen.findByRole("progressbar", { name: "Running scenario dispatch (0/2)" })).toBeTruthy();
       const pendingButton = screen.getByRole("button", { name: "Full analysis running…" });
       expect(pendingButton.hasAttribute("disabled")).toBe(true);
       await user.click(pendingButton);
@@ -843,6 +850,10 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: "Analysis" }));
 
     expect(await screen.findByText("Feasibility analysis returned an unsafe result contract.")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Running scenario dispatch (0/2)" }).getAttribute("aria-valuenow")).toBe("12");
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => (
+      String(input).endsWith("/design-feasibility") && !init?.method
+    )).length).toBeGreaterThanOrEqual(4));
     const retry = screen.getByRole("button", { name: "Run full analysis" });
     await user.click(retry);
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-feasibility") && init?.method === "POST")).toHaveLength(2));

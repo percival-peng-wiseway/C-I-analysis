@@ -41,6 +41,37 @@ function payload() {
   };
 }
 
+function payloadFor(scenarioIds: string[]) {
+  const result = payload();
+  const template = result.scenarios[0];
+  result.scenarios = scenarioIds.map((scenarioId, index) => ({
+    ...structuredClone(template),
+    scenario_id: scenarioId,
+    label: `Scenario ${scenarioId}`,
+    physical_review_rank: index + 1,
+  }));
+  result.physical_review_order.shortlist_count = Math.min(10, scenarioIds.length);
+  return result;
+}
+
+function savedStateFor(scenarioIds: string[]) {
+  return scenarioIds.length > 0
+    ? {
+        contract_version: "ci_project_feasibility_state_v1",
+        status: "ready",
+        saved_at: "2026-09-04T00:00:00+00:00",
+        stale_reasons: [],
+        result: payloadFor(scenarioIds),
+      }
+    : {
+        contract_version: "ci_project_feasibility_state_v1",
+        status: "not_saved",
+        saved_at: null,
+        stale_reasons: [],
+        result: null,
+      };
+}
+
 describe("C&I design feasibility API", () => {
   it("accepts only the bounded no-tariff contract", async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload()), { status: 200 }));
@@ -58,19 +89,267 @@ describe("C&I design feasibility API", () => {
     await expect(runCiDesignFeasibility("project-1", invalidPercentageFetch)).rejects.toThrow("unsafe result contract");
   });
 
-  it("posts an explicit selected solution set when provided", async () => {
-    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload()), { status: 200 }));
+  it("posts an explicit selected solution set as a merge checkpoint", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify(payloadFor(["scenario-b", "scenario-a"])), { status: 200 });
+      }
+      return new Response(JSON.stringify(savedStateFor([])), { status: 200 });
+    });
 
     await runCiDesignFeasibility("project-1", fetcher, undefined, ["scenario-b", "scenario-a"]);
 
-    expect(fetcher).toHaveBeenCalledWith(
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      "/api/commercial-industrial/projects/project-1/design-feasibility",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
       "/api/commercial-industrial/projects/project-1/design-feasibility",
       expect.objectContaining({
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ scenario_ids: ["scenario-b", "scenario-a"] }),
+        body: JSON.stringify({
+          scenario_ids: ["scenario-b", "scenario-a"],
+          persistence_mode: "merge_checkpoint",
+        }),
       }),
     );
+  });
+
+  it("uses batches of three by default and reports committed progress", async () => {
+    const requested = ["a", "b", "c", "d", "e", "f", "g"];
+    const completed = new Set<string>();
+    const postedBatches: Array<{ persistence_mode: string; scenario_ids: string[] }> = [];
+    const progress: Array<[number, number]> = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { persistence_mode: string; scenario_ids: string[] };
+        postedBatches.push(body);
+        body.scenario_ids.forEach((scenarioId) => completed.add(scenarioId));
+        return new Response(JSON.stringify(payloadFor(requested.filter((scenarioId) => completed.has(scenarioId)))), { status: 200 });
+      }
+      return new Response(JSON.stringify(savedStateFor(requested.filter((scenarioId) => completed.has(scenarioId)))), { status: 200 });
+    };
+
+    await expect(runCiDesignFeasibility(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      requested,
+      {
+        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+          progress.push([completedScenarioCount, totalScenarioCount]);
+        },
+      },
+    )).resolves.toMatchObject({ scenarios: requested.map((scenarioId) => ({ scenario_id: scenarioId })) });
+    expect(postedBatches).toEqual([
+      { persistence_mode: "merge_checkpoint", scenario_ids: ["a", "b", "c"] },
+      { persistence_mode: "merge_checkpoint", scenario_ids: ["d", "e", "f"] },
+      { persistence_mode: "merge_checkpoint", scenario_ids: ["g"] },
+    ]);
+    expect(progress).toEqual([[0, 7], [3, 7], [6, 7], [7, 7]]);
+  });
+
+  it("resumes a saved checkpoint and calculates only missing solutions", async () => {
+    const requested = ["a", "b", "c", "d", "e"];
+    const completed = new Set(["a", "c"]);
+    const postedBatches: string[][] = [];
+    const progress: Array<[number, number]> = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { persistence_mode: string; scenario_ids: string[] };
+        expect(body.persistence_mode).toBe("merge_checkpoint");
+        postedBatches.push(body.scenario_ids);
+        body.scenario_ids.forEach((scenarioId) => completed.add(scenarioId));
+        return new Response(JSON.stringify(payloadFor(requested.filter((scenarioId) => completed.has(scenarioId)))), { status: 200 });
+      }
+      return new Response(JSON.stringify(savedStateFor(requested.filter((scenarioId) => completed.has(scenarioId)))), { status: 200 });
+    };
+
+    await expect(runCiDesignFeasibility(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      requested,
+      {
+        batchSize: 2,
+        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+          progress.push([completedScenarioCount, totalScenarioCount]);
+        },
+      },
+    )).resolves.toMatchObject({ scenarios: requested.map((scenarioId) => ({ scenario_id: scenarioId })) });
+    expect(postedBatches).toEqual([["b", "d"], ["e"]]);
+    expect(progress).toEqual([[2, 5], [4, 5], [5, 5]]);
+  });
+
+  it.each([
+    "container_provisioning",
+    "container_start_timeout",
+    "container_unavailable",
+    null,
+  ] as const)("retries the initial checkpoint GET once for recoverable 503 code %s", async (errorCode) => {
+    const calls: string[] = [];
+    let getCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) {
+        getCount += 1;
+        if (getCount === 1) {
+          return new Response(JSON.stringify({
+            ...(errorCode === null ? {} : { error_code: errorCode }),
+            message: "The analysis container is temporarily unavailable.",
+          }), { status: 503, headers: { "Content-Type": "application/json" } });
+        }
+        return new Response(JSON.stringify(savedStateFor([])), { status: 200 });
+      }
+      return new Response(JSON.stringify(payloadFor(["a"])), { status: 200 });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
+  it("retries the initial checkpoint GET once after a non-abort network error", async () => {
+    const calls: string[] = [];
+    let getCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) {
+        getCount += 1;
+        if (getCount === 1) throw new TypeError("Failed to fetch");
+        return new Response(JSON.stringify(savedStateFor([])), { status: 200 });
+      }
+      return new Response(JSON.stringify(payloadFor(["a"])), { status: 200 });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
+  it("preserves an initial structured configuration error without retrying", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      return new Response(JSON.stringify({
+        error_code: "backend_unconfigured",
+        message: "The analysis service is not configured.",
+        request_id: "request-1",
+      }), { status: 503, headers: { "Content-Type": "application/json" } });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toThrow("The analysis service is not configured.");
+    expect(calls).toEqual(["GET"]);
+  });
+
+  it("does not retry an aborted initial checkpoint GET", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      const error = new Error("The operation was aborted.");
+      error.name = "AbortError";
+      throw error;
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual(["GET"]);
+  });
+
+  it("recovers a committed batch after a 503 without repeating the POST", async () => {
+    const calls: string[] = [];
+    let committed = false;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        committed = true;
+        return new Response("Backend container unavailable", { status: 503 });
+      }
+      return new Response(JSON.stringify(savedStateFor(committed ? ["a"] : [])), { status: 200 });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "POST", "GET"]);
+  });
+
+  it("retries the same uncommitted merge batch once after a 503", async () => {
+    const calls: string[] = [];
+    let postCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        postCount += 1;
+        expect(JSON.parse(String(init.body))).toEqual({
+          scenario_ids: ["a"],
+          persistence_mode: "merge_checkpoint",
+        });
+        if (postCount === 1) return new Response("Backend container unavailable", { status: 503 });
+        return new Response(JSON.stringify(payloadFor(["a"])), { status: 200 });
+      }
+      return new Response(JSON.stringify(savedStateFor([])), { status: 200 });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "POST", "GET", "POST"]);
+  });
+
+  it("does not recover or retry an explicitly aborted feasibility run", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) return new Response(JSON.stringify(savedStateFor([])), { status: 200 });
+      const error = new Error("The operation was aborted.");
+      error.name = "AbortError";
+      throw error;
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("surfaces a structured Worker error and does not retry a configuration 503", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) return new Response(JSON.stringify(savedStateFor([])), { status: 200 });
+      return new Response(JSON.stringify({
+        error_code: "backend_unconfigured",
+        message: "The analysis service is not configured.",
+        request_id: "request-1",
+      }), { status: 503, headers: { "Content-Type": "application/json" } });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toThrow("The analysis service is not configured.");
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("fails closed if a merge response loses an earlier checkpoint scenario", async () => {
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify(payloadFor(["b"])), { status: 200 });
+      }
+      return new Response(JSON.stringify(savedStateFor(["a"])), { status: 200 });
+    };
+
+    await expect(
+      runCiDesignFeasibility("project-1", fetcher as typeof fetch, undefined, ["a", "b"]),
+    ).rejects.toThrow("checkpoint changed while the selected solutions were being calculated");
   });
 
   it("restores a saved project result and fails closed on stale state shape", async () => {

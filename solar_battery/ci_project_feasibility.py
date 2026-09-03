@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+from typing import TypeVar
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from solar_battery.ci_design_feasibility import (
     CI_DESIGN_FEASIBILITY_CONTRACT_VERSION,
     CI_PHYSICAL_REVIEW_ORDER_ID,
+    rank_ci_design_feasibility_results,
 )
 from solar_battery.ci_projects import CiProjectError, require_ci_project
 from solar_battery.durable_cockpit.identity import LocalActorContext
@@ -20,6 +22,7 @@ from solar_battery.durable_cockpit.orm import (
 
 
 CI_PROJECT_FEASIBILITY_STATE_CONTRACT_VERSION = "ci_project_feasibility_state_v1"
+_JsonValue = TypeVar("_JsonValue")
 
 
 def canonical_sha256(value: object) -> str:
@@ -46,8 +49,13 @@ def record_ci_design_feasibility_result(
     expected_design_candidates_sha256: str,
     expected_scenario_ids: list[str],
     result: dict[str, object],
+    merge_checkpoint: bool = False,
 ) -> dict[str, object]:
     project = require_ci_project(session, project_id=project_id, actor=actor)
+    if merge_checkpoint:
+        # Serialize checkpoint merges through the project row. This is ignored
+        # by SQLite and becomes a row lock when the adapter is PostgreSQL.
+        session.refresh(project, with_for_update=True)
     candidates = project.design_candidates_json
     evidence = _evidence_row(session, project_id=project_id, actor=actor)
     if (
@@ -66,18 +74,65 @@ def record_ci_design_feasibility_result(
         candidates=list(candidates),
         expected_scenario_ids=expected_scenario_ids,
     )
-    stored_result = json.loads(
-        json.dumps(result, sort_keys=True, allow_nan=False)
-    )
-    result_digest = canonical_sha256(stored_result)
-    now = datetime.now(timezone.utc)
     row = session.scalar(
-        select(CiProjectFeasibilityResultModel).where(
+        select(CiProjectFeasibilityResultModel)
+        .where(
             CiProjectFeasibilityResultModel.project_id == project_id,
-            CiProjectFeasibilityResultModel.workspace_id == actor.workspace_id,
+            CiProjectFeasibilityResultModel.workspace_id
+            == actor.workspace_id,
             CiProjectFeasibilityResultModel.owner_id == actor.owner_id,
         )
+        .with_for_update()
     )
+    stored_result = _json_copy(result)
+    merge_with_existing = (
+        merge_checkpoint
+        and row is not None
+        and _row_matches_checkpoint_snapshot(
+            row,
+            expected_interval_sha256=expected_interval_sha256,
+            expected_design_candidates_sha256=expected_design_candidates_sha256,
+        )
+    )
+    if merge_with_existing:
+        stored_result = _merge_checkpoint_result(
+            row=row,
+            batch_result=stored_result,
+            candidates=list(candidates),
+        )
+    elif merge_checkpoint:
+        # A checkpoint from an old evidence/design snapshot is never mixed
+        # with a verified current batch.
+        stored_result = _rank_checkpoint_result(stored_result)
+
+    expected_stored_scenario_ids = _ordered_union_scenario_ids(
+        candidates=list(candidates),
+        existing_result=(row.result_json if merge_with_existing else None),
+        batch_result=result,
+    )
+    _validate_result_for_storage(
+        stored_result,
+        candidates=list(candidates),
+        expected_scenario_ids=(
+            expected_stored_scenario_ids
+            if merge_checkpoint
+            else expected_scenario_ids
+        ),
+    )
+    result_digest = canonical_sha256(stored_result)
+    if (
+        merge_checkpoint
+        and row is not None
+        and row.result_contract_version
+        == CI_DESIGN_FEASIBILITY_CONTRACT_VERSION
+        and row.interval_sha256 == expected_interval_sha256
+        and row.design_candidates_sha256
+        == expected_design_candidates_sha256
+        and row.result_sha256 == result_digest
+    ):
+        return _state_contract(status="ready", row=row, result=stored_result)
+
+    now = datetime.now(timezone.utc)
     if row is None:
         row = CiProjectFeasibilityResultModel(
             project_id=project_id,
@@ -107,6 +162,146 @@ def record_ci_design_feasibility_result(
     project.updated_at = now
     session.flush()
     return _state_contract(status="ready", row=row, result=stored_result)
+
+
+def _merge_checkpoint_result(
+    *,
+    row: CiProjectFeasibilityResultModel,
+    batch_result: dict[str, object],
+    candidates: list[dict[str, object]],
+) -> dict[str, object]:
+    if (
+        row.result_contract_version
+        != CI_DESIGN_FEASIBILITY_CONTRACT_VERSION
+        or not isinstance(row.result_json, dict)
+    ):
+        raise _invalid_result_error()
+    try:
+        existing_integrity_ok = (
+            canonical_sha256(row.result_json) == row.result_sha256
+        )
+    except (TypeError, ValueError):
+        existing_integrity_ok = False
+    if not existing_integrity_ok:
+        raise _invalid_result_error()
+    _validate_result_for_storage(row.result_json, candidates=candidates)
+
+    if canonical_sha256(_checkpoint_envelope(row.result_json)) != canonical_sha256(
+        _checkpoint_envelope(batch_result)
+    ):
+        raise CiProjectError(
+            "ci_project_feasibility_checkpoint_result_conflict",
+            "The feasibility batch does not match the saved checkpoint result envelope.",
+        )
+
+    existing_scenarios = {
+        str(item["scenario_id"]): _json_copy(item)
+        for item in row.result_json["scenarios"]
+    }
+    batch_scenarios = {
+        str(item["scenario_id"]): _json_copy(item)
+        for item in batch_result["scenarios"]
+    }
+    for scenario_id in existing_scenarios.keys() & batch_scenarios.keys():
+        existing_without_rank = {
+            key: value
+            for key, value in existing_scenarios[scenario_id].items()
+            if key != "physical_review_rank"
+        }
+        batch_without_rank = {
+            key: value
+            for key, value in batch_scenarios[scenario_id].items()
+            if key != "physical_review_rank"
+        }
+        if canonical_sha256(existing_without_rank) != canonical_sha256(
+            batch_without_rank
+        ):
+            raise CiProjectError(
+                "ci_project_feasibility_checkpoint_result_conflict",
+                "A feasibility batch conflicts with the saved result for the same scenario.",
+            )
+
+    combined = {**existing_scenarios, **batch_scenarios}
+    ordered_ids = _ordered_union_scenario_ids(
+        candidates=candidates,
+        existing_result=row.result_json,
+        batch_result=batch_result,
+    )
+    merged = _json_copy(batch_result)
+    merged["scenarios"] = [combined[scenario_id] for scenario_id in ordered_ids]
+    return _rank_checkpoint_result(merged)
+
+
+def _checkpoint_envelope(result: dict[str, object]) -> dict[str, object]:
+    envelope = _json_copy(result)
+    envelope.pop("scenarios", None)
+    order = envelope.get("physical_review_order")
+    if isinstance(order, dict):
+        # This field is derived from the accumulated checkpoint population.
+        order.pop("shortlist_count", None)
+    return envelope
+
+
+def _row_matches_checkpoint_snapshot(
+    row: CiProjectFeasibilityResultModel,
+    *,
+    expected_interval_sha256: str,
+    expected_design_candidates_sha256: str,
+) -> bool:
+    return (
+        row.interval_sha256 == expected_interval_sha256
+        and row.design_candidates_sha256
+        == expected_design_candidates_sha256
+    )
+
+
+def _rank_checkpoint_result(result: dict[str, object]) -> dict[str, object]:
+    ranked_result = _json_copy(result)
+    try:
+        scenarios = ranked_result["scenarios"]
+        if not isinstance(scenarios, list):
+            raise TypeError("scenarios must be a list")
+        ranked_result["scenarios"] = rank_ci_design_feasibility_results(
+            scenarios
+        )
+        order = ranked_result["physical_review_order"]
+        if not isinstance(order, dict):
+            raise TypeError("physical_review_order must be an object")
+        order["shortlist_count"] = min(10, len(scenarios))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _invalid_result_error() from exc
+    return ranked_result
+
+
+def _ordered_union_scenario_ids(
+    *,
+    candidates: list[dict[str, object]],
+    existing_result: dict[str, object] | None,
+    batch_result: dict[str, object],
+) -> list[str]:
+    included_ids = {
+        str(item["scenario_id"])
+        for result in (existing_result, batch_result)
+        if isinstance(result, dict)
+        for item in result.get("scenarios", [])
+        if isinstance(item, dict) and isinstance(item.get("scenario_id"), str)
+    }
+    return [
+        str(candidate["scenario_id"])
+        for candidate in candidates
+        if candidate.get("scenario_id") in included_ids
+    ]
+
+
+def _json_copy(value: _JsonValue) -> _JsonValue:
+    return json.loads(json.dumps(value, sort_keys=True, allow_nan=False))
+
+
+def _invalid_result_error() -> CiProjectError:
+    return CiProjectError(
+        "ci_project_feasibility_result_invalid",
+        "The feasibility result did not satisfy the persisted safety contract.",
+    )
 
 
 def ci_design_feasibility_state(

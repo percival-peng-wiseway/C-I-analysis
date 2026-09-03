@@ -298,7 +298,7 @@ export async function runCiProjectTariffReplay(
     throw new Error("Tariff replay batch size must be a whole number from one to 200.");
   }
 
-  const saved = await fetchCiSavedTariffReplay(projectId, fetcher, signal);
+  const saved = await loadCiSavedTariffReplayState(projectId, fetcher, signal, true);
   let latestResult = saved.status === "ready" ? saved.result : null;
   let completedIds = completedRequestedScenarioIds(latestResult, scenarioIds);
   options.onProgress?.({
@@ -511,29 +511,55 @@ export async function fetchCiSavedTariffReplay(
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<CiSavedTariffReplayState> {
-  const response = await fetcher(
-    `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-replay`,
-    { headers: { Accept: "application/json" }, signal },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `Saved C&I tariff replay request failed with status ${response.status}.`,
-    );
+  return loadCiSavedTariffReplayState(projectId, fetcher, signal, false);
+}
+
+async function loadCiSavedTariffReplayState(
+  projectId: string,
+  fetcher: typeof fetch,
+  signal: AbortSignal | undefined,
+  retryTransientFailure: boolean,
+): Promise<CiSavedTariffReplayState> {
+  const maximumAttempts = retryTransientFailure ? 2 : 1;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetcher(
+        `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-replay`,
+        { headers: { Accept: "application/json" }, signal },
+      );
+    } catch (error) {
+      if (isAbortError(error) || attempt + 1 >= maximumAttempts) throw error;
+      continue;
+    }
+    if (!response.ok) {
+      const failurePayload = await readCiApiFailure(response);
+      const failure = new Error(
+        failurePayload.message
+        ?? `Saved C&I tariff replay request failed with status ${response.status}.`,
+      );
+      if (
+        attempt + 1 < maximumAttempts
+        && isRetryableInfrastructureFailure(response.status, failurePayload.errorCode)
+      ) continue;
+      throw failure;
+    }
+    const payload = (await response.json()) as CiSavedTariffReplayState;
+    if (
+      payload.contract_version !== "ci_project_tariff_replay_state_v1" ||
+      !["not_saved", "ready", "stale"].includes(payload.status) ||
+      !Array.isArray(payload.stale_reasons) ||
+      (payload.status === "ready" && payload.result === null) ||
+      (payload.status !== "ready" && payload.result !== null)
+    ) {
+      throw new Error("Saved C&I tariff replay returned an unsafe state contract.");
+    }
+    if (payload.result !== null) {
+      payload.result = assertCiPhysicalScenarioResult(payload.result);
+    }
+    return payload;
   }
-  const payload = (await response.json()) as CiSavedTariffReplayState;
-  if (
-    payload.contract_version !== "ci_project_tariff_replay_state_v1" ||
-    !["not_saved", "ready", "stale"].includes(payload.status) ||
-    !Array.isArray(payload.stale_reasons) ||
-    (payload.status === "ready" && payload.result === null) ||
-    (payload.status !== "ready" && payload.result !== null)
-  ) {
-    throw new Error("Saved C&I tariff replay returned an unsafe state contract.");
-  }
-  if (payload.result !== null) {
-    payload.result = assertCiPhysicalScenarioResult(payload.result);
-  }
-  return payload;
+  throw new Error("Saved C&I tariff replay could not be loaded.");
 }
 
 export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenarioResult {

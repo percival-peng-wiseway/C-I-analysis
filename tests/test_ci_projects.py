@@ -691,6 +691,9 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
 
     def feasibility(_interval_bytes, *, scenarios):
         scenario_ids = [scenario["scenario_id"] for scenario in scenarios]
+        scenario_by_id = {
+            scenario["scenario_id"]: scenario for scenario in scenarios
+        }
         captured_feasibility.append(scenario_ids)
         result_ids = scenario_ids
         if feasibility_mode["value"] == "duplicate":
@@ -720,6 +723,47 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
                     "scenario_id": scenario_id,
                     "physical_review_rank": index,
                     "recommendation_permitted": False,
+                    "authored_inputs": {
+                        "pv_capacity_kwp_dc": float(
+                            scenario_by_id.get(scenario_id, {}).get(
+                                "pv_capacity_kwp_dc", 100.0
+                            )
+                        ),
+                        "nominal_capacity_kwh": float(
+                            scenario_by_id.get(scenario_id, {}).get(
+                                "nominal_capacity_kwh", 200.0
+                            )
+                        ),
+                        "pv_inverter_capacity_kw_ac": float(
+                            scenario_by_id.get(scenario_id, {}).get(
+                                "pv_inverter_capacity_kw_ac", 100.0
+                            )
+                        ),
+                    },
+                    "coverage_energy": {
+                        "grid_import_reduction_kwh": {
+                            "scenario-a": 100.0,
+                            "scenario-b": 200.0,
+                            "scenario-c": 300.0,
+                        }.get(scenario_id, 50.0)
+                    },
+                    "coverage_performance": {
+                        "grid_import_peak_reduction_kw": {
+                            "scenario-a": 10.0,
+                            "scenario-b": 20.0,
+                            "scenario-c": 30.0,
+                        }.get(scenario_id, 5.0),
+                        "top_10_event_coverage_percent": {
+                            "scenario-a": 40.0,
+                            "scenario-b": 50.0,
+                            "scenario-c": 60.0,
+                        }.get(scenario_id, 20.0),
+                        "grid_import_peak_kw": {
+                            "scenario-a": 290.0,
+                            "scenario-b": 280.0,
+                            "scenario-c": 270.0,
+                        }.get(scenario_id, 300.0),
+                    },
                 }
                 for index, scenario_id in enumerate(result_ids, start=1)
             ],
@@ -866,14 +910,61 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
         assert unknown.json()["detail"]["code"] == (
             "ci_project_scenario_selection_invalid"
         )
-        feasibility_rejects_tariff_mode = client.post(
+        invalid_feasibility_persistence_mode = client.post(
+            f"{project_url}/design-feasibility",
+            json={
+                "scenario_ids": ["scenario-a"],
+                "persistence_mode": "append",
+            },
+        )
+        assert invalid_feasibility_persistence_mode.status_code == 422
+
+        checkpoint_feasibility_c = client.post(
+            f"{project_url}/design-feasibility",
+            json={
+                "scenario_ids": ["scenario-c"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert checkpoint_feasibility_c.status_code == 200
+        assert [
+            scenario["scenario_id"]
+            for scenario in checkpoint_feasibility_c.json()["scenarios"]
+        ] == ["scenario-c"]
+
+        checkpoint_feasibility_a = client.post(
             f"{project_url}/design-feasibility",
             json={
                 "scenario_ids": ["scenario-a"],
                 "persistence_mode": "merge_checkpoint",
             },
         )
-        assert feasibility_rejects_tariff_mode.status_code == 422
+        assert checkpoint_feasibility_a.status_code == 200
+        assert [
+            (scenario["scenario_id"], scenario["physical_review_rank"])
+            for scenario in checkpoint_feasibility_a.json()["scenarios"]
+        ] == [("scenario-c", 1), ("scenario-a", 2)]
+        feasibility_checkpoint_state = client.get(
+            f"{project_url}/design-feasibility"
+        ).json()
+        assert feasibility_checkpoint_state["status"] == "ready"
+        feasibility_checkpoint_saved_at = feasibility_checkpoint_state["saved_at"]
+
+        repeated_feasibility_checkpoint = client.post(
+            f"{project_url}/design-feasibility",
+            json={
+                "scenario_ids": ["scenario-a"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert repeated_feasibility_checkpoint.status_code == 200
+        assert (
+            repeated_feasibility_checkpoint.json()
+            == checkpoint_feasibility_a.json()
+        )
+        assert client.get(f"{project_url}/design-feasibility").json()[
+            "saved_at"
+        ] == feasibility_checkpoint_saved_at
 
         selection = ["scenario-c", "scenario-a"]
         selected_feasibility = client.post(

@@ -14,6 +14,7 @@ from api.ci_schemas import (
     CiBillReviewRequest,
     CiDesignCandidatesRequest,
     CiCustomDesignCandidateRequest,
+    CiDesignFeasibilityRequest,
     CiDeviceProfileRequest,
     CiFinancialSolutionRequest,
     CiFinancialSolutionStarRequest,
@@ -23,7 +24,6 @@ from api.ci_schemas import (
     CiPricingCatalogReplaceRequest,
     CiProjectCreateRequest,
     CiProjectRebateProfileSaveRequest,
-    CiScenarioSelectionRequest,
     CiProjectStcSettingsSaveRequest,
     CiProjectTariffProfileSaveRequest,
     CiTariffReplayRequest,
@@ -1081,7 +1081,7 @@ def post_ci_design_feasibility(
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
     object_store: ObjectStore = Depends(get_object_store),
-    payload: CiScenarioSelectionRequest | None = None,
+    payload: CiDesignFeasibilityRequest | None = None,
 ) -> dict[str, object]:
     actor = identity_provider.current()
     try:
@@ -1115,9 +1115,10 @@ def post_ci_design_feasibility(
         result = analyze_ci_design_feasibility(
             interval.data, scenarios=selected_candidates
         )
+        stored_result = result
         with session_factory() as session:
             with session.begin():
-                record_ci_design_feasibility_result(
+                saved_state = record_ci_design_feasibility_result(
                     session,
                     project_id=project_id,
                     actor=actor,
@@ -1128,8 +1129,17 @@ def post_ci_design_feasibility(
                         for candidate in selected_candidates
                     ],
                     result=result,
+                    merge_checkpoint=(
+                        payload is not None
+                        and payload.persistence_mode == "merge_checkpoint"
+                    ),
                 )
-        return result
+                if (
+                    payload is not None
+                    and payload.persistence_mode == "merge_checkpoint"
+                ):
+                    stored_result = saved_state["result"]
+        return stored_result
     except CiEvidenceIntakeError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

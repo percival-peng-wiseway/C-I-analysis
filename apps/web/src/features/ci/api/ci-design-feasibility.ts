@@ -182,6 +182,18 @@ export interface CiSavedFeasibilityState {
   result: CiDesignFeasibilityResult | null;
 }
 
+export interface CiFeasibilityProgress {
+  completedScenarioCount: number;
+  totalScenarioCount: number;
+}
+
+export interface CiFeasibilityRunOptions {
+  batchSize?: number;
+  onProgress?: (progress: CiFeasibilityProgress) => void;
+}
+
+const DEFAULT_FEASIBILITY_BATCH_SIZE = 3;
+
 export const ciSavedFeasibilityQueryKey = (projectId: string) => ["ci-project-feasibility", projectId] as const;
 
 export async function runCiDesignFeasibility(
@@ -189,38 +201,271 @@ export async function runCiDesignFeasibility(
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
   scenarioIds?: string[],
+  options: CiFeasibilityRunOptions = {},
 ): Promise<CiDesignFeasibilityResult> {
-  const response = await fetcher(
-    `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-feasibility`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        ...(scenarioIds === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(scenarioIds === undefined ? {} : { body: JSON.stringify({ scenario_ids: scenarioIds }) }),
-      signal,
-    },
-  );
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: { message?: string } } | null;
-    throw new Error(payload?.detail?.message ?? `Feasibility analysis failed with status ${response.status}.`);
+  const url = `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-feasibility`;
+  if (scenarioIds === undefined) {
+    return postCiDesignFeasibilityBatch({ fetcher, projectId, signal, url });
   }
-  return assertCiDesignFeasibility(await response.json());
+  if (
+    scenarioIds.length < 1
+    || scenarioIds.length > 200
+    || new Set(scenarioIds).size !== scenarioIds.length
+  ) {
+    throw new Error("Select one to 200 unique solutions before running scenario dispatch.");
+  }
+  const batchSize = options.batchSize ?? DEFAULT_FEASIBILITY_BATCH_SIZE;
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 200) {
+    throw new Error("Scenario dispatch batch size must be a whole number from one to 200.");
+  }
+
+  const saved = await loadCiSavedFeasibilityState(projectId, fetcher, signal, true);
+  let latestResult = saved.status === "ready" ? saved.result : null;
+  let completedIds = completedRequestedFeasibilityScenarioIds(latestResult, scenarioIds);
+  options.onProgress?.({
+    completedScenarioCount: completedIds.size,
+    totalScenarioCount: scenarioIds.length,
+  });
+  if (completedIds.size === scenarioIds.length && latestResult) return latestResult;
+
+  const missingIds = scenarioIds.filter((scenarioId) => !completedIds.has(scenarioId));
+  for (const batch of chunkFeasibilityScenarioIds(missingIds, batchSize)) {
+    const expectedCheckpointIds = [...completedIds, ...batch];
+    latestResult = await postCiDesignFeasibilityBatch({
+      fetcher,
+      persistenceMode: "merge_checkpoint",
+      projectId,
+      recoveryScenarioIds: batch,
+      scenarioIds: batch,
+      signal,
+      url,
+    });
+    if (!hasFeasibilityScenarioCoverage(latestResult, expectedCheckpointIds)) {
+      throw new Error("The scenario dispatch checkpoint changed while the selected solutions were being calculated.");
+    }
+    completedIds = completedRequestedFeasibilityScenarioIds(latestResult, scenarioIds);
+    options.onProgress?.({
+      completedScenarioCount: completedIds.size,
+      totalScenarioCount: scenarioIds.length,
+    });
+  }
+  if (!latestResult || !hasFeasibilityScenarioCoverage(latestResult, scenarioIds)) {
+    throw new Error("The scenario dispatch checkpoint did not cover every selected solution.");
+  }
+  return latestResult;
+}
+
+async function postCiDesignFeasibilityBatch({
+  fetcher,
+  persistenceMode,
+  projectId,
+  recoveryScenarioIds,
+  scenarioIds,
+  signal,
+  url,
+}: {
+  fetcher: typeof fetch;
+  persistenceMode?: "replace" | "merge_checkpoint";
+  projectId: string;
+  recoveryScenarioIds?: string[];
+  scenarioIds?: string[];
+  signal?: AbortSignal;
+  url: string;
+}): Promise<CiDesignFeasibilityResult> {
+  const maximumAttempts = recoveryScenarioIds?.length ? 2 : 1;
+  let lastFailure: Error | null = null;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetcher(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          ...(scenarioIds === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(scenarioIds === undefined ? {} : {
+          body: JSON.stringify({
+            scenario_ids: scenarioIds,
+            persistence_mode: persistenceMode ?? "replace",
+          }),
+        }),
+        signal,
+      });
+    } catch (error) {
+      if (isFeasibilityAbortError(error)) throw error;
+      const recovered = await restoreCompletedFeasibility(
+        projectId,
+        recoveryScenarioIds,
+        fetcher,
+        signal,
+      );
+      if (recovered) return recovered;
+      lastFailure = error instanceof Error ? error : new Error("The scenario dispatch connection was interrupted.");
+      if (attempt + 1 < maximumAttempts) continue;
+      throw lastFailure;
+    }
+    if (response.ok) return assertCiDesignFeasibility(await response.json());
+
+    const payload = await readCiFeasibilityApiFailure(response);
+    lastFailure = new Error(
+      payload.message ??
+      (response.status === 503
+        ? "The cloud analysis service became temporarily unavailable before scenario dispatch could be confirmed. Wait a moment, then run Analysis again."
+        : null) ??
+      `Feasibility analysis failed with status ${response.status}.`,
+    );
+    if (isRetryableFeasibilityInfrastructureFailure(response.status, payload.errorCode)) {
+      const recovered = await restoreCompletedFeasibility(
+        projectId,
+        recoveryScenarioIds,
+        fetcher,
+        signal,
+      );
+      if (recovered) return recovered;
+      if (attempt + 1 < maximumAttempts) continue;
+    }
+    throw lastFailure;
+  }
+  throw lastFailure ?? new Error("Scenario dispatch failed before completion could be confirmed.");
+}
+
+async function readCiFeasibilityApiFailure(
+  response: Response,
+): Promise<{ errorCode: string | null; message: string | null }> {
+  const body = await response.text().catch(() => "");
+  if (!body) return { errorCode: null, message: null };
+  try {
+    const payload = JSON.parse(body) as {
+      detail?: { code?: unknown; message?: unknown } | string;
+      error_code?: unknown;
+      message?: unknown;
+    };
+    const detailMessage = typeof payload.detail === "object" && payload.detail !== null
+      ? payload.detail.message
+      : payload.detail;
+    return {
+      errorCode: typeof payload.error_code === "string"
+        ? payload.error_code
+        : typeof payload.detail === "object" && payload.detail !== null && typeof payload.detail.code === "string"
+          ? payload.detail.code
+          : null,
+      message: typeof payload.message === "string"
+        ? payload.message
+        : typeof detailMessage === "string"
+          ? detailMessage
+          : null,
+    };
+  } catch {
+    return { errorCode: null, message: null };
+  }
+}
+
+async function restoreCompletedFeasibility(
+  projectId: string,
+  requiredScenarioIds: string[] | undefined,
+  fetcher: typeof fetch,
+  signal: AbortSignal | undefined,
+): Promise<CiDesignFeasibilityResult | null> {
+  if (!requiredScenarioIds?.length) return null;
+  try {
+    const saved = await fetchCiSavedFeasibility(projectId, fetcher, signal);
+    if (
+      saved.status !== "ready"
+      || saved.result === null
+      || !hasFeasibilityScenarioCoverage(saved.result, requiredScenarioIds)
+    ) return null;
+    return saved.result;
+  } catch (error) {
+    if (isFeasibilityAbortError(error)) throw error;
+    return null;
+  }
+}
+
+function hasFeasibilityScenarioCoverage(
+  result: CiDesignFeasibilityResult,
+  scenarioIds: string[],
+): boolean {
+  const available = new Set(result.scenarios.map((scenario) => scenario.scenario_id));
+  return scenarioIds.every((scenarioId) => available.has(scenarioId));
+}
+
+function completedRequestedFeasibilityScenarioIds(
+  result: CiDesignFeasibilityResult | null,
+  scenarioIds: string[],
+): Set<string> {
+  if (!result) return new Set();
+  const requested = new Set(scenarioIds);
+  return new Set(
+    result.scenarios
+      .map((scenario) => scenario.scenario_id)
+      .filter((scenarioId) => requested.has(scenarioId)),
+  );
+}
+
+function chunkFeasibilityScenarioIds(scenarioIds: string[], batchSize: number): string[][] {
+  const chunks: string[][] = [];
+  for (let index = 0; index < scenarioIds.length; index += batchSize) {
+    chunks.push(scenarioIds.slice(index, index + batchSize));
+  }
+  return chunks;
+}
+
+function isFeasibilityAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function isRetryableFeasibilityInfrastructureFailure(
+  status: number,
+  errorCode: string | null,
+): boolean {
+  return status === 503 && (
+    errorCode === null
+    || errorCode === "container_provisioning"
+    || errorCode === "container_start_timeout"
+    || errorCode === "container_unavailable"
+  );
 }
 
 export async function fetchCiSavedFeasibility(
   projectId: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<CiSavedFeasibilityState> {
-  const response = await fetcher(
-    `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-feasibility`,
-    { headers: { Accept: "application/json" } },
-  );
-  if (!response.ok) {
-    throw new Error(`Saved feasibility could not be loaded (${response.status}).`);
+  return loadCiSavedFeasibilityState(projectId, fetcher, signal, false);
+}
+
+async function loadCiSavedFeasibilityState(
+  projectId: string,
+  fetcher: typeof fetch,
+  signal: AbortSignal | undefined,
+  retryTransientFailure: boolean,
+): Promise<CiSavedFeasibilityState> {
+  const maximumAttempts = retryTransientFailure ? 2 : 1;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetcher(
+        `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-feasibility`,
+        { headers: { Accept: "application/json" }, signal },
+      );
+    } catch (error) {
+      if (isFeasibilityAbortError(error) || attempt + 1 >= maximumAttempts) throw error;
+      continue;
+    }
+    if (!response.ok) {
+      const payload = await readCiFeasibilityApiFailure(response);
+      const failure = new Error(
+        payload.message ?? `Saved feasibility could not be loaded (${response.status}).`,
+      );
+      if (
+        attempt + 1 < maximumAttempts
+        && isRetryableFeasibilityInfrastructureFailure(response.status, payload.errorCode)
+      ) continue;
+      throw failure;
+    }
+    return assertCiSavedFeasibilityState(await response.json());
   }
-  return assertCiSavedFeasibilityState(await response.json());
+  throw new Error("Saved feasibility could not be loaded.");
 }
 
 export async function fetchCiIntervalActivity(

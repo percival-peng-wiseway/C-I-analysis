@@ -99,21 +99,7 @@ def analyze_ci_design_feasibility(
         )
         for scenario in authored
     ]
-    ranked = sorted(
-        results,
-        key=lambda item: (
-            -item["coverage_energy"]["grid_import_reduction_kwh"],
-            -item["coverage_performance"]["grid_import_peak_reduction_kw"],
-            -item["coverage_performance"]["top_10_event_coverage_percent"],
-            item["coverage_performance"]["grid_import_peak_kw"],
-            item["authored_inputs"]["pv_capacity_kwp_dc"],
-            item["authored_inputs"]["nominal_capacity_kwh"],
-            item["authored_inputs"]["pv_inverter_capacity_kw_ac"],
-            item["scenario_id"],
-        ),
-    )
-    for rank, item in enumerate(ranked, start=1):
-        item["physical_review_rank"] = rank
+    ranked = rank_ci_design_feasibility_results(results)
     return {
         "contract_version": CI_DESIGN_FEASIBILITY_CONTRACT_VERSION,
         "status": "ready",
@@ -628,6 +614,29 @@ def _peak_day_envelope(
         "grid_charging_permitted": False,
         "billing_demand_interpretation_permitted": False,
     }
+
+
+def rank_ci_design_feasibility_results(
+    results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return the authoritative physical-feasibility order and contiguous ranks."""
+
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            -item["coverage_energy"]["grid_import_reduction_kwh"],
+            -item["coverage_performance"]["grid_import_peak_reduction_kw"],
+            -item["coverage_performance"]["top_10_event_coverage_percent"],
+            item["coverage_performance"]["grid_import_peak_kw"],
+            item["authored_inputs"]["pv_capacity_kwp_dc"],
+            item["authored_inputs"]["nominal_capacity_kwh"],
+            item["authored_inputs"]["pv_inverter_capacity_kw_ac"],
+            item["scenario_id"],
+        ),
+    )
+    for rank, item in enumerate(ranked, start=1):
+        item["physical_review_rank"] = rank
+    return ranked
 
 
 def _year_indexes(

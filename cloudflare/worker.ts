@@ -153,7 +153,7 @@ function operationForRequest(request: Request): string {
   if (url.pathname.endsWith("/tariff-replay")) {
     return request.method === "POST" ? "tariff_replay_run" : "tariff_replay_state";
   }
-  if (url.pathname.endsWith("/feasibility")) {
+  if (url.pathname.endsWith("/design-feasibility")) {
     return request.method === "POST" ? "dispatch_run" : "dispatch_state";
   }
   if (url.pathname.includes("/annual-financial")) {

@@ -5,8 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CiPhysicalScenarioResult } from "./api/ci-scenarios";
-import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
-import { CiTariffReplayResult } from "./ci-tariff-replay";
+import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiSavedAnnualFinancialState, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
+import { CiTariffReplayResult, resolveCiFinanceAnalysisSelection } from "./ci-tariff-replay";
 
 const result = {
   assumptions: ["Representative-year tariff quantities use the approved bill rates."],
@@ -127,6 +127,67 @@ const financeResult: CiAnnualFinancialComparisonResult = {
 afterEach(cleanup);
 
 describe("Tariff replay result workspace", () => {
+  it("re-runs exactly the saved manual-quotation subset", () => {
+    const savedFinance: CiSavedAnnualFinancialState = {
+      contract_version: "ci_project_annual_financial_state_v1",
+      status: "ready",
+      saved_at: "2026-09-04T00:00:00Z",
+      stale_reasons: [],
+      result: {
+        ...financeResult,
+        assumptions: {
+          ...financeResult.assumptions,
+          price_source: "analyst_entered_total_solution_price",
+          device_profile_sha256: null,
+          device_prices: null,
+          equipment_selection: null,
+          rebate_application_basis: "not_deducted_from_analyst_entered_manual_quote",
+        },
+        shortlist_source: { ...financeResult.shortlist_source, shortlist_count: 1 },
+        solutions: [financeResult.solutions[0]!],
+      },
+    };
+
+    expect(resolveCiFinanceAnalysisSelection({
+      candidates: [
+        { scenario_id: "case-1" },
+        { scenario_id: "case-2" },
+      ],
+    } as never, savedFinance)).toEqual({
+      scenarioIds: ["case-1"],
+      savedManualPrices: [{
+        scenarioId: "case-1",
+        upfrontCostAudExGst: financeResult.solutions[0]!.upfront_cost_aud_ex_gst,
+      }],
+    });
+  });
+
+  it("fails closed when a saved manual quotation is outside the current design", () => {
+    const savedFinance: CiSavedAnnualFinancialState = {
+      contract_version: "ci_project_annual_financial_state_v1",
+      status: "ready",
+      saved_at: "2026-09-04T00:00:00Z",
+      stale_reasons: [],
+      result: {
+        ...financeResult,
+        assumptions: {
+          ...financeResult.assumptions,
+          price_source: "analyst_entered_total_solution_price",
+          device_profile_sha256: null,
+          device_prices: null,
+          equipment_selection: null,
+          rebate_application_basis: "not_deducted_from_analyst_entered_manual_quote",
+        },
+        shortlist_source: { ...financeResult.shortlist_source, shortlist_count: 1 },
+        solutions: [{ ...financeResult.solutions[0]!, scenario_id: "removed-case" }],
+      },
+    };
+
+    expect(() => resolveCiFinanceAnalysisSelection({
+      candidates: [{ scenario_id: "case-1" }],
+    } as never, savedFinance)).toThrow("saved quotation selection no longer matches the current solution design");
+  });
+
   it("shows selectable evidence-bound bill, charge, demand and interval analysis", async () => {
     const user = userEvent.setup();
     render(<CiTariffReplayResult evidenceCode="LLVTOU" financeResult={financeResult} profileLabel="Approved LLVT profile" result={comparisonResult} />);

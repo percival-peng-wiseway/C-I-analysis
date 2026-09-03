@@ -223,6 +223,98 @@ describe("analyzeCiPhysicalScenarios", () => {
     expect(calls).toEqual(["GET", "POST", "GET", "POST"]);
   });
 
+  it.each([
+    "container_provisioning",
+    "container_start_timeout",
+    "container_unavailable",
+    null,
+  ] as const)("retries the initial checkpoint GET once for recoverable 503 code %s", async (errorCode) => {
+    const calls: string[] = [];
+    let getCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) {
+        getCount += 1;
+        if (getCount === 1) {
+          return new Response(JSON.stringify({
+            ...(errorCode === null ? {} : { error_code: errorCode }),
+            message: "The analysis container is temporarily unavailable.",
+          }), { status: 503, headers: { "Content-Type": "application/json" } });
+        }
+        return new Response(JSON.stringify({
+          contract_version: "ci_project_tariff_replay_state_v1",
+          status: "not_saved",
+          saved_at: null,
+          stale_reasons: [],
+          result: null,
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify(physicalResultFor([scenarios[0]])), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
+  it("retries the initial checkpoint GET once after a non-abort network error", async () => {
+    const calls: string[] = [];
+    let getCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (!init?.method) {
+        getCount += 1;
+        if (getCount === 1) throw new TypeError("Failed to fetch");
+        return new Response(JSON.stringify({
+          contract_version: "ci_project_tariff_replay_state_v1",
+          status: "not_saved",
+          saved_at: null,
+          stale_reasons: [],
+          result: null,
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify(physicalResultFor([scenarios[0]])), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
+  it("preserves an initial structured configuration error without retrying", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      return new Response(JSON.stringify({
+        error_code: "backend_unconfigured",
+        message: "The analysis service is not configured.",
+        request_id: "request-1",
+      }), { status: 503, headers: { "Content-Type": "application/json" } });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toThrow("The analysis service is not configured.");
+    expect(calls).toEqual(["GET"]);
+  });
+
+  it("does not retry an aborted initial checkpoint GET", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      const error = new Error("The operation was aborted.");
+      error.name = "AbortError";
+      throw error;
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual(["GET"]);
+  });
+
   it("resumes a partial checkpoint, batches missing scenarios, and reports progress", async () => {
     const requested = ["a", "b", "c", "d", "e"].map((scenarioId) => ({
       ...scenarios[0],
