@@ -36,8 +36,30 @@ def generate_ci_solutions(
         selected_id=request["battery_profile_id"],
         label="battery",
     )
+    inverter = (
+        _selected_profile(
+            device_profile,
+            collection_names=("inverter_profiles",),
+            selected_id=request["inverter_profile_id"],
+            label="inverter",
+        )
+        if request["inverter_profile_id"] is not None
+        else None
+    )
     solar_performance = _solar_performance(solar)
     battery_performance = _battery_performance(battery)
+    inverter_performance = (
+        _inverter_performance(inverter) if inverter is not None else None
+    )
+    if inverter_performance is not None and not math.isclose(
+        float(request["connection_options"]["inverter_block_size_kw"]),
+        float(inverter_performance["rated_active_power_kw"]),
+        rel_tol=0,
+        abs_tol=1e-8,
+    ):
+        raise _invalid(
+            "The PCS block size must match the selected inverter profile rating."
+        )
 
     pv_targets = _range_values(request["pv_range"], allow_zero=False)
     battery_targets = _range_values(request["battery_range"], allow_zero=True)
@@ -97,6 +119,7 @@ def generate_ci_solutions(
         main = _scenario(
             solar=solar,
             battery=battery,
+            inverter=inverter,
             pv_capacity_kwp_dc=pv_actual,
             inverter_capacity_kw_ac=inverter_capacity,
             battery_units=battery_units,
@@ -107,12 +130,14 @@ def generate_ci_solutions(
             one_way_efficiency=one_way_efficiency,
             minimum_soc=minimum_soc,
             connection=connection,
+            inverter_performance=inverter_performance,
         )
         scenarios_by_id[str(main["scenario_id"])] = main
         if battery_units > 0:
             comparator = _scenario(
                 solar=solar,
                 battery=battery,
+                inverter=inverter,
                 pv_capacity_kwp_dc=pv_actual,
                 inverter_capacity_kw_ac=inverter_capacity,
                 battery_units=0,
@@ -125,6 +150,7 @@ def generate_ci_solutions(
                 one_way_efficiency=one_way_efficiency,
                 minimum_soc=minimum_soc,
                 connection=connection,
+                inverter_performance=inverter_performance,
             )
             scenarios_by_id[str(comparator["scenario_id"])] = comparator
 
@@ -142,9 +168,11 @@ def generate_ci_solutions(
         request,
         solar=solar,
         battery=battery,
+        inverter=inverter,
         device_profile_sha256=device_profile_sha256,
         solar_performance=solar_performance,
         battery_performance=battery_performance,
+        inverter_performance=inverter_performance,
         derating=derating,
         one_way_efficiency=one_way_efficiency,
         minimum_soc=minimum_soc,
@@ -194,11 +222,17 @@ def generate_ci_custom_solution(
         raise _invalid("The saved profile-bound design context is invalid.")
     solar = selection.get("solar_profile")
     battery = selection.get("battery_profile")
+    inverter = selection.get("inverter_profile")
     if not isinstance(solar, dict) or not isinstance(battery, dict):
         raise _invalid("The saved equipment profile snapshots are unavailable.")
+    if inverter is not None and not isinstance(inverter, dict):
+        raise _invalid("The saved inverter profile snapshot is invalid.")
 
     solar_performance = _solar_performance(solar)
     battery_performance = _battery_performance(battery)
+    inverter_performance = (
+        _inverter_performance(inverter) if inverter is not None else None
+    )
     requested_pv = _bounded(custom_request.get("pv_capacity_kwp_dc"), 1e-9, 1_000_000)
     requested_battery = _bounded(
         custom_request.get("battery_capacity_kwh"), 0, 1_000_000
@@ -259,6 +293,7 @@ def generate_ci_custom_solution(
     scenario = _scenario(
         solar=solar,
         battery=battery,
+        inverter=inverter,
         pv_capacity_kwp_dc=pv_actual,
         inverter_capacity_kw_ac=inverter_capacity,
         battery_units=battery_units,
@@ -271,6 +306,7 @@ def generate_ci_custom_solution(
         one_way_efficiency=one_way_efficiency,
         minimum_soc=minimum_soc,
         connection=connection,
+        inverter_performance=inverter_performance,
     )
     scenario["label"] = _text(custom_request.get("label"), "custom solution label")
     return {
@@ -302,6 +338,9 @@ def _generation_request(value: object) -> dict[str, Any]:
     )
     site = _site_factors(value.get("site_factors"))
     connection = _connection_options(value.get("connection_options"))
+    inverter_profile_id = value.get("inverter_profile_id")
+    if inverter_profile_id is not None:
+        inverter_profile_id = _text(inverter_profile_id, "inverter profile")
     return {
         "contract_version": CI_SOLUTION_GENERATION_REQUEST_CONTRACT_VERSION,
         "pv_range": pv_range,
@@ -310,6 +349,7 @@ def _generation_request(value: object) -> dict[str, Any]:
         "battery_profile_id": _text(
             value.get("battery_profile_id"), "battery profile"
         ),
+        "inverter_profile_id": inverter_profile_id,
         "site_factors": site,
         "connection_options": connection,
     }
@@ -501,6 +541,31 @@ def _battery_performance(profile: dict[str, object]) -> dict[str, float | int | 
     }
 
 
+def _inverter_performance(
+    profile: dict[str, object],
+) -> dict[str, float | int | str]:
+    active = _bounded(profile.get("rated_active_power_kw"), 1e-9, 1_000_000)
+    apparent = _bounded(
+        profile.get("rated_apparent_power_kva"), active, 1_000_000
+    )
+    reactive = _bounded(
+        profile.get("maximum_reactive_power_kvar"), 0, apparent
+    )
+    return {
+        "profile_id": _profile_id(profile),
+        "version": _integer(profile.get("version"), 1, 10_000),
+        "rated_active_power_kw": active,
+        "rated_apparent_power_kva": apparent,
+        "maximum_reactive_power_kvar": reactive,
+        "european_efficiency_percent": _bounded(
+            profile.get("european_efficiency_percent"), 1, 100
+        ),
+        "maximum_efficiency_percent": _bounded(
+            profile.get("maximum_efficiency_percent"), 1, 100
+        ),
+    }
+
+
 def _profile_id(profile: dict[str, object]) -> str:
     return _text(
         profile.get("profile_id", profile.get("product_id")), "profile id"
@@ -523,6 +588,7 @@ def _scenario(
     *,
     solar: dict[str, object],
     battery: dict[str, object],
+    inverter: dict[str, object] | None,
     pv_capacity_kwp_dc: float,
     inverter_capacity_kw_ac: float,
     battery_units: int,
@@ -533,6 +599,7 @@ def _scenario(
     one_way_efficiency: float,
     minimum_soc: float,
     connection: dict[str, Any],
+    inverter_performance: dict[str, Any] | None,
 ) -> dict[str, object]:
     solar_key = {
         "profile_id": _profile_id(solar),
@@ -541,6 +608,12 @@ def _scenario(
         "pv_capacity_kwp_dc": pv_capacity_kwp_dc,
         "inverter_capacity_kw_ac": inverter_capacity_kw_ac,
     }
+    if inverter is not None:
+        solar_key["inverter_profile_id"] = _profile_id(inverter)
+        solar_key["inverter_profile_version"] = _integer(
+            inverter.get("version"), 1, 10_000
+        )
+        solar_key["inverter_profile_sha256"] = _snapshot_sha256(inverter)
     battery_key = {
         "profile_id": _profile_id(battery),
         "version": _integer(battery.get("version"), 1, 10_000),
@@ -555,10 +628,29 @@ def _scenario(
         if battery_units > 0
         else "battery-none"
     )
+    inverter_units = (
+        int(
+            round(
+                inverter_capacity_kw_ac
+                / float(inverter_performance["rated_active_power_kw"])
+            )
+        )
+        if inverter_performance is not None
+        else 0
+    )
+    reactive_cap = float(connection["reactive_support_max_kvar"])
+    if inverter_performance is not None and connection["reactive_support_enabled"]:
+        reactive_cap = min(
+            reactive_cap,
+            inverter_units
+            * float(inverter_performance["maximum_reactive_power_kvar"]),
+        )
     apparent_limit = (
-        math.hypot(
-            inverter_capacity_kw_ac,
-            float(connection["reactive_support_max_kvar"]),
+        (
+            inverter_units
+            * float(inverter_performance["rated_apparent_power_kva"])
+            if inverter_performance is not None
+            else math.hypot(inverter_capacity_kw_ac, reactive_cap)
         )
         if connection["reactive_support_enabled"]
         else None
@@ -579,7 +671,7 @@ def _scenario(
         "shared_ac_headroom_kw": inverter_capacity_kw_ac,
         "reactive_support_enabled": connection["reactive_support_enabled"],
         "reactive_support_max_kvar": (
-            connection["reactive_support_max_kvar"]
+            reactive_cap
             if connection["reactive_support_enabled"]
             else 0.0
         ),
@@ -609,9 +701,11 @@ def _design_context(
     *,
     solar: dict[str, object],
     battery: dict[str, object],
+    inverter: dict[str, object] | None,
     device_profile_sha256: str | None,
     solar_performance: dict[str, Any],
     battery_performance: dict[str, Any],
+    inverter_performance: dict[str, Any] | None,
     derating: float,
     one_way_efficiency: float,
     minimum_soc: float,
@@ -637,6 +731,14 @@ def _design_context(
             "solar_profile": solar,
             "battery_profile": battery,
             "device_profile_sha256": device_profile_sha256,
+            **(
+                {
+                    "inverter_profile_id": request["inverter_profile_id"],
+                    "inverter_profile": inverter,
+                }
+                if inverter is not None
+                else {}
+            ),
         },
         "technical_options": {
             "annual_specific_yield_kwh_per_kw": site[

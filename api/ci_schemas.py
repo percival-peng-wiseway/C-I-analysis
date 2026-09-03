@@ -60,6 +60,15 @@ class CiProjectRebateProfileSaveRequest(BaseModel):
     approve_for_calculation: bool = False
 
 
+class CiProjectStcSettingsSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    solar_stc_enabled: bool
+    solar_stc_price_aud_ex_gst: float = Field(ge=0, le=1_000_000)
+    battery_stc_enabled: bool
+    battery_stc_price_aud_ex_gst: float = Field(ge=0, le=1_000_000)
+
+
 class CiDeviceProfileRequest(BaseModel):
     contract_version: Literal[
         "ci_device_profile_v2",
@@ -130,6 +139,7 @@ class CiSolutionGenerationRequest(BaseModel):
     battery_range: CiSolutionBatteryRangeRequest
     solar_profile_id: str = Field(min_length=1, max_length=160)
     battery_profile_id: str = Field(min_length=1, max_length=160)
+    inverter_profile_id: str | None = Field(default=None, min_length=1, max_length=160)
     site_factors: CiSolutionSiteFactorsRequest
     connection_options: CiSolutionConnectionOptionsRequest
 

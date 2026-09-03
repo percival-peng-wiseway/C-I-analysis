@@ -29,7 +29,7 @@ describe("CiScenarioBuilder", () => {
     expect(screen.queryByText("Existing site assets")).toBeNull();
     expect(screen.getByText("30 requested · Python will snap & validate")).toBeTruthy();
 
-    await userEvent.click(screen.getByRole("button", { name: "Generate 30 requested cases" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate 30 cases" }));
 
     expect(onSubmit).toHaveBeenCalledOnce();
     expect(onSubmit.mock.calls[0][0]).toMatchObject({
@@ -38,6 +38,7 @@ describe("CiScenarioBuilder", () => {
       battery_range: { minimum_kwh: 0, maximum_kwh: 500, step_kwh: 100 },
       solar_profile_id: "generic_crystalline_pv_v1",
       battery_profile_id: "generic_lfp_ac_2h_v1",
+      inverter_profile_id: "fox_h3_125_plus_v1",
       site_factors: {
         resource_basis: "gross_specific_yield_before_site_losses",
         resource_source: "analyst_assumption",
@@ -68,7 +69,7 @@ describe("CiScenarioBuilder", () => {
     render(<CiScenarioBuilder deviceProfile={secondProfile} error={null} isPending={false} onSubmit={onSubmit} />);
 
     await userEvent.selectOptions(screen.getByLabelText("Published Solar profile"), "high_power_pv_v1");
-    await userEvent.click(screen.getByRole("button", { name: "Generate 30 requested cases" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate 30 cases" }));
 
     expect(onSubmit.mock.calls[0][0].solar_profile_id).toBe("high_power_pv_v1");
     expect(screen.getByText("700 W")).toBeTruthy();
@@ -81,7 +82,7 @@ describe("CiScenarioBuilder", () => {
     render(<CiScenarioBuilder deviceProfile={dcOnly} error={null} isPending={false} onSubmit={vi.fn()} />);
 
     expect(screen.getByText(/current Python dispatch engine does not model them/i)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Generate 30 requested cases" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Save configuration & generate 30 cases" })).toHaveProperty("disabled", true);
   });
 
   it("disables requests that could exceed the saved canonical candidate limit", async () => {
@@ -99,7 +100,7 @@ describe("CiScenarioBuilder", () => {
     await user.clear(steps[1]); await user.type(steps[1], "100");
 
     expect(await screen.findByText("200 requested · up to 400 candidates (maximum 200)")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Generate 200 requested cases" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Save configuration & generate 200 cases" })).toHaveProperty("disabled", true);
   });
 });
 
@@ -183,7 +184,7 @@ const deviceProfile: CiDeviceProfile = {
       source_label: "Generic screening assumption",
       source_date: null,
     }],
-      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "draft", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
+      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "published", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
   },
   default_solution_profile_selection: {
     solar_profile_id: "generic_crystalline_pv_v1",

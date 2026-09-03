@@ -6,6 +6,7 @@ import {
   ciProjectRebateProfileQueryKey,
   fetchCiProjectRebateProfile,
   saveCiProjectRebateProfile,
+  saveCiProjectStcSettings,
   type CiProjectRebateProfile,
   type CiProjectRebateProfileState,
 } from "./ci-rebate-profile";
@@ -58,6 +59,26 @@ describe("project rebate profile API", () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
       profile,
       approve_for_calculation: approveForCalculation,
+    });
+  });
+
+  it("saves compact STC settings without sending hidden calculation inputs", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify(state("approved")), { status: 200 }));
+
+    await saveCiProjectStcSettings("project-1", {
+      solarStcEnabled: true,
+      solarStcPriceAudExGst: 41.5,
+      batteryStcEnabled: false,
+      batteryStcPriceAudExGst: 39,
+    }, fetcher);
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/commercial-industrial/projects/project-1/rebate-profile/stc-settings");
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      solar_stc_enabled: true,
+      solar_stc_price_aud_ex_gst: 41.5,
+      battery_stc_enabled: false,
+      battery_stc_price_aud_ex_gst: 39,
     });
   });
 

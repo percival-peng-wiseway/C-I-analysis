@@ -54,9 +54,13 @@ def _device_profile(*, solar_status: str = "published") -> dict[str, object]:
             "inverter_profiles": [
                 {
                     "profile_id": "inverter-125",
-                    "status": "draft",
+                    "status": "published",
+                    "version": 1,
                     "rated_active_power_kw": 125.0,
+                    "rated_apparent_power_kva": 137.5,
                     "maximum_reactive_power_kvar": 82.5,
+                    "european_efficiency_percent": 98.1,
+                    "maximum_efficiency_percent": 98.5,
                 }
             ],
         },
@@ -163,6 +167,41 @@ def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> N
         "nominal_capacity_kwh_per_unit"
     ] == 7.0
     assert validate_ci_design_context(context) == context
+
+
+def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
+    request = _request(maximum_pv=100.0, headroom=250.0)
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        {
+            "inverter_block_size_kw": 125.0,
+            "reactive_support_enabled": True,
+            "reactive_support_max_kvar": 200.0,
+        }
+    )
+
+    result = generate_ci_solutions(
+        request,
+        device_profile=_device_profile(),
+        device_profile_sha256="d" * 64,
+    )
+
+    assert all(
+        candidate["pv_inverter_capacity_kw_ac"] == 125.0
+        for candidate in result["candidates"]
+    )
+    assert all(
+        candidate["reactive_support_max_kvar"] == 82.5
+        for candidate in result["candidates"]
+    )
+    assert all(
+        candidate["shared_inverter_apparent_power_limit_kva"] == 137.5
+        for candidate in result["candidates"]
+    )
+    selection = result["design_context"]["profile_selection"]
+    assert selection["inverter_profile_id"] == "inverter-125"
+    assert selection["inverter_profile"]["rated_active_power_kw"] == 125.0
+    assert validate_ci_design_context(result["design_context"]) == result["design_context"]
 
 
 def test_python_generator_rejects_connection_overflow_without_clamping() -> None:

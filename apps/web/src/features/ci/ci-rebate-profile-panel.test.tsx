@@ -8,155 +8,80 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
 import { CiRebateProfilePanel } from "./ci-rebate-profile-panel";
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("CiRebateProfilePanel", () => {
-  it("keeps null evidence fields blank and reveals only the enabled program inputs", async () => {
+  it("shows only the Solar and Battery STC switches and prices", async () => {
     mockApi(state("not_configured"));
     renderPanel();
 
-    expect(await screen.findByRole("heading", { name: "Rebates & certificates" })).toBeTruthy();
-    expect(screen.getByText("No rebates selected")).toBeTruthy();
-    expect(screen.queryByText(/Ruleset:/)).toBeNull();
-    expect(screen.queryByRole("link", { name: "Clean Energy Regulator · STCs" })).toBeNull();
-    expect(screen.queryByLabelText("Postcode zone rating")).toBeNull();
-
-    await userEvent.click(screen.getByLabelText("Enable Solar STCs"));
-    expect((screen.getByLabelText("Postcode zone rating") as HTMLSelectElement).value).toBe("");
-    expect(screen.getByRole("option", { name: "1.185" })).toBeTruthy();
-    expect(screen.getByText(/STC current price and source/)).toBeTruthy();
-    expect(screen.getByText(/STC postcode zone evidence/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Save & use in Finance/ }).hasAttribute("disabled")).toBe(true);
+    await screen.findByRole("heading", { name: "Rebates & certificates" });
+    expect(screen.getByLabelText("Include Solar STCs")).toBeTruthy();
+    expect(screen.getByLabelText("Solar STCs price")).toHaveProperty("value", "39");
+    expect(screen.getByLabelText("Include Battery STCs")).toBeTruthy();
+    expect(screen.getByLabelText("Battery STCs price")).toHaveProperty("value", "39");
+    expect(screen.queryByText(/VEEC/i)).toBeNull();
+    expect(screen.queryByLabelText("Eligibility source")).toBeNull();
+    expect(screen.queryByLabelText("Price as-of")).toBeNull();
+    expect(screen.queryByLabelText("Site postcode")).toBeNull();
   });
 
-  it("saves an incomplete selection as draft without calculating money in the browser", async () => {
+  it("saves both switches and prices through the compact backend contract", async () => {
     const requests = mockApi(state("not_configured"));
     renderPanel();
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
-    await userEvent.click(screen.getByLabelText("Enable Battery STCs"));
-    await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
-
-    expect(await screen.findByText(/Rebate draft saved/)).toBeTruthy();
-    const saved = requests.find((item) => item.method === "PUT");
-    expect(saved).toBeTruthy();
-    expect(saved?.body).toMatchObject({
-      approve_for_calculation: false,
-      profile: {
-        programs: {
-          battery_stc: { enabled: true, certified_usable_capacity_fraction: null },
-        },
-      },
-    });
-    expect(JSON.stringify(saved?.body)).not.toContain("certificate_quantity");
-    expect(JSON.stringify(saved?.body)).not.toContain("rebate_aud");
-  });
-
-  it("submits a fully evidenced solar profile for backend approval", async () => {
-    const initial = state("not_configured");
-    initial.site_evidence = { detected_site_address: "10 Collins Street Melbourne VIC 3000", state_code: "VIC", postcode: "3000" };
-    const requests = mockApi(initial);
-    renderPanel();
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
     const user = userEvent.setup();
+    await screen.findByRole("heading", { name: "Rebates & certificates" });
 
-    await user.click(screen.getByLabelText("Enable Solar STCs"));
-    await user.type(screen.getByLabelText("Site state"), "VIC");
-    await user.type(screen.getByLabelText("Site postcode"), "3000");
-    await user.type(screen.getByLabelText("Location source"), "Reviewed electricity bill");
-    await user.click(screen.getByText("I have confirmed the project site"));
-    await user.click(screen.getByLabelText("Solar STCs eligibility reviewed"));
-    await user.type(screen.getByLabelText("Eligibility source"), "Accredited product and installer review");
-    await user.type(screen.getByLabelText("Price source"), "Supplier net certificate quote");
-    await user.selectOptions(screen.getByLabelText("Postcode zone rating"), "1.185");
-    await user.type(screen.getByLabelText("Zone source"), "Approved postcode-zone table");
+    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await user.clear(screen.getByLabelText("Solar STCs price"));
+    await user.type(screen.getByLabelText("Solar STCs price"), "41.5");
+    await user.click(screen.getByLabelText("Include Battery STCs"));
+    await user.clear(screen.getByLabelText("Battery STCs price"));
+    await user.type(screen.getByLabelText("Battery STCs price"), "38");
+    await user.click(screen.getByRole("button", { name: "Save STC settings" }));
 
-    const approve = screen.getByRole("button", { name: /Save & use in Finance/ });
-    expect(approve.hasAttribute("disabled")).toBe(false);
-    await user.click(approve);
-    expect(await screen.findByText(/approved for Finance/)).toBeTruthy();
-    expect(requests.find((item) => item.method === "PUT")?.body).toMatchObject({ approve_for_calculation: true });
+    expect(await screen.findByText(/Gross\/Net CAPEX prices have been refreshed/)).toBeTruthy();
+    const saved = requests.find((item) => item.method === "PUT");
+    expect(saved?.url.endsWith("/rebate-profile/stc-settings")).toBe(true);
+    expect(saved?.body).toEqual({
+      solar_stc_enabled: true,
+      solar_stc_price_aud_ex_gst: 41.5,
+      battery_stc_enabled: true,
+      battery_stc_price_aud_ex_gst: 38,
+    });
   });
 
-  it("requires a stacking confirmation when multiple programs are selected", async () => {
+  it("requires positive prices before saving", async () => {
     mockApi(state("not_configured"));
     renderPanel();
     await screen.findByRole("heading", { name: "Rebates & certificates" });
-    await userEvent.click(screen.getByLabelText("Enable Solar STCs"));
-    await userEvent.click(screen.getByLabelText("Enable Battery STCs"));
-    expect(screen.getByText("Confirm the selected programs can be combined")).toBeTruthy();
-    expect(screen.getByText(/program stacking confirmation/)).toBeTruthy();
+
+    await userEvent.click(screen.getByLabelText("Include Solar STCs"));
+    await userEvent.clear(screen.getByLabelText("Solar STCs price"));
+    expect(screen.getByText(/price greater than \$0 for each included/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save STC settings" }).hasAttribute("disabled")).toBe(true);
   });
 
-  it("blocks VEEC approval until the inverter kVA ratio and its evidence source are both entered", async () => {
-    const veecProfile = structuredClone(profile);
-    Object.assign(veecProfile, {
-      site_state_code: "VIC",
-      site_postcode: "3000",
-      site_location_confirmed: true,
-      site_location_source_label: "Reviewed electricity bill",
-    });
-    Object.assign(veecProfile.programs.vic_deemed_veec, {
-      enabled: true,
-      eligibility_confirmed: true,
-      eligibility_source_label: "VEU Part 47 eligibility review",
-      price_source_label: "Net certificate quote",
-      victoria_region: "metropolitan",
-    });
-    const initial = state("draft", veecProfile);
-    initial.site_evidence = { detected_site_address: "10 Collins Street Melbourne VIC 3000", state_code: "VIC", postcode: "3000" };
-    const requests = mockApi(initial);
-    renderPanel();
-    await screen.findByRole("heading", { name: "Rebates & certificates" });
-
-    const ratio = screen.getByLabelText("Inverter apparent power (kVA per kW AC)") as HTMLInputElement;
-    const source = screen.getByLabelText("Inverter apparent power source") as HTMLInputElement;
-    const approve = screen.getByRole("button", { name: /Save & use in Finance/ });
-    expect(ratio.value).toBe("");
-    expect(ratio.getAttribute("min")).toBe("1");
-    expect(ratio.getAttribute("max")).toBe("10");
-    expect(source.value).toBe("");
-    expect(screen.getByText(/VEEC inverter apparent-power evidence/)).toBeTruthy();
-    expect(approve.hasAttribute("disabled")).toBe(true);
-
-    const user = userEvent.setup();
-    await user.type(ratio, "1.25");
-    expect(approve.hasAttribute("disabled")).toBe(true);
-    await user.type(source, "Approved inverter datasheet");
-    expect(approve.hasAttribute("disabled")).toBe(false);
-
-    await user.click(approve);
-    expect(await screen.findByText(/approved for Finance/)).toBeTruthy();
-    expect(requests.find((item) => item.method === "PUT")?.body).toMatchObject({
-      approve_for_calculation: true,
-      profile: {
-        programs: {
-          vic_deemed_veec: {
-            inverter_apparent_power_kva_per_kw_ac: 1.25,
-            inverter_apparent_power_source_label: "Approved inverter datasheet",
-          },
-        },
-      },
-    });
-  });
-
-  it("does not carry an unsaved rebate draft into another project", async () => {
+  it("does not carry an unsaved STC choice into another project", async () => {
     const secondProfile = structuredClone(profile);
-    secondProfile.site_state_code = "NSW";
-    secondProfile.site_postcode = "2000";
+    secondProfile.programs.battery_stc.enabled = true;
+    secondProfile.programs.battery_stc.certificate_price_aud_ex_gst = 44;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const selected = String(input).includes("project-2") ? secondProfile : profile;
-      return new Response(JSON.stringify(state("not_configured", selected)), { status: 200 });
+      return new Response(JSON.stringify(state("approved", selected)), { status: 200 });
     }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const view = render(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-1" /></QueryClientProvider>);
     await screen.findByRole("heading", { name: "Rebates & certificates" });
-    await userEvent.click(screen.getByLabelText("Enable Solar STCs"));
-    expect(screen.getByLabelText("Postcode zone rating")).toBeTruthy();
+    await userEvent.click(screen.getByLabelText("Include Solar STCs"));
 
     view.rerender(<QueryClientProvider client={client}><CiRebateProfilePanel projectId="project-2" /></QueryClientProvider>);
-    await waitFor(() => expect((screen.getByLabelText("Site state") as HTMLInputElement).value).toBe("NSW"));
-    expect((screen.getByLabelText("Site postcode") as HTMLInputElement).value).toBe("2000");
-    expect(screen.queryByLabelText("Postcode zone rating")).toBeNull();
+    await waitFor(() => expect((screen.getByLabelText("Include Battery STCs") as HTMLInputElement).checked).toBe(true));
+    expect((screen.getByLabelText("Include Solar STCs") as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByLabelText("Battery STCs price")).toHaveProperty("value", "44");
   });
 });
 
@@ -166,14 +91,18 @@ function renderPanel() {
 }
 
 function mockApi(initial: CiProjectRebateProfileState) {
-  const requests: Array<{ method: string; body: Record<string, unknown> | null }> = [];
-  vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+  const requests: Array<{ method: string; url: string; body: Record<string, unknown> | null }> = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? "GET";
-    const body = init?.body ? JSON.parse(String(init.body)) as { profile: CiProjectRebateProfile; approve_for_calculation: boolean } : null;
-    requests.push({ method, body });
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+    requests.push({ method, url: String(input), body });
     if (!body) return new Response(JSON.stringify(initial), { status: 200 });
-    const next = state(body.approve_for_calculation ? "approved" : "draft", body.profile);
-    return new Response(JSON.stringify(next), { status: 200 });
+    const nextProfile = structuredClone(initial.profile ?? initial.suggested_profile);
+    nextProfile.programs.solar_stc.enabled = Boolean(body.solar_stc_enabled);
+    nextProfile.programs.solar_stc.certificate_price_aud_ex_gst = Number(body.solar_stc_price_aud_ex_gst);
+    nextProfile.programs.battery_stc.enabled = Boolean(body.battery_stc_enabled);
+    nextProfile.programs.battery_stc.certificate_price_aud_ex_gst = Number(body.battery_stc_price_aud_ex_gst);
+    return new Response(JSON.stringify(state("approved", nextProfile)), { status: 200 });
   }));
   return requests;
 }
@@ -189,8 +118,12 @@ function state(status: CiProjectRebateProfileState["status"], savedProfile: CiPr
     profile: saved ? savedProfile : null,
     suggested_profile: savedProfile,
     site_evidence: { detected_site_address: null, state_code: null, postcode: null },
-    blockers: status === "draft" ? [{ code: "rebate_profile_approval_required", message: "Review and approve the rebate profile." }] : [],
-    ruleset: { ruleset_id: "au_ci_rebates_2026_v1", ruleset_sha256: "b".repeat(64), official_sources: [{ source_id: "cer-stc", label: "Clean Energy Regulator · STCs", url: "https://cer.gov.au/", status: "authoritative" }] },
+    blockers: [],
+    ruleset: {
+      ruleset_id: "au_ci_rebates_2026_v1",
+      ruleset_sha256: "b".repeat(64),
+      official_sources: [{ source_id: "cer-stc", label: "Clean Energy Regulator STCs", url: "https://cer.gov.au/", status: "authoritative" }],
+    },
   };
 }
 

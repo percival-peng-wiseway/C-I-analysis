@@ -72,7 +72,7 @@ const deviceProfileFixture = {
   solution_profiles: {
     solar_profiles: [{ profile_id: "generic_crystalline_pv_v1", version: 1, status: "published", name: "Generic crystalline PV screening profile", manufacturer: "Generic", model: "Screening assumption", module_technology: "monocrystalline", rated_power_w: 600, module_efficiency_percent: 22, temperature_coefficient_percent_per_c: -0.35, annual_degradation_percent: 0.5, default_dc_ac_ratio: 1.15, source_type: "analyst_assumption", source_label: "Generic screening assumption", source_date: null }],
     battery_profiles: [{ profile_id: "generic_lfp_ac_2h_v1", version: 1, status: "published", name: "Generic LFP AC 2-hour screening profile", manufacturer: "Generic", model: "Screening assumption", chemistry: "LFP", coupling: "ac", nominal_capacity_kwh_per_unit: 100, continuous_power_kw_per_unit: 50, round_trip_efficiency_percent: 90, power_conversion_efficiency_percent: 95, usable_depth_of_discharge_percent: 90, standby_loss_percent_per_month: 1, annual_capacity_degradation_percent: 2, minimum_units: 1, maximum_units: 10000, source_type: "analyst_assumption", source_label: "Generic screening assumption", source_date: null }],
-      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "draft", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
+      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "published", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
   },
   default_solution_profile_selection: { solar_profile_id: "generic_crystalline_pv_v1", battery_profile_id: "generic_lfp_ac_2h_v1" },
   discount_rate: .08, annual_value_escalation_rate: .025, annual_value_degradation_rate: .005, annual_om_fraction_of_capex: .015, analysis_term_years: 15,
@@ -112,7 +112,7 @@ function renderPage() {
   render(<QueryClientProvider client={new QueryClient()}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
 }
 
-function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture) {
+function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture, holdAnalysis = false) {
   let currentSavedDesign = savedDesign;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -157,7 +157,10 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
       customer_facing_permission: false,
       recommendation_permitted: false,
     }), { status: 200 });
-    if (path.endsWith("/design-feasibility")) return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+    if (path.endsWith("/design-feasibility")) {
+      if (init?.method === "POST" && holdAnalysis) return new Promise<Response>(() => undefined);
+      return new Response(JSON.stringify({ contract_version: "ci_project_feasibility_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
+    }
     if (path.endsWith("/tariff-profile")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_profile_state_v1", status: "not_available", updated_at: null, approved_at: null, profile_sha256: null, profile: null, suggested_profile: null, evidence_basis: null, blockers: [{ code: "tariff_profile_evidence_required", message: "Upload and review bill evidence before approving a tariff profile." }] }), { status: 200 });
     if (path.endsWith("/rebate-profile")) return new Response(JSON.stringify(rebateState), { status: 200 });
     if (path.endsWith("/tariff-replay")) return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
@@ -315,7 +318,7 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("Solution 2")).toBeTruthy();
   });
 
-  it("lists every feasible Net CAPEX quotation before the PCS section at the bottom", async () => {
+  it("lists every feasible Net CAPEX quotation in step 04 after rebates", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
     mockApi([readyProject], generatedDesign);
@@ -323,7 +326,8 @@ describe("C&I project workspace", () => {
     await screen.findByRole("region", { name: "Evidence sources" });
 
     await user.click(screen.getByRole("button", { name: /02 Solution Generator/ }));
-    const quoteHeading = await screen.findByRole("heading", { name: "Feasible solutions & Net CAPEX quotations" });
+    const rebateHeading = await screen.findByRole("heading", { name: "Rebates & certificates" });
+    const quoteHeading = screen.getByRole("heading", { name: "Solution preview & quotations" });
     expect(screen.getByText("2 feasible")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("100000");
@@ -353,12 +357,27 @@ describe("C&I project workspace", () => {
     await user.click(screen.getByRole("button", { name: "Add to comparison" }));
     expect(await screen.findByText(/290 kW AC, above the current 250 kW AC Site AC headroom/)).toBeTruthy();
     expect(screen.getByText("3 feasible")).toBeTruthy();
-    const pcsHeading = screen.getByRole("heading", { name: "PCS & connection constraints" });
-    expect(Boolean(quoteHeading.compareDocumentPosition(pcsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(Boolean(rebateHeading.compareDocumentPosition(quoteHeading) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 2"));
     await user.type(screen.getByLabelText("Quoted Net CAPEX for Solution 2"), "123456");
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("123456");
-    expect(screen.getByRole("button", { name: "Start analysis · run 03 + 04" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Analysis" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("opens Scenario Analysis immediately and displays analysis progress", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    mockApi([readyProject], generatedDesign, rebateStateFixture, true);
+    renderPage();
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: /02 Solution Generator/ }));
+    await screen.findByRole("heading", { name: "Solution preview & quotations" });
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+
+    expect(await screen.findByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
+    expect((await screen.findByRole("progressbar", { name: "Running scenario dispatch" })).getAttribute("aria-valuenow")).toBe("12");
+    expect(screen.getByText(/Processing 2 saved solutions/)).toBeTruthy();
   });
 
 });

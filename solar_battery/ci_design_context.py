@@ -101,6 +101,7 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
     from solar_battery.ci_solution_generator import (
         _battery_performance,
         _effective_derating,
+        _inverter_performance,
         _profile_id,
         _site_factors,
         _solar_performance,
@@ -127,6 +128,15 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             raise ValueError
         solar_profile = _json_object(selection.get("solar_profile"))
         battery_profile = _json_object(selection.get("battery_profile"))
+        has_inverter_profile = (
+            "inverter_profile_id" in selection
+            or "inverter_profile" in selection
+        )
+        inverter_profile = (
+            _json_object(selection.get("inverter_profile"))
+            if has_inverter_profile
+            else None
+        )
         if (
             solar_profile.get("status") != "published"
             or battery_profile.get("status") != "published"
@@ -139,6 +149,15 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             or selection.get("battery_profile_id") != battery_id
         ):
             raise ValueError
+        inverter_id: str | None = None
+        inverter_performance = None
+        if inverter_profile is not None:
+            if inverter_profile.get("status") != "published":
+                raise ValueError
+            inverter_id = _profile_id(inverter_profile)
+            if selection.get("inverter_profile_id") != inverter_id:
+                raise ValueError
+            inverter_performance = _inverter_performance(inverter_profile)
         profile_digest = selection.get("device_profile_sha256")
         if profile_digest is not None and (
             not isinstance(profile_digest, str)
@@ -151,6 +170,11 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
         options = _validate_technical_options(
             value.get("technical_options"), require_initial_soc_basis=True
         )
+        if inverter_performance is not None and not _same_number(
+            options.get("inverter_block_size_kw"),
+            inverter_performance["rated_active_power_kw"],
+        ):
+            raise ValueError
         derating = _effective_derating(site)
         one_way_efficiency = math.sqrt(
             float(battery_performance["round_trip_efficiency_percent"]) / 100
@@ -213,6 +237,14 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             "solar_profile": solar_profile,
             "battery_profile": battery_profile,
             "device_profile_sha256": profile_digest,
+            **(
+                {
+                    "inverter_profile_id": inverter_id,
+                    "inverter_profile": inverter_profile,
+                }
+                if inverter_profile is not None
+                else {}
+            ),
         },
         "technical_options": options,
     }

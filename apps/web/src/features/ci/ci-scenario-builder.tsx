@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import type {
   CiBatterySolutionProfile,
   CiDeviceProfile,
+  CiInverterSolutionProfile,
   CiSolarSolutionProfile,
 } from "@/features/ci/api/ci-device-profile";
 import type {
@@ -63,6 +64,7 @@ type RestoredBuilderState = {
   connection: ConnectionOptionsForm;
   solarProfileId: string;
   batteryProfileId: string;
+  inverterProfileId: string;
 };
 
 const defaultPvRange = (): NumericRange => ({ minimum: "100", maximum: "500", step: "100" });
@@ -90,7 +92,6 @@ const defaultConnectionOptions = (): ConnectionOptionsForm => ({
 });
 
 export function CiScenarioBuilder({
-  beforeConnectionConstraints,
   deviceProfile,
   error,
   initialContext,
@@ -99,7 +100,6 @@ export function CiScenarioBuilder({
   onSubmit,
   siteAddress,
 }: {
-  beforeConnectionConstraints?: ReactNode;
   deviceProfile: CiDeviceProfile;
   error: string | null;
   initialContext?: CiDesignContext;
@@ -116,6 +116,10 @@ export function CiScenarioBuilder({
     () => deviceProfile.solution_profiles.battery_profiles.filter(isCompletePublishedAcBatteryProfile),
     [deviceProfile],
   );
+  const publishedInverter = useMemo(
+    () => deviceProfile.solution_profiles.inverter_profiles.filter((profile) => profile.status === "published"),
+    [deviceProfile],
+  );
   const restored = restoreBuilderState(
     initialContext,
     initialSolutions,
@@ -126,20 +130,41 @@ export function CiScenarioBuilder({
   const [pvRange, setPvRange] = useState(restored.pvRange);
   const [batteryRange, setBatteryRange] = useState(restored.batteryRange);
   const [site, setSite] = useState(restored.site);
-  const [connection, setConnection] = useState(restored.connection);
+  const initialInverterProfile = publishedInverter.find((profile) => profile.profile_id === restored.inverterProfileId) ?? publishedInverter[0] ?? null;
+  const [connection, setConnection] = useState(() => restored.inverterProfileId || !initialInverterProfile ? restored.connection : {
+    ...restored.connection,
+    inverter_block_size_kw: formatNumber(initialInverterProfile.rated_active_power_kw),
+  });
   const [solarProfileId, setSolarProfileId] = useState(restored.solarProfileId);
   const [batteryProfileId, setBatteryProfileId] = useState(restored.batteryProfileId);
+  const [inverterProfileId, setInverterProfileId] = useState(
+    restored.inverterProfileId || publishedInverter[0]?.profile_id || "",
+  );
 
   const solarProfile = publishedSolar.find((profile) => profile.profile_id === solarProfileId) ?? null;
   const batteryProfile = publishedBattery.find((profile) => profile.profile_id === batteryProfileId) ?? null;
+  const inverterProfile = publishedInverter.find((profile) => profile.profile_id === inverterProfileId) ?? null;
   const request = useMemo(
-    () => buildGenerationRequest({ batteryProfile, batteryRange, connection, pvRange, site, solarProfile }),
-    [batteryProfile, batteryRange, connection, pvRange, site, solarProfile],
+    () => buildGenerationRequest({ batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile }),
+    [batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile],
   );
   const requestedCount = rangeCount(pvRange, true) * rangeCount(batteryRange, false);
   const candidateUpperBound = canonicalCandidateUpperBound(pvRange, batteryRange);
   const effectiveYield = effectiveSpecificYield(site);
-  const status = generatorStatus(request, requestedCount, candidateUpperBound, publishedSolar.length, publishedBattery.length);
+  const status = generatorStatus(request, requestedCount, candidateUpperBound, publishedSolar.length, publishedBattery.length, publishedInverter.length);
+
+  const selectInverterProfile = (profileId: string) => {
+    const selected = publishedInverter.find((profile) => profile.profile_id === profileId);
+    setInverterProfileId(profileId);
+    if (!selected) return;
+    setConnection((current) => ({
+      ...current,
+      inverter_block_size_kw: formatNumber(selected.rated_active_power_kw),
+      reactive_support_max_kvar: current.reactive_support_enabled
+        ? formatNumber(selected.maximum_reactive_power_kvar)
+        : "",
+    }));
+  };
 
   return (
     <section aria-labelledby="search-space-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
@@ -211,29 +236,21 @@ export function CiScenarioBuilder({
         </WorkflowSection>
 
         <WorkflowSection
-          description="Choose published profiles from Settings, then define target ranges. Requested sizes are snapped to real module or battery-unit increments."
+          description="Choose the published Solar, Battery and Inverter profiles, set the search ranges and connection assumptions, then save the configuration to generate calculation-ready solutions."
           step="02"
-          title="Solar & battery profiles"
+          title="Solar, battery & inverter profiles"
         >
-          <div className="grid gap-4 xl:grid-cols-2">
+          <div className="grid gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
+            <InverterProfileCard onProfileChange={selectInverterProfile} profile={inverterProfile} profiles={publishedInverter} />
           </div>
-          {publishedSolar.length === 0 || publishedBattery.length === 0 ? (
-            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Publish at least one Solar profile and one AC-coupled Battery profile in Settings before generating solutions. DC-coupled profiles can remain in the library, but the current Python dispatch engine does not model them.</p>
+          {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Publish at least one Solar profile, one AC-coupled Battery profile and one Inverter profile in Settings before generating solutions. DC-coupled battery profiles can remain in the library, but the current Python dispatch engine does not model them.</p>
           ) : (
             <p className="mt-3 text-xs leading-5 text-slate-500">Add, edit, publish or retire reusable profiles in Settings. The saved project keeps the exact selected profile snapshot so later library edits cannot silently change this design.</p>
           )}
-        </WorkflowSection>
-
-        {beforeConnectionConstraints}
-
-        <WorkflowSection
-          description="Connection limits are project assumptions, not equipment certification or network approval."
-          step="03"
-          title="PCS & connection constraints"
-        >
-          <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+          <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
             <div className="flex items-center gap-3">
               <span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Cpu className="size-4" /></span>
               <div>
@@ -243,7 +260,7 @@ export function CiScenarioBuilder({
             </div>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <OptionGroup title="Connection capacity">
-                <NumberField label="Inverter / PCS block size (kW)" onChange={(inverter_block_size_kw) => setConnection({ ...connection, inverter_block_size_kw })} value={connection.inverter_block_size_kw} />
+                <ReadOnlyFact label="PCS block from selected inverter" value={inverterProfile ? `${formatNumber(inverterProfile.rated_active_power_kw)} kW AC` : "Select an inverter profile"} />
                 <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
                 <p className="col-span-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Replace the screening headroom with switchboard, export-limit or network evidence before relying on feasibility results.</p>
                 <CheckField checked={connection.reactive_support_enabled} label="Model inverter reactive support" onChange={(reactive_support_enabled) => setConnection({ ...connection, reactive_support_enabled })} />
@@ -264,8 +281,8 @@ export function CiScenarioBuilder({
           <div className="flex flex-wrap items-center justify-end gap-3">
             {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
             {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Reduce the PV or battery range. Battery cases can add matched PV-only comparators, so this request could create up to {candidateUpperBound} canonical candidates; the saved limit is 200.</p> : null}
-            <Button className="min-w-48" disabled={!request || candidateUpperBound > 200 || isPending} type="submit">
-              {isPending ? "Generating in Python…" : `Generate ${requestedCount || ""} requested cases`}
+            <Button className="min-w-64" disabled={!request || candidateUpperBound > 200 || isPending} type="submit">
+              {isPending ? "Saving & generating in Python…" : `Save configuration & generate ${requestedCount || ""} cases`}
               <Play className="size-4" />
             </Button>
           </div>
@@ -340,6 +357,29 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
   );
 }
 
+function InverterProfileCard({ onProfileChange, profile, profiles }: {
+  onProfileChange: (profileId: string) => void;
+  profile: CiInverterSolutionProfile | null;
+  profiles: CiInverterSolutionProfile[];
+}) {
+  return (
+    <ProfileCard icon={Cpu} title="Inverter / PCS">
+      <SelectField label="Published Inverter profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      {profile ? (
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3 xl:grid-cols-2">
+          <ProfileFact label="Hardware" value={`${profile.manufacturer} ${profile.model}`} />
+          <ProfileFact label="Active power" value={`${formatNumber(profile.rated_active_power_kw)} kW`} />
+          <ProfileFact label="Apparent power" value={`${formatNumber(profile.rated_apparent_power_kva)} kVA`} />
+          <ProfileFact label="Reactive cap" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
+          <ProfileFact label="European efficiency" value={`${formatNumber(profile.european_efficiency_percent)}%`} />
+          <ProfileFact label="Source" value={profile.source_label} />
+        </dl>
+      ) : <MissingProfile />}
+      <p className="text-[11px] leading-4 text-slate-500">The selected rated active power becomes the Python PCS sizing block; apparent and reactive limits are saved with the project design.</p>
+    </ProfileCard>
+  );
+}
+
 function ProfileCard({ children, icon: Icon, title }: { children: ReactNode; icon: typeof SunMedium; title: string }) {
   return (
     <section aria-label={`${title} profile`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
@@ -368,6 +408,10 @@ function WorkflowSection({ children, description, step, title }: { children: Rea
 
 function OptionGroup({ children, title }: { children: ReactNode; title: string }) {
   return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>;
+}
+
+function ReadOnlyFact({ label, value }: { label: string; value: string }) {
+  return <div className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><strong className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2 text-sm font-semibold text-slate-900">{value}</strong></div>;
 }
 
 function NumberField({ allowBlank = false, label, onChange, value }: { allowBlank?: boolean; label: string; onChange: (value: string) => void; value: string }) {
@@ -408,15 +452,16 @@ function isCompletePublishedAcBatteryProfile(profile: CiBatterySolutionProfile):
   ].every((value) => typeof value === "number" && Number.isFinite(value));
 }
 
-function buildGenerationRequest({ batteryProfile, batteryRange, connection, pvRange, site, solarProfile }: {
+function buildGenerationRequest({ batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile }: {
   batteryProfile: CompleteBatterySolutionProfile | null;
   batteryRange: NumericRange;
   connection: ConnectionOptionsForm;
+  inverterProfile: CiInverterSolutionProfile | null;
   pvRange: NumericRange;
   site: SiteFactorsForm;
   solarProfile: CiSolarSolutionProfile | null;
 }): CiSolutionGenerationRequest | null {
-  if (!solarProfile || !batteryProfile || !site.resource_label.trim()) return null;
+  if (!solarProfile || !batteryProfile || !inverterProfile || !site.resource_label.trim()) return null;
   const pv = parsedRange(pvRange, true);
   const battery = parsedRange(batteryRange, false);
   const annualYield = parseNumber(site.annual_specific_yield_kwh_per_kw);
@@ -447,6 +492,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, pvRa
     battery_range: { minimum_kwh: battery.minimum, maximum_kwh: battery.maximum, step_kwh: battery.step },
     solar_profile_id: solarProfile.profile_id,
     battery_profile_id: batteryProfile.profile_id,
+    inverter_profile_id: inverterProfile.profile_id,
     site_factors: {
       resource_basis: "gross_specific_yield_before_site_losses",
       resource_source: site.resource_source,
@@ -487,6 +533,7 @@ function restoreBuilderState(
     connection: defaultConnectionOptions(),
     solarProfileId: publishedId(deviceProfile.default_solution_profile_selection.solar_profile_id, publishedSolar),
     batteryProfileId: publishedId(deviceProfile.default_solution_profile_selection.battery_profile_id, publishedBattery),
+    inverterProfileId: "",
   };
   if (!context) {
     if (!solutions?.length) return defaults;
@@ -536,6 +583,7 @@ function restoreV2(context: CiDesignContextV2): RestoredBuilderState {
     connection: connectionFormFromTechnical(options),
     solarProfileId: context.profile_selection.solar_profile_id,
     batteryProfileId: context.profile_selection.battery_profile_id,
+    inverterProfileId: context.profile_selection.inverter_profile_id ?? "",
   };
 }
 
@@ -608,8 +656,8 @@ function effectiveSpecificYield(site: SiteFactorsForm) {
   return annual * availability / 100 * losses.reduce((factor, loss) => factor * (1 - loss / 100), 1);
 }
 
-function generatorStatus(request: CiSolutionGenerationRequest | null, count: number, candidateUpperBound: number, solarProfiles: number, batteryProfiles: number) {
-  if (!solarProfiles || !batteryProfiles) return "Publish profiles in Settings";
+function generatorStatus(request: CiSolutionGenerationRequest | null, count: number, candidateUpperBound: number, solarProfiles: number, batteryProfiles: number, inverterProfiles: number) {
+  if (!solarProfiles || !batteryProfiles || !inverterProfiles) return "Publish profiles in Settings";
   if (!request) return "Complete required assumptions";
   if (candidateUpperBound > 200) return `${count} requested · up to ${candidateUpperBound} candidates (maximum 200)`;
   return `${count} requested · Python will snap & validate`;

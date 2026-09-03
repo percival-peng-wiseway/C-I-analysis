@@ -83,6 +83,13 @@ export interface CiProjectRebateProfileState {
   ruleset: CiProjectRebateRuleset;
 }
 
+export interface CiProjectStcSettings {
+  solarStcEnabled: boolean;
+  solarStcPriceAudExGst: number;
+  batteryStcEnabled: boolean;
+  batteryStcPriceAudExGst: number;
+}
+
 export const ciProjectRebateProfileQueryKey = (projectId: string) =>
   ["ci-project-rebate-profile", projectId] as const;
 
@@ -112,6 +119,29 @@ export async function saveCiProjectRebateProfile(
     body: JSON.stringify({
       profile: input.profile,
       approve_for_calculation: input.approveForCalculation,
+    }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(rebateProfileErrorMessage(payload, response.status));
+  }
+  return assertCiProjectRebateProfileState(await response.json());
+}
+
+export async function saveCiProjectStcSettings(
+  projectId: string,
+  input: CiProjectStcSettings,
+  fetcher: typeof fetch = fetch,
+): Promise<CiProjectRebateProfileState> {
+  const response = await fetcher(`${rebateProfileUrl(projectId)}/stc-settings`, {
+    method: "PUT",
+    cache: "no-store",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      solar_stc_enabled: input.solarStcEnabled,
+      solar_stc_price_aud_ex_gst: input.solarStcPriceAudExGst,
+      battery_stc_enabled: input.batteryStcEnabled,
+      battery_stc_price_aud_ex_gst: input.batteryStcPriceAudExGst,
     }),
   });
   if (!response.ok) {

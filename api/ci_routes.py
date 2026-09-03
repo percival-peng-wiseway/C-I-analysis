@@ -23,6 +23,7 @@ from api.ci_schemas import (
     CiPricingCatalogReplaceRequest,
     CiProjectCreateRequest,
     CiProjectRebateProfileSaveRequest,
+    CiProjectStcSettingsSaveRequest,
     CiProjectTariffProfileSaveRequest,
 )
 from api.dependencies import (
@@ -144,6 +145,7 @@ from solar_battery.ci_project_rebate_profile import (
     rebate_calculation_profile_sha256,
     rebate_profile_has_enabled_program,
     save_ci_project_rebate_profile,
+    save_ci_project_stc_settings,
 )
 from solar_battery.ci_solution_generator import (
     generate_ci_custom_solution,
@@ -332,6 +334,36 @@ def put_ci_project_rebate_profile(
                     actor=actor,
                     profile=payload.profile,
                     approve_for_calculation=payload.approve_for_calculation,
+                )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.put(
+    "/commercial-industrial/projects/{project_id}/rebate-profile/stc-settings"
+)
+def put_ci_project_stc_settings(
+    project_id: UUID,
+    payload: CiProjectStcSettingsSaveRequest,
+    response: Response,
+    identity_provider: Annotated[
+        LocalIdentityProvider, Depends(get_identity_provider)
+    ],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        with session_factory() as session:
+            with session.begin():
+                return save_ci_project_stc_settings(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    solar_stc_enabled=payload.solar_stc_enabled,
+                    solar_stc_price_aud_ex_gst=payload.solar_stc_price_aud_ex_gst,
+                    battery_stc_enabled=payload.battery_stc_enabled,
+                    battery_stc_price_aud_ex_gst=payload.battery_stc_price_aud_ex_gst,
                 )
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc

@@ -246,6 +246,125 @@ def save_ci_project_rebate_profile(
     )
 
 
+def save_ci_project_stc_settings(
+    session,
+    *,
+    project_id: UUID,
+    actor: LocalActorContext,
+    solar_stc_enabled: bool,
+    solar_stc_price_aud_ex_gst: float,
+    battery_stc_enabled: bool,
+    battery_stc_price_aud_ex_gst: float,
+) -> dict[str, object]:
+    """Persist the compact STC UI as a complete, auditable calculation profile.
+
+    The UI intentionally exposes only inclusion and price. Python supplies the
+    calculation-only operands from current project evidence and the selected
+    device profile, and keeps VEEC outside this simplified workflow.
+    """
+    project = require_ci_project(session, project_id=project_id, actor=actor)
+    evidence = _evidence_row(session, project_id=project_id, actor=actor)
+    row = _profile_row(session, project_id=project_id, actor=actor)
+    if row is not None:
+        _verify_row_integrity(row)
+        profile = json.loads(json.dumps(row.profile_json))
+    else:
+        profile = _suggested_profile(evidence)
+    saved_site_matches = (
+        row is not None
+        and row.site_evidence_sha256 == _site_evidence_sha256(evidence)
+    )
+
+    today = _sydney_today().isoformat()
+    state_code, postcode = _state_postcode(_site_address(evidence))
+    has_site_evidence = state_code is not None and postcode is not None
+    profile.update(
+        {
+            "target_certificate_date": today,
+            "site_state_code": state_code or "",
+            "site_postcode": postcode or "",
+            "site_location_confirmed": has_site_evidence,
+            "site_location_source_label": (
+                "Detected supply/site address in current bill Evidence"
+                if has_site_evidence
+                else ""
+            ),
+            "stacking_confirmed": solar_stc_enabled and battery_stc_enabled,
+        }
+    )
+
+    programs = profile["programs"]
+    assert isinstance(programs, dict)
+    solar = programs["solar_stc"]
+    battery = programs["battery_stc"]
+    veec = programs["vic_deemed_veec"]
+    assert isinstance(solar, dict)
+    assert isinstance(battery, dict)
+    assert isinstance(veec, dict)
+    analyst_source = "Analyst-confirmed in simplified STC settings"
+    price_source = "Analyst-entered certificate price in simplified STC settings"
+
+    solar.update(
+        {
+            "enabled": solar_stc_enabled,
+            "eligibility_confirmed": solar_stc_enabled,
+            "eligibility_source_label": analyst_source if solar_stc_enabled else "",
+            "certificate_price_aud_ex_gst": solar_stc_price_aud_ex_gst,
+            "price_source_label": price_source if solar_stc_enabled else "",
+            "price_as_of_date": today,
+            # The compact workflow uses the lowest STC zone multiplier when no
+            # previously reviewed zone is available. This understates rather
+            # than overstates the screening deduction.
+            "postcode_zone_rating": (
+                solar.get("postcode_zone_rating")
+                if saved_site_matches
+                and solar.get("postcode_zone_rating") is not None
+                else min(CI_SOLAR_STC_ZONE_RATINGS)
+            ),
+            "zone_source_label": (
+                str(solar.get("zone_source_label") or "")
+                if saved_site_matches and solar.get("zone_source_label")
+                else "Conservative Zone 4 screening assumption"
+            ),
+        }
+    )
+    battery_fraction, battery_source = _selected_battery_usable_fraction(
+        session,
+        project=project,
+        actor=actor,
+    )
+    battery.update(
+        {
+            "enabled": battery_stc_enabled,
+            "eligibility_confirmed": battery_stc_enabled,
+            "eligibility_source_label": analyst_source if battery_stc_enabled else "",
+            "certificate_price_aud_ex_gst": battery_stc_price_aud_ex_gst,
+            "price_source_label": price_source if battery_stc_enabled else "",
+            "price_as_of_date": today,
+            "certified_usable_capacity_fraction": (
+                battery_fraction
+                if battery_fraction is not None
+                else battery.get("certified_usable_capacity_fraction")
+            ),
+            "capacity_source_label": (
+                battery_source
+                or str(battery.get("capacity_source_label") or "")
+            ),
+        }
+    )
+    veec["enabled"] = False
+    veec["eligibility_confirmed"] = False
+    veec["eligibility_source_label"] = ""
+
+    return save_ci_project_rebate_profile(
+        session,
+        project_id=project_id,
+        actor=actor,
+        profile=profile,
+        approve_for_calculation=True,
+    )
+
+
 def approved_ci_project_rebate_calculation_profile(
     session,
     *,
@@ -820,6 +939,56 @@ def _current_rebate_binding(
         ),
         "device_profile_sha256": current_device_digest,
     }
+
+
+def _selected_battery_usable_fraction(
+    session,
+    *,
+    project: CiProjectModel,
+    actor: LocalActorContext,
+) -> tuple[float | None, str]:
+    state = ci_device_profile_state(session, actor=actor)
+    device_profile = state.get("profile") if state.get("status") == "ready" else None
+    context = project.design_context_json
+    selection = (
+        context.get("profile_selection")
+        if isinstance(context, dict)
+        else None
+    )
+    solution_profiles = (
+        device_profile.get("solution_profiles")
+        if isinstance(device_profile, dict)
+        else None
+    )
+    battery_profiles = (
+        solution_profiles.get("battery_profiles")
+        if isinstance(solution_profiles, dict)
+        else None
+    )
+    selected_id = (
+        selection.get("battery_profile_id")
+        if isinstance(selection, dict)
+        else None
+    )
+    if not isinstance(battery_profiles, list) or not isinstance(selected_id, str):
+        return None, ""
+    selected = next(
+        (
+            item
+            for item in battery_profiles
+            if isinstance(item, dict) and item.get("profile_id") == selected_id
+        ),
+        None,
+    )
+    if not isinstance(selected, dict):
+        return None, ""
+    depth = selected.get("usable_depth_of_discharge_percent")
+    if not isinstance(depth, (int, float)) or isinstance(depth, bool):
+        return None, ""
+    source = str(selected.get("source_label") or selected.get("name") or "").strip()
+    if not source:
+        return None, ""
+    return float(depth) / 100.0, f"Selected battery profile: {source}"
 
 
 def _binding_from_calculation_profile(

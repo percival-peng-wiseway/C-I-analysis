@@ -162,6 +162,73 @@ def test_all_disabled_profile_can_be_approved_without_evidence_or_binding(
     assert all(item["enabled"] is False for item in profile["programs"].values())
 
 
+def test_compact_stc_settings_are_approved_and_price_ready(
+    tmp_path, monkeypatch
+) -> None:
+    _install_binding(monkeypatch, _stable_binding())
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda *_args, **_kwargs: _inspection(
+            "10 Collins Street Melbourne VIC, 3000"
+        ),
+    )
+    database_url = sqlite_url_for_path(tmp_path / "compact-stc.sqlite3")
+    with create_test_client(database_url, object_store_root=tmp_path / "objects") as client:
+        _, project_url = _create_project(client)
+        _save_evidence(client, project_url, b"compact-stc-evidence")
+
+        response = client.put(
+            f"{project_url}/rebate-profile/stc-settings",
+            json={
+                "solar_stc_enabled": True,
+                "solar_stc_price_aud_ex_gst": 41.5,
+                "battery_stc_enabled": False,
+                "battery_stc_price_aud_ex_gst": 38.0,
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        assert response.headers["cache-control"] == "no-store"
+        state = response.json()
+        assert state["status"] == "approved"
+        assert state["blockers"] == []
+        assert state["profile"]["site_state_code"] == "VIC"
+        assert state["profile"]["site_postcode"] == "3000"
+        assert state["profile"]["programs"]["solar_stc"] == {
+            "enabled": True,
+            "eligibility_confirmed": True,
+            "eligibility_source_label": "Analyst-confirmed in simplified STC settings",
+            "certificate_price_aud_ex_gst": 41.5,
+            "price_source_label": "Analyst-entered certificate price in simplified STC settings",
+            "price_as_of_date": state["profile"]["target_certificate_date"],
+            "postcode_zone_rating": 1.185,
+            "zone_source_label": "Conservative Zone 4 screening assumption",
+        }
+        assert state["profile"]["programs"]["battery_stc"]["enabled"] is False
+        assert state["profile"]["programs"]["vic_deemed_veec"]["enabled"] is False
+
+
+def test_compact_stc_settings_still_fail_closed_without_project_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    _install_binding(monkeypatch, _stable_binding())
+    database_url = sqlite_url_for_path(tmp_path / "compact-stc-blocked.sqlite3")
+    with create_test_client(database_url, object_store_root=tmp_path / "objects") as client:
+        _, project_url = _create_project(client)
+        response = client.put(
+            f"{project_url}/rebate-profile/stc-settings",
+            json={
+                "solar_stc_enabled": True,
+                "solar_stc_price_aud_ex_gst": 39,
+                "battery_stc_enabled": False,
+                "battery_stc_price_aud_ex_gst": 39,
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "rebate_site_evidence_required"
+
+
 def test_enabled_profile_requires_current_site_and_analyst_sources(
     tmp_path, monkeypatch
 ) -> None:

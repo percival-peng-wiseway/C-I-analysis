@@ -1,5 +1,5 @@
 import type { CiScenarioInput } from "./ci-scenarios";
-import type { CiBatterySolutionProfile, CiSolarSolutionProfile } from "./ci-device-profile";
+import type { CiBatterySolutionProfile, CiInverterSolutionProfile, CiSolarSolutionProfile } from "./ci-device-profile";
 
 export interface CiProject {
   project_id: string;
@@ -130,6 +130,7 @@ export interface CiSolutionGenerationRequest {
   };
   solar_profile_id: string;
   battery_profile_id: string;
+  inverter_profile_id?: string;
   site_factors: CiSiteFactors;
   connection_options: CiConnectionOptions;
 }
@@ -147,8 +148,10 @@ export interface CiDesignContextV2 {
     device_profile_sha256: string | null;
     solar_profile_id: string;
     battery_profile_id: string;
+    inverter_profile_id?: string;
     solar_profile: CiSolarSolutionProfile;
     battery_profile: CiBatterySolutionProfile;
+    inverter_profile?: CiInverterSolutionProfile;
   };
   technical_options: CiTechnicalOptions;
 }
