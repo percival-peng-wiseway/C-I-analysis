@@ -333,7 +333,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
                 "contract_version": "ci_custom_design_candidate_request_v1",
                 "label": "Client option A",
                 "pv_capacity_kwp_dc": 120,
-                "battery_capacity_kwh": 20,
+                "battery_capacity_kwh": 14,
                 "inverter_capacity_kw_ac": 106,
                 "quoted_net_capex_aud_ex_gst": 245000,
             }
@@ -353,7 +353,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             )
             assert added["label"] == "Client option A"
             assert added["pv_capacity_kwp_dc"] == 120.33
-            assert added["nominal_capacity_kwh"] == 21
+            assert added["nominal_capacity_kwh"] == 14
             assert added["pv_inverter_capacity_kw_ac"] == 110
             assert (
                 custom_result["normalization"]["requested_inverter_capacity_kw_ac"]

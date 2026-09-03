@@ -245,11 +245,17 @@ def generate_ci_custom_solution(
         connection["reactive_support_enabled"], bool
     ):
         raise _invalid("The saved connection switches are invalid.")
-    one_way_efficiency = (
-        _bounded(technical.get("charge_efficiency_percent"), 1, 100) / 100
+    # Rebuild these values from the saved profile and site snapshots, exactly as
+    # the matrix generator does.  The display-oriented percentages in
+    # technical_options are rounded and can otherwise make a reused system ID
+    # appear to have a different physical signature by a few floating-point bits.
+    one_way_efficiency = math.sqrt(
+        float(battery_performance["round_trip_efficiency_percent"]) / 100
+    ) * (float(battery_performance["power_conversion_efficiency_percent"]) / 100)
+    minimum_soc = 1 - (
+        float(battery_performance["usable_depth_of_discharge_percent"]) / 100
     )
-    minimum_soc = _bounded(technical.get("minimum_soc_percent"), 0, 99.999999) / 100
-    derating = _bounded(technical.get("effective_derating_percent"), 1e-9, 100) / 100
+    derating = _effective_derating(site)
     scenario = _scenario(
         solar=solar,
         battery=battery,
