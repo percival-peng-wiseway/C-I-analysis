@@ -31,7 +31,7 @@ describe("CiScenarioBuilder", () => {
     await userEvent.type(screen.getByLabelText("Fixed inverter quantity (optional)"), "3");
     expect(screen.getByText("3 × 125 kW = 375 kW")).toBeTruthy();
 
-    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate 30 cases" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
 
     expect(onSubmit).toHaveBeenCalledOnce();
     expect(onSubmit.mock.calls[0][0]).toMatchObject({
@@ -59,8 +59,8 @@ describe("CiScenarioBuilder", () => {
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("scenarios");
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("existing_solar");
     expect(screen.queryByLabelText("Allow grid charging")).toBeNull();
-    expect(screen.getByText("PV modules").parentElement?.textContent).toContain("167–834");
-    expect(screen.getByText("Battery units").parentElement?.textContent).toContain("0–5");
+    expect(screen.getByText("5 candidates:").parentElement?.textContent).toBe("5 candidates: 100, 200, 300, 400, 500 kWp");
+    expect(screen.getByText("6 candidates:").parentElement?.textContent).toBe("6 candidates: 0, 100, 200, 300, 400, 500 kWh");
   });
 
   it("uses another published profile selected from the workspace library", async () => {
@@ -75,27 +75,68 @@ describe("CiScenarioBuilder", () => {
     render(<CiScenarioBuilder deviceProfile={secondProfile} error={null} isPending={false} onSubmit={onSubmit} />);
 
     await userEvent.selectOptions(screen.getByLabelText("Published Solar profile"), "high_power_pv_v1");
-    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate 30 cases" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
 
     expect(onSubmit.mock.calls[0][0].solar_profile_id).toBe("high_power_pv_v1");
     expect(screen.getByText("700 W")).toBeTruthy();
   });
 
-  it("shows battery unit counts using the profile minimum and maximum constraints", async () => {
-    const constrainedProfile: CiDeviceProfile = structuredClone(deviceProfile);
-    constrainedProfile.solution_profiles.battery_profiles[0].minimum_units = 3;
-    constrainedProfile.solution_profiles.battery_profiles[0].maximum_units = 4;
+  it("shows every requested PV and battery candidate from the configured ranges", async () => {
     const user = userEvent.setup();
-    render(<CiScenarioBuilder deviceProfile={constrainedProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
     const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" });
     const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" });
+    const steps = screen.getAllByRole("spinbutton", { name: "Step" });
 
-    await user.clear(minimums[1]); await user.type(minimums[1], "50");
-    await user.clear(maximums[1]); await user.type(maximums[1], "350");
-    expect(screen.getByText("Battery units").parentElement?.textContent).toContain("3–4");
+    await user.clear(minimums[0]); await user.type(minimums[0], "100");
+    await user.clear(maximums[0]); await user.type(maximums[0], "150");
+    await user.clear(steps[0]); await user.type(steps[0], "10");
+    await user.clear(minimums[1]); await user.type(minimums[1], "300");
+    await user.clear(maximums[1]); await user.type(maximums[1], "400");
+    await user.clear(steps[1]); await user.type(steps[1], "10");
 
-    await user.clear(maximums[1]); await user.type(maximums[1], "500");
-    expect(screen.getByText("Battery units").parentElement?.textContent).toContain("—");
+    expect(screen.getByText("6 candidates:").parentElement?.textContent).toBe("6 candidates: 100, 110, 120, 130, 140, 150 kWp");
+    expect(screen.getByText("11 candidates:").parentElement?.textContent).toBe("11 candidates: 300, 310, 320, 330, 340, 350, 360, 370, 380, 390, 400 kWh");
+  });
+
+  it("floors decimal range counts the same way as Python", async () => {
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimum = screen.getAllByRole("spinbutton", { name: "Minimum" })[0];
+    const maximum = screen.getAllByRole("spinbutton", { name: "Maximum" })[0];
+    const step = screen.getAllByRole("spinbutton", { name: "Step" })[0];
+
+    await user.clear(minimum); await user.type(minimum, "100");
+    await user.clear(maximum); await user.type(maximum, "100.299999999");
+    await user.clear(step); await user.type(step, "0.1");
+
+    expect(screen.getByText("3 candidates:").parentElement?.textContent).toBe("3 candidates: 100, 100.1, 100.2 kWp");
+  });
+
+  it("preserves distinct sub-six-decimal candidate values in the requested list", async () => {
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimum = screen.getAllByRole("spinbutton", { name: "Minimum" })[0];
+    const maximum = screen.getAllByRole("spinbutton", { name: "Maximum" })[0];
+    const step = screen.getAllByRole("spinbutton", { name: "Step" })[0];
+
+    await user.clear(minimum); await user.type(minimum, "100.1234567");
+    await user.clear(maximum); await user.type(maximum, "100.1234568");
+    await user.clear(step); await user.type(step, "0.0000001");
+
+    expect(screen.getByText("2 candidates:").parentElement?.textContent).toBe("2 candidates: 100.1234567, 100.1234568 kWp");
+  });
+
+  it("uses Python half-even rounding for nine-decimal candidate values", async () => {
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} />);
+    const minimum = screen.getAllByRole("spinbutton", { name: "Minimum" })[0];
+    const maximum = screen.getAllByRole("spinbutton", { name: "Maximum" })[0];
+
+    await user.clear(minimum); await user.type(minimum, "100.0009765625");
+    await user.clear(maximum); await user.type(maximum, "100.0009765625");
+
+    expect(screen.getByText("1 candidate:").parentElement?.textContent).toBe("1 candidate: 100.000976562 kWp");
   });
 
   it("adopts a newly saved published battery profile without remounting", async () => {
@@ -124,7 +165,7 @@ describe("CiScenarioBuilder", () => {
 
     await waitFor(() => expect((screen.getByLabelText("Published Battery profile") as HTMLSelectElement).value).toBe("fox_ess_cq7_l14_v1"));
     expect(screen.getByRole("region", { name: "Battery profile" }).textContent).toContain("Fox ESS CQ7-L14");
-    expect(screen.getByRole("button", { name: "Save configuration & generate 30 cases" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", false);
   });
 
   it("keeps DC-coupled battery profiles out of the current AC dispatch generator", () => {
@@ -134,7 +175,7 @@ describe("CiScenarioBuilder", () => {
     render(<CiScenarioBuilder deviceProfile={dcOnly} error={null} isPending={false} onSubmit={vi.fn()} />);
 
     expect(screen.getByText("Published Solar, AC Battery and Inverter profiles are required.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Save configuration & generate 30 cases" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
   });
 
   it("disables requests that could exceed the saved canonical candidate limit", async () => {
@@ -152,7 +193,7 @@ describe("CiScenarioBuilder", () => {
     await user.clear(steps[1]); await user.type(steps[1], "100");
 
     expect(await screen.findByText("Maximum 200 candidates. Current request: up to 400.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Save configuration & generate 200 cases" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
   });
 });
 

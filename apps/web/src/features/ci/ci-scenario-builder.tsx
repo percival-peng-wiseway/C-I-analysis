@@ -189,7 +189,6 @@ export function CiScenarioBuilder({
     () => buildGenerationRequest({ batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile }),
     [batteryProfile, batteryRange, connection, inverterProfile, pvRange, site, solarProfile],
   );
-  const requestedCount = rangeCount(pvRange, true) * rangeCount(batteryRange, false);
   const candidateUpperBound = canonicalCandidateUpperBound(pvRange, batteryRange);
   const effectiveYield = effectiveSpecificYield(site);
 
@@ -304,7 +303,7 @@ export function CiScenarioBuilder({
             {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
             {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Maximum 200 candidates. Current request: up to {candidateUpperBound}.</p> : null}
             <Button className="min-w-64" disabled={!request || candidateUpperBound > 200 || isPending} type="submit">
-              {isPending ? "Saving & generating in Python…" : `Save configuration & generate ${requestedCount || ""} cases`}
+              {isPending ? "Saving & generating in Python…" : "Save configuration & generate solutions"}
               <Play className="size-4" />
             </Button>
           </div>
@@ -347,7 +346,7 @@ function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, r
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
-      {profile ? <UnitCountSummary label="PV modules" maximum={range.maximum} minimum={range.minimum} unitSize={profile.rated_power_w / 1000} /> : null}
+      <CandidateValuesSummary range={range} strictlyPositiveMinimum unit="kWp" />
     </ProfileCard>
   );
 }
@@ -373,7 +372,7 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
-      {profile ? <UnitCountSummary label="Battery units" maximum={range.maximum} maximumAllowedUnits={profile.maximum_units} minimum={range.minimum} minimumAllowedUnits={profile.minimum_units} unitSize={profile.nominal_capacity_kwh_per_unit} /> : null}
+      <CandidateValuesSummary range={range} unit="kWh" />
     </ProfileCard>
   );
 }
@@ -431,21 +430,15 @@ function WorkflowSection({ children, title }: { children: ReactNode; title: stri
   return <section><h3 className="mb-3 font-semibold text-slate-950">{title}</h3>{children}</section>;
 }
 
-function UnitCountSummary({ label, maximum, maximumAllowedUnits = Number.POSITIVE_INFINITY, minimum, minimumAllowedUnits = 0, unitSize }: { label: string; maximum: string; maximumAllowedUnits?: number; minimum: string; minimumAllowedUnits?: number; unitSize: number }) {
-  const minimumUnits = snappedUnitCount(minimum, unitSize, minimumAllowedUnits, maximumAllowedUnits);
-  const maximumUnits = snappedUnitCount(maximum, unitSize, minimumAllowedUnits, maximumAllowedUnits);
-  const value = minimumUnits === null || maximumUnits === null
-    ? "—"
-    : minimumUnits === maximumUnits ? String(minimumUnits) : `${minimumUnits}–${maximumUnits}`;
-  return <div className="flex items-center justify-between rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-950"><span>{label}</span><strong className="tabular-nums">{value}</strong></div>;
-}
-
-function snappedUnitCount(capacity: string, unitSize: number, minimumAllowedUnits: number, maximumAllowedUnits: number) {
-  const parsed = parseNumber(capacity);
-  if (!Number.isFinite(parsed) || parsed < 0 || unitSize <= 0) return null;
-  if (parsed === 0) return 0;
-  const unitCount = Math.max(minimumAllowedUnits, Math.ceil((parsed - 1e-9) / unitSize));
-  return unitCount <= maximumAllowedUnits ? unitCount : null;
+function CandidateValuesSummary({ range, strictlyPositiveMinimum = false, unit }: { range: NumericRange; strictlyPositiveMinimum?: boolean; unit: string }) {
+  const values = rangeValues(range, strictlyPositiveMinimum);
+  const countLabel = `${values.length} ${values.length === 1 ? "candidate" : "candidates"}`;
+  return (
+    <div className="rounded-lg bg-cyan-50 px-3 py-2 text-xs leading-5 text-cyan-950">
+      <strong>{countLabel}:</strong>{" "}
+      <span className="tabular-nums">{values.length ? `${values.map(formatCandidateValue).join(", ")} ${unit}` : "—"}</span>
+    </div>
+  );
 }
 
 function OptionGroup({ children, title }: { children: ReactNode; title: string }) {
@@ -671,28 +664,87 @@ function optionalPositiveInteger(value: string) {
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 10_000 ? parsed : null;
 }
 
-function parsedRange(range: NumericRange, strictlyPositiveMinimum: boolean): { minimum: number; maximum: number; step: number } | null {
+function parsedRange(range: NumericRange, strictlyPositiveMinimum: boolean): { minimum: number; maximum: number; step: number; count: number } | null {
   const minimum = parseNumber(range.minimum);
   const maximum = parseNumber(range.maximum);
   const step = parseNumber(range.step);
-  if ((strictlyPositiveMinimum ? !positive(minimum) : minimum < 0) || !Number.isFinite(maximum) || maximum < minimum || !positive(step)) return null;
-  const count = Math.floor((maximum - minimum) / step + 1e-7) + 1;
-  return count >= 1 && count <= 200 ? { minimum, maximum, step } : null;
+  if (!Number.isFinite(minimum) || (strictlyPositiveMinimum ? minimum <= 0 : minimum < 0) || !Number.isFinite(maximum) || maximum < minimum || !positive(step)) return null;
+  const count = decimalRangeCount(minimum, maximum, step);
+  return count !== null && count >= 1 && count <= 200 ? { minimum, maximum, step, count } : null;
 }
 
-function rangeCount(range: NumericRange, strictlyPositiveMinimum: boolean) {
+function rangeValues(range: NumericRange, strictlyPositiveMinimum: boolean) {
   const parsed = parsedRange(range, strictlyPositiveMinimum);
-  return parsed ? Math.floor((parsed.maximum - parsed.minimum) / parsed.step + 1e-7) + 1 : 0;
+  if (!parsed) return [];
+  const minimumParts = decimalParts(parsed.minimum);
+  const stepParts = decimalParts(parsed.step);
+  if (!minimumParts || !stepParts) return [];
+  const commonExponent = Math.min(minimumParts.exponent, stepParts.exponent);
+  const minimum = scaledDecimalCoefficient(minimumParts, commonExponent);
+  const step = scaledDecimalCoefficient(stepParts, commonExponent);
+  return Array.from({ length: parsed.count }, (_value, index) => {
+    const exactCandidate = Number(`${minimum + step * BigInt(index)}e${commonExponent}`);
+    return pythonRoundToNineDecimals(exactCandidate);
+  });
 }
 
 function canonicalCandidateUpperBound(pvRange: NumericRange, batteryRange: NumericRange) {
   const pv = parsedRange(pvRange, true);
   const battery = parsedRange(batteryRange, false);
   if (!pv || !battery) return 0;
-  const pvCount = Math.floor((pv.maximum - pv.minimum) / pv.step + 1e-7) + 1;
-  const batteryCount = Math.floor((battery.maximum - battery.minimum) / battery.step + 1e-7) + 1;
-  const comparatorCountPerPv = batteryCount - (battery.minimum === 0 ? 1 : 0);
-  return pvCount * (batteryCount + comparatorCountPerPv);
+  const comparatorCountPerPv = battery.count - (battery.minimum === 0 ? 1 : 0);
+  return pv.count * (battery.count + comparatorCountPerPv);
+}
+
+function decimalRangeCount(minimum: number, maximum: number, step: number) {
+  const values = [minimum, maximum, step].map(decimalParts);
+  if (values.some((value) => value === null)) return null;
+  const [minimumParts, maximumParts, stepParts] = values as DecimalParts[];
+  const commonExponent = Math.min(minimumParts.exponent, maximumParts.exponent, stepParts.exponent);
+  return Number(
+    (scaledDecimalCoefficient(maximumParts, commonExponent) - scaledDecimalCoefficient(minimumParts, commonExponent))
+      / scaledDecimalCoefficient(stepParts, commonExponent)
+      + 1n,
+  );
+}
+
+type DecimalParts = { coefficient: bigint; exponent: number };
+
+function decimalParts(value: number): DecimalParts | null {
+  const match = String(value).match(/^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i);
+  if (!match) return null;
+  const fractional = match[3] ?? "";
+  return {
+    coefficient: BigInt(`${match[1]}${match[2]}${fractional}`),
+    exponent: Number(match[4] ?? 0) - fractional.length,
+  };
+}
+
+function scaledDecimalCoefficient(value: DecimalParts, exponent: number) {
+  return value.coefficient * 10n ** BigInt(value.exponent - exponent);
+}
+
+function pythonRoundToNineDecimals(value: number) {
+  const magnitude = Math.abs(value);
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, magnitude);
+  const bits = view.getBigUint64(0);
+  const exponentBits = Number((bits >> 52n) & 0x7ffn);
+  let significand = bits & ((1n << 52n) - 1n);
+  const binaryExponent = exponentBits === 0 ? -1074 : exponentBits - 1075;
+  if (exponentBits !== 0) significand |= 1n << 52n;
+
+  let numerator = significand * 5n ** 9n;
+  const scaledBinaryExponent = binaryExponent + 9;
+  let denominator = 1n;
+  if (scaledBinaryExponent >= 0) numerator <<= BigInt(scaledBinaryExponent);
+  else denominator <<= BigInt(-scaledBinaryExponent);
+
+  let rounded = numerator / denominator;
+  const remainder = numerator % denominator;
+  const twiceRemainder = remainder * 2n;
+  if (twiceRemainder > denominator || (twiceRemainder === denominator && rounded % 2n === 1n)) rounded += 1n;
+  return (value < 0 ? -1 : 1) * Number(rounded) / 1_000_000_000;
 }
 
 function rangeFromValues(values: number[]): NumericRange {
@@ -726,6 +778,10 @@ function between(value: number, minimum: number, maximum: number) {
 
 function formatNumber(value: number) {
   return String(Number(value.toFixed(6)));
+}
+
+function formatCandidateValue(value: number) {
+  return value.toFixed(9).replace(/\.?0+$/, "");
 }
 
 function humanize(value: string) {

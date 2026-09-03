@@ -783,6 +783,20 @@ def post_ci_design_candidates(
                     design_context=design_context,
                     actor=actor,
                 )
+                if payload.stc_settings is not None:
+                    save_ci_project_stc_settings(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        solar_stc_enabled=payload.stc_settings.solar_stc_enabled,
+                        solar_stc_price_aud_ex_gst=(
+                            payload.stc_settings.solar_stc_price_aud_ex_gst
+                        ),
+                        battery_stc_enabled=payload.stc_settings.battery_stc_enabled,
+                        battery_stc_price_aud_ex_gst=(
+                            payload.stc_settings.battery_stc_price_aud_ex_gst
+                        ),
+                    )
         return result
     except (CiProjectError, CiScenarioAnalysisError) as exc:
         if isinstance(exc, CiProjectError):
@@ -813,17 +827,24 @@ def get_ci_design_candidates(
                 "status": "not_saved",
                 "design": None,
             }
+        validated_context = (
+            validate_ci_design_context(design_context)
+            if design_context is not None
+            else None
+        )
+        design = {
+            **validate_ci_design_candidates(candidates),
+            "design_context": validated_context,
+        }
+        if (
+            isinstance(validated_context, dict)
+            and isinstance(validated_context.get("generation_summary"), dict)
+        ):
+            design["generation_summary"] = validated_context["generation_summary"]
         return {
             "contract_version": "ci_saved_design_state_v1",
             "status": "ready",
-            "design": {
-                **validate_ci_design_candidates(candidates),
-                "design_context": (
-                    validate_ci_design_context(design_context)
-                    if design_context is not None
-                    else None
-                ),
-            },
+            "design": design,
         }
     except (CiProjectError, CiScenarioAnalysisError) as exc:
         if isinstance(exc, CiProjectError):
@@ -843,53 +864,60 @@ def post_ci_custom_design_candidate(
     actor = identity_provider.current()
     try:
         with session_factory() as session:
-            project = require_ci_project(session, project_id=project_id, actor=actor)
-            if project.setup_status != "ready":
-                raise CiProjectError(
-                    "ci_project_setup_required",
-                    "Complete Setup & catalog before adding a custom system design.",
-                )
-            candidates = saved_ci_design_candidates(
-                session, project_id=project_id, actor=actor
-            )
-            design_context = saved_ci_design_context(
-                session, project_id=project_id, actor=actor
-            )
-        if candidates is None or design_context is None:
-            raise CiProjectError(
-                "ci_solution_generation_invalid",
-                "Generate and save the profile-bound solution set before adding "
-                "a custom solution.",
-            )
-        context = validate_ci_design_context(design_context)
-        generated = generate_ci_custom_solution(
-            payload.model_dump(), design_context=context
-        )
-        candidate = generated["candidate"]
-        if not isinstance(candidate, dict):
-            raise CiProjectError(
-                "ci_solution_generation_invalid",
-                "The custom solution could not be created safely.",
-            )
-        scenario_id = str(candidate["scenario_id"])
-        if any(item.get("scenario_id") == scenario_id for item in candidates):
-            raise CiProjectError(
-                "ci_solution_generation_invalid",
-                "This technical configuration already exists. Enter its quotation "
-                "in the existing row.",
-            )
-        validated = validate_ci_design_candidates([*candidates, candidate])
-        result = {
-            **validated,
-            "design_context": context,
-            "added_scenario_id": scenario_id,
-            "quoted_net_capex_aud_ex_gst": generated[
-                "quoted_net_capex_aud_ex_gst"
-            ],
-            "normalization": generated["normalization"],
-        }
-        with session_factory() as session:
             with session.begin():
+                project = require_ci_project(
+                    session, project_id=project_id, actor=actor
+                )
+                if project.setup_status != "ready":
+                    raise CiProjectError(
+                        "ci_project_setup_required",
+                        "Complete Setup & catalog before adding a custom system design.",
+                    )
+                candidates = saved_ci_design_candidates(
+                    session, project_id=project_id, actor=actor
+                )
+                design_context = saved_ci_design_context(
+                    session, project_id=project_id, actor=actor
+                )
+                if candidates is None or design_context is None:
+                    raise CiProjectError(
+                        "ci_solution_generation_invalid",
+                        "Generate and save the profile-bound solution set before adding "
+                        "a custom solution.",
+                    )
+                context = validate_ci_design_context(design_context)
+                generated = generate_ci_custom_solution(
+                    payload.model_dump(exclude={"stc_settings"}),
+                    design_context=context,
+                )
+                candidate = generated["candidate"]
+                if not isinstance(candidate, dict):
+                    raise CiProjectError(
+                        "ci_solution_generation_invalid",
+                        "The custom solution could not be created safely.",
+                    )
+                scenario_id = str(candidate["scenario_id"])
+                if any(
+                    item.get("scenario_id") == scenario_id for item in candidates
+                ):
+                    raise CiProjectError(
+                        "ci_solution_generation_invalid",
+                        "This technical configuration already exists. Enter its quotation "
+                        "in the existing row.",
+                    )
+                validated = validate_ci_design_candidates([*candidates, candidate])
+                result = {
+                    **validated,
+                    "design_context": context,
+                    "added_scenario_id": scenario_id,
+                    "quoted_net_capex_aud_ex_gst": generated[
+                        "quoted_net_capex_aud_ex_gst"
+                    ],
+                    "normalization": generated["normalization"],
+                }
+                generation_summary = context.get("generation_summary")
+                if isinstance(generation_summary, dict):
+                    result["generation_summary"] = generation_summary
                 record_ci_design_candidates(
                     session,
                     project_id=project_id,
@@ -897,6 +925,19 @@ def post_ci_custom_design_candidate(
                     candidates=list(result["candidates"]),
                     design_context=context,
                     actor=actor,
+                )
+                save_ci_project_stc_settings(
+                    session,
+                    project_id=project_id,
+                    actor=actor,
+                    solar_stc_enabled=payload.stc_settings.solar_stc_enabled,
+                    solar_stc_price_aud_ex_gst=(
+                        payload.stc_settings.solar_stc_price_aud_ex_gst
+                    ),
+                    battery_stc_enabled=payload.stc_settings.battery_stc_enabled,
+                    battery_stc_price_aud_ex_gst=(
+                        payload.stc_settings.battery_stc_price_aud_ex_gst
+                    ),
                 )
         return result
     except (CiProjectError, CiScenarioAnalysisError) as exc:

@@ -14,7 +14,7 @@ import {
 } from "@/features/ci/api/ci-rebate-profile";
 
 export interface CiRebateProfilePanelHandle {
-  saveIfDirty: () => Promise<void>;
+  settingsForGeneration: () => CiProjectStcSettings;
 }
 
 export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { projectId: string }>(function CiRebateProfilePanel({ projectId }, ref) {
@@ -61,7 +61,7 @@ export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { pro
   const needsSave = isDirty || (enabledCount > 0 && state.data?.status !== "approved");
 
   useImperativeHandle(ref, () => ({
-    async saveIfDirty() {
+    settingsForGeneration() {
       if (state.isError) {
         throw new Error("The project STC settings could not be loaded safely.");
       }
@@ -71,8 +71,7 @@ export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { pro
       if (invalidPrice) {
         throw new Error("Enter a price greater than $0 for each included STC type.");
       }
-      if (!needsSave) return;
-      await save.mutateAsync({ settings: draft, targetProjectId: projectId });
+      return { ...draft };
     },
   }));
 

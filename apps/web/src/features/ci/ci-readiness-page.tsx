@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ArrowRight, BadgeDollarSign, Play, Plus, RefreshCw } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, Play, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,7 @@ import {
   fetchCiDesignPricePreview,
   type CiDesignPricePreview,
 } from "@/features/ci/api/ci-design-price-preview";
+import { ciProjectRebateProfileQueryKey } from "@/features/ci/api/ci-rebate-profile";
 import {
   ciAnnualFinancialComparisonQueryKey,
   compareCiAnnualFinancialScenarios,
@@ -160,8 +161,11 @@ function PhysicalFeasibilityWorkspace({ onAnalysisStart, onBack, onValidated, pr
       if (!stcSettingsRef.current) {
         throw new Error("The project STC settings are not ready yet.");
       }
-      await stcSettingsRef.current.saveIfDirty();
-      return generateCiDesignCandidates(project.project_id, request);
+      return generateCiDesignCandidates(
+        project.project_id,
+        request,
+        stcSettingsRef.current.settingsForGeneration(),
+      );
     },
     onSuccess: (design) => {
       overriddenQuoteIds.current.clear();
@@ -174,6 +178,7 @@ function PhysicalFeasibilityWorkspace({ onAnalysisStart, onBack, onValidated, pr
       void queryClient.invalidateQueries({ queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
       void queryClient.invalidateQueries({ queryKey: ciProjectTariffReplayQueryKey(project.project_id) });
       void queryClient.invalidateQueries({ queryKey: ciAnnualFinancialComparisonQueryKey(project.project_id) });
+      void queryClient.invalidateQueries({ queryKey: ciProjectRebateProfileQueryKey(project.project_id) });
       void queryClient.invalidateQueries({ queryKey: ciDesignPricePreviewQueryKey(project.project_id) });
     },
   });
@@ -200,7 +205,16 @@ function PhysicalFeasibilityWorkspace({ onAnalysisStart, onBack, onValidated, pr
     ));
   }, [generationRevision, quoteRevision]);
   const addCustom = useMutation({
-    mutationFn: (request: CiCustomDesignCandidateRequest) => addCiCustomDesignCandidate(project.project_id, request),
+    mutationFn: (request: CiCustomDesignCandidateRequest) => {
+      if (!stcSettingsRef.current) {
+        throw new Error("The project STC settings are not ready yet.");
+      }
+      return addCiCustomDesignCandidate(
+        project.project_id,
+        request,
+        stcSettingsRef.current.settingsForGeneration(),
+      );
+    },
     onSuccess: (design) => {
       overriddenQuoteIds.current.add(design.added_scenario_id);
       setQuotedNetCapex((current) => ({ ...current, [design.added_scenario_id]: String(design.quoted_net_capex_aud_ex_gst) }));
@@ -210,6 +224,7 @@ function PhysicalFeasibilityWorkspace({ onAnalysisStart, onBack, onValidated, pr
       void queryClient.invalidateQueries({ queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
       void queryClient.invalidateQueries({ queryKey: ciProjectTariffReplayQueryKey(project.project_id) });
       void queryClient.invalidateQueries({ queryKey: ciAnnualFinancialComparisonQueryKey(project.project_id) });
+      void queryClient.invalidateQueries({ queryKey: ciProjectRebateProfileQueryKey(project.project_id) });
       void queryClient.invalidateQueries({ queryKey: ciDesignPricePreviewQueryKey(project.project_id) });
     },
   });
@@ -251,13 +266,14 @@ function PhysicalFeasibilityWorkspace({ onAnalysisStart, onBack, onValidated, pr
         siteAddress={siteAddress}
         stcSettings={<CiRebateProfilePanel projectId={project.project_id} ref={stcSettingsRef} />}
       />
-    {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} inverterBlockSizeKw={generatedDesign.design_context?.technical_options.inverter_block_size_kw ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { overriddenQuoteIds.current.add(scenarioId); setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
+    {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} generationSummary={generatedDesign.generation_summary ?? null} inverterBlockSizeKw={generatedDesign.design_context?.technical_options.inverter_block_size_kw ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { overriddenQuoteIds.current.add(scenarioId); setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
   </div>;
 }
 
-function GeneratedSolutionQuotes({ addCustomError, analysisError, inverterBlockSizeKw, isAddingCustom, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, onSelectionChange, onSelectAll, preview, previewError, quotes, selectedSolutions, siteAcHeadroomKw }: {
+function GeneratedSolutionQuotes({ addCustomError, analysisError, generationSummary, inverterBlockSizeKw, isAddingCustom, isLoading, onAddCustom, onAnalyze, onQuoteChange, onRetry, onSelectionChange, onSelectAll, preview, previewError, quotes, selectedSolutions, siteAcHeadroomKw }: {
   addCustomError: string | null;
   analysisError: string | null;
+  generationSummary: CiDesignCandidateResult["generation_summary"] | null;
   inverterBlockSizeKw: number | null;
   isAddingCustom: boolean;
   isLoading: boolean;
@@ -306,6 +322,15 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, inverterBlockS
   };
   if (isLoading) return <section className="rounded-xl border border-slate-200 bg-white p-6"><p className="flex items-center gap-2 text-sm text-slate-600"><RefreshCw className="size-4 animate-spin" />Calculating Net CAPEX for every feasible solution…</p></section>;
   if (previewError || !preview) return <section className="rounded-xl border border-amber-200 bg-amber-50 p-5"><h2 className="font-semibold text-amber-950">Net CAPEX is not ready</h2><p className="mt-1 text-sm leading-6 text-amber-900">{previewError ?? "Save the equipment and rebate assumptions, then try again."}</p><Button className="mt-4" onClick={onRetry} type="button" variant="outline"><RefreshCw className="size-4" />Retry pricing</Button></section>;
+  const feasibleRequestedCount = generationSummary
+    ? Math.max(0, generationSummary.requested_count - generationSummary.deduplicated_count - generationSummary.rejected_count)
+    : 0;
+  const addedComparatorCount = generationSummary
+    ? Math.max(0, generationSummary.generated_candidate_count - feasibleRequestedCount)
+    : 0;
+  const addedCustomCount = generationSummary
+    ? Math.max(0, preview.candidate_count - generationSummary.generated_candidate_count)
+    : 0;
   const selectedCount = preview.solutions.filter((solution) => selectedSolutions[solution.scenario_id]).length;
   const allSelected = selectedCount === preview.solutions.length;
   const validQuotes = selectedCount > 0 && preview.solutions.filter((solution) => selectedSolutions[solution.scenario_id]).every((solution) => {
@@ -315,7 +340,24 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, inverterBlockS
   return (
     <section aria-labelledby="generated-solution-quotes-title" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
       <header className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 p-5 sm:p-6">
-        <div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><BadgeDollarSign className="size-5" /></span><h3 className="text-xl font-semibold text-slate-950" id="generated-solution-quotes-title">All feasible solutions &amp; Net CAPEX</h3></div>
+        <div>
+          <h3 className="text-xl font-semibold text-slate-950" id="generated-solution-quotes-title">Solutions</h3>
+          {generationSummary ? (
+            <div aria-label="Solution generation summary" className="mt-2 flex flex-wrap gap-2 text-xs text-slate-600">
+              <span>{generationSummary.requested_count} requested</span>
+              <span aria-hidden="true">·</span>
+              <span>{generationSummary.deduplicated_count} duplicate sizes merged</span>
+              <span aria-hidden="true">·</span>
+              <span>{generationSummary.rejected_count} rejected</span>
+              <span aria-hidden="true">·</span>
+              <span>{feasibleRequestedCount} feasible configurations</span>
+              {addedComparatorCount ? <><span aria-hidden="true">+</span><span>{addedComparatorCount} PV-only comparisons</span></> : null}
+              {addedCustomCount ? <><span aria-hidden="true">+</span><span>{addedCustomCount} custom solutions</span></> : null}
+              <span aria-hidden="true">=</span>
+              <strong className="text-slate-900">{preview.candidate_count} solutions</strong>
+            </div>
+          ) : null}
+        </div>
         <div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{selectedCount} / {preview.candidate_count} selected</span><Button onClick={() => { setCustomValidationError(null); setShowCustom((current) => !current); }} type="button" variant="outline"><Plus className="size-4" />Add custom solution</Button></div>
       </header>
       {showCustom ? <div className="border-b border-slate-200 bg-cyan-50/40 p-5 sm:p-6"><div className="flex flex-wrap items-start justify-between gap-3"><h3 className="font-semibold text-slate-950">Custom solution &amp; quotation</h3><Button onClick={() => setShowCustom(false)} type="button" variant="outline">Cancel</Button></div><div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><label className="text-xs font-medium text-slate-700">Solution name<input aria-label="Custom solution name" className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100" maxLength={80} onChange={(event) => setCustom((current) => ({ ...current, label: event.target.value }))} placeholder="e.g. Client option A" value={custom.label} /></label><CustomNumberField label="PV capacity" onChange={(value) => setCustom((current) => ({ ...current, pv: value }))} suffix="kWp" value={custom.pv} /><CustomNumberField label="Battery capacity" min="0" onChange={(value) => setCustom((current) => ({ ...current, battery: value }))} suffix="kWh" value={custom.battery} /><CustomNumberField label="PCS capacity" onChange={(value) => setCustom((current) => ({ ...current, inverter: value }))} suffix="kW AC" value={custom.inverter} /><CustomNumberField label="Quoted Net CAPEX" onChange={(value) => setCustom((current) => ({ ...current, capex: value }))} prefix="$" suffix="ex GST" value={custom.capex} /></div>{customValidationError || addCustomError ? <p className="mt-3 text-sm text-red-700" role="alert">{customValidationError ?? addCustomError}</p> : null}<div className="mt-4 flex justify-end"><Button disabled={isAddingCustom} onClick={() => { void submitCustom(); }} type="button">{isAddingCustom ? <RefreshCw className="size-4 animate-spin" /> : <Plus className="size-4" />}{isAddingCustom ? "Validating…" : "Add to comparison"}</Button></div></div> : null}

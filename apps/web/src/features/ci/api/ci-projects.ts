@@ -1,5 +1,6 @@
 import type { CiScenarioInput } from "./ci-scenarios";
 import type { CiBatterySolutionProfile, CiInverterSolutionProfile, CiSolarSolutionProfile } from "./ci-device-profile";
+import type { CiProjectStcSettings } from "./ci-rebate-profile";
 
 export interface CiProject {
   project_id: string;
@@ -141,6 +142,7 @@ export interface CiDesignContextV2 {
   contract_version: "ci_design_context_v2";
   existing_solar: CiExistingSolarAsset;
   existing_battery: CiExistingBatteryAsset;
+  generation_summary?: CiSolutionGenerationSummary;
   search_space: {
     pv_range: CiSolutionGenerationRequest["pv_range"];
     battery_range: CiSolutionGenerationRequest["battery_range"];
@@ -237,12 +239,23 @@ export async function validateCiDesignCandidates(
 export async function generateCiDesignCandidates(
   projectId: string,
   generationRequest: CiSolutionGenerationRequest,
+  stcSettings?: CiProjectStcSettings,
   fetcher: typeof fetch = fetch,
 ): Promise<CiDesignCandidateResult> {
   const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-candidates`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ generation_request: generationRequest }),
+    body: JSON.stringify({
+      generation_request: generationRequest,
+      ...(stcSettings ? {
+        stc_settings: {
+          solar_stc_enabled: stcSettings.solarStcEnabled,
+          solar_stc_price_aud_ex_gst: stcSettings.solarStcPriceAudExGst,
+          battery_stc_enabled: stcSettings.batteryStcEnabled,
+          battery_stc_price_aud_ex_gst: stcSettings.batteryStcPriceAudExGst,
+        },
+      } : {}),
+    }),
   });
   if (!response.ok) throw new Error(await errorMessage(response, "Solution generation failed."));
   return assertCiDesignCandidateResult(await response.json());
@@ -251,12 +264,21 @@ export async function generateCiDesignCandidates(
 export async function addCiCustomDesignCandidate(
   projectId: string,
   request: CiCustomDesignCandidateRequest,
+  stcSettings: CiProjectStcSettings,
   fetcher: typeof fetch = fetch,
 ): Promise<CiCustomDesignCandidateResult> {
   const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-candidates/custom`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify({
+      ...request,
+      stc_settings: {
+        solar_stc_enabled: stcSettings.solarStcEnabled,
+        solar_stc_price_aud_ex_gst: stcSettings.solarStcPriceAudExGst,
+        battery_stc_enabled: stcSettings.batteryStcEnabled,
+        battery_stc_price_aud_ex_gst: stcSettings.batteryStcPriceAudExGst,
+      },
+    }),
   });
   if (!response.ok) throw new Error(await errorMessage(response, "Custom solution could not be added."));
   const payload = await response.json() as CiCustomDesignCandidateResult;
@@ -272,6 +294,7 @@ export async function fetchCiSavedDesign(
   fetcher: typeof fetch = fetch,
 ): Promise<CiDesignCandidateResult | null> {
   const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-candidates`, {
+    cache: "no-store",
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new Error(await errorMessage(response, "Saved system design could not be loaded."));
@@ -294,12 +317,32 @@ function assertCiDesignCandidateResult(value: unknown): CiDesignCandidateResult 
     payload.dispatch_evaluated !== false ||
     payload.tariff_evaluated !== false ||
     payload.customer_facing_permission !== false ||
-    payload.recommendation_permitted !== false
-    || (payload.design_context !== null && !["ci_design_context_v1", "ci_design_context_v2"].includes(payload.design_context?.contract_version))
+    payload.recommendation_permitted !== false ||
+    (payload.design_context !== null && !["ci_design_context_v1", "ci_design_context_v2"].includes(payload.design_context?.contract_version)) ||
+    (payload.generation_summary !== undefined && !isCiSolutionGenerationSummary(payload.generation_summary))
   ) {
     throw new Error("Design validation returned an unsafe contract.");
   }
   return payload;
+}
+
+function isCiSolutionGenerationSummary(value: unknown): value is CiSolutionGenerationSummary {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const summary = value as Record<string, unknown>;
+  const counts = [
+    summary.requested_count,
+    summary.generated_candidate_count,
+    summary.deduplicated_count,
+    summary.rejected_count,
+  ];
+  if (counts.some((count) => typeof count !== "number" || !Number.isInteger(count) || count < 0)) return false;
+  if (!Array.isArray(summary.rejection_reasons)) return false;
+  return summary.rejection_reasons.every((reason) => {
+    if (!reason || typeof reason !== "object" || Array.isArray(reason)) return false;
+    const item = reason as Record<string, unknown>;
+    return typeof item.code === "string" && item.code.trim().length > 0 &&
+      typeof item.count === "number" && Number.isInteger(item.count) && item.count > 0;
+  });
 }
 
 async function errorMessage(response: Response, fallback: string) {

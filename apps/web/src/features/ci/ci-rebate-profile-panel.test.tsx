@@ -97,7 +97,7 @@ describe("CiRebateProfilePanel", () => {
     expect(screen.getByRole("button", { name: "Save STC settings" }).hasAttribute("disabled")).toBe(true);
   });
 
-  it("rejects an invalid dirty draft through the generation save handle", async () => {
+  it("rejects an invalid draft through the atomic generation settings handle", async () => {
     const requests = mockApi(state("not_configured"));
     const ref = createRef<CiRebateProfilePanelHandle>();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -107,7 +107,7 @@ describe("CiRebateProfilePanel", () => {
     await userEvent.click(screen.getByLabelText("Include Solar STCs"));
     await userEvent.clear(screen.getByLabelText("Solar STCs price"));
 
-    await expect(ref.current?.saveIfDirty()).rejects.toThrow("Enter a price greater than $0 for each included STC type.");
+    expect(() => ref.current?.settingsForGeneration()).toThrow("Enter a price greater than $0 for each included STC type.");
     expect(requests.filter((request) => request.method === "PUT")).toHaveLength(0);
   });
 

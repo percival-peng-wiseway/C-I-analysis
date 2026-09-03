@@ -177,7 +177,13 @@ def generate_ci_solutions(
             scenarios_by_id[str(comparator["scenario_id"])] = comparator
 
     candidates = sorted(
-        scenarios_by_id.values(), key=lambda item: str(item["scenario_id"])
+        scenarios_by_id.values(),
+        key=lambda item: (
+            float(item["pv_capacity_kwp_dc"]),
+            float(item["nominal_capacity_kwh"]),
+            float(item["pv_inverter_capacity_kw_ac"]),
+            str(item["scenario_id"]),
+        ),
     )
     configured_quantity = connection["inverter_quantity"]
     if not candidates and configured_quantity is not None:
@@ -225,6 +231,19 @@ def generate_ci_solutions(
         )
     validated = validate_ci_design_candidates(candidates)
     canonical_candidates = list(validated["candidates"])
+    generation_summary = {
+        "requested_count": requested_count,
+        "deduplicated_count": max(
+            0,
+            requested_count - invalid_requested - len(snapped_pairs),
+        ),
+        "rejected_count": invalid_requested + rejected_unique,
+        "generated_candidate_count": len(canonical_candidates),
+        "rejection_reasons": [
+            {"code": code, "count": count}
+            for code, count in sorted(rejection_counts.items())
+        ],
+    }
     context = _design_context(
         request,
         solar=solar,
@@ -237,23 +256,12 @@ def generate_ci_solutions(
         derating=derating,
         one_way_efficiency=one_way_efficiency,
         minimum_soc=minimum_soc,
+        generation_summary=generation_summary,
     )
     return {
         "candidates": canonical_candidates,
         "design_context": context,
-        "generation_summary": {
-            "requested_count": requested_count,
-            "deduplicated_count": max(
-                0,
-                requested_count - invalid_requested - len(snapped_pairs),
-            ),
-            "rejected_count": invalid_requested + rejected_unique,
-            "generated_candidate_count": len(canonical_candidates),
-            "rejection_reasons": [
-                {"code": code, "count": count}
-                for code, count in sorted(rejection_counts.items())
-            ],
-        },
+        "generation_summary": generation_summary,
     }
 
 
@@ -774,6 +782,7 @@ def _design_context(
     derating: float,
     one_way_efficiency: float,
     minimum_soc: float,
+    generation_summary: dict[str, object],
 ) -> dict[str, object]:
     connection = request["connection_options"]
     site = request["site_factors"]
@@ -789,6 +798,7 @@ def _design_context(
             "pv_range": dict(request["pv_range"]),
             "battery_range": dict(request["battery_range"]),
         },
+        "generation_summary": json.loads(json.dumps(generation_summary)),
         "site_factors": dict(site),
         "profile_selection": {
             "solar_profile_id": request["solar_profile_id"],

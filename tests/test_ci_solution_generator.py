@@ -8,13 +8,21 @@ from pydantic import ValidationError
 
 from api.ci_schemas import CiDesignCandidatesRequest
 from solar_battery.ci_design_context import validate_ci_design_context
-from solar_battery.ci_device_profile import suggested_ci_device_profile
+from solar_battery.ci_device_profile import (
+    device_profile_sha256,
+    suggested_ci_device_profile,
+)
+from solar_battery.ci_project_feasibility import canonical_sha256
+from solar_battery.ci_project_rebate_profile import (
+    approved_ci_project_rebate_calculation_profile,
+)
 from solar_battery.ci_projects import CiProjectError
 from solar_battery.ci_solution_generator import generate_ci_solutions
 from solar_battery.durable_cockpit.orm import CiProjectModel
 from tests.durable_test_helpers import (
     create_sqlite_session_factory,
     create_test_client,
+    local_actor,
     sqlite_url_for_path,
 )
 
@@ -108,6 +116,15 @@ def _request(*, maximum_pv: float = 101.0, headroom: float = 200.0):
     }
 
 
+def _stc_settings() -> dict[str, object]:
+    return {
+        "solar_stc_enabled": True,
+        "solar_stc_price_aud_ex_gst": 39.0,
+        "battery_stc_enabled": False,
+        "battery_stc_price_aud_ex_gst": 39.0,
+    }
+
+
 def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> None:
     digest = "a" * 64
 
@@ -138,6 +155,19 @@ def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> N
     }
     assert {item["nominal_capacity_kwh"] for item in candidates} == {0.0, 14.0}
     assert all(item["pv_inverter_capacity_kw_ac"] in {85.0} for item in candidates)
+    assert [
+        (
+            item["pv_capacity_kwp_dc"],
+            item["nominal_capacity_kwh"],
+            item["pv_inverter_capacity_kw_ac"],
+        )
+        for item in candidates
+    ] == [
+        (100.17, 0.0, 85.0),
+        (100.17, 14.0, 85.0),
+        (101.43, 0.0, 85.0),
+        (101.43, 14.0, 85.0),
+    ]
     assert all(item["shared_ac_headroom_kw"] == 85.0 for item in candidates)
     assert all(
         item["grid_emissions_factor_kg_co2e_per_kwh"] == 0.0
@@ -166,7 +196,77 @@ def test_python_generator_snaps_deduplicates_and_adds_pv_only_comparators() -> N
     assert context["profile_selection"]["battery_profile"][
         "nominal_capacity_kwh_per_unit"
     ] == 7.0
+    assert context["generation_summary"] == first["generation_summary"]
     assert validate_ci_design_context(context) == context
+
+
+def test_fox_range_example_reduces_66_requests_to_12_feasible_solutions() -> None:
+    profile = _device_profile()
+    solar = profile["solution_profiles"]["solar_profiles"][0]
+    battery = profile["solution_profiles"]["battery_profiles"][0]
+    inverter = profile["solution_profiles"]["inverter_profiles"][0]
+    solar["rated_power_w"] = 650.0
+    battery.update(
+        {
+            "nominal_capacity_kwh_per_unit": 97.44,
+            "continuous_power_kw_per_unit": 64.51,
+            "minimum_units": 1,
+            "maximum_units": 30,
+        }
+    )
+    inverter.update(
+        {
+            "rated_active_power_kw": 100.0,
+            "rated_apparent_power_kva": 110.0,
+            "maximum_reactive_power_kvar": 66.0,
+        }
+    )
+    request = _request(maximum_pv=150.0, headroom=350.0)
+    request["pv_range"] = {
+        "minimum_kwp_dc": 100.0,
+        "maximum_kwp_dc": 150.0,
+        "step_kwp_dc": 10.0,
+    }
+    request["battery_range"] = {
+        "minimum_kwh": 300.0,
+        "maximum_kwh": 400.0,
+        "step_kwh": 10.0,
+    }
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        {
+            "inverter_block_size_kw": 100.0,
+            "inverter_quantity": 3,
+        }
+    )
+
+    result = generate_ci_solutions(
+        request,
+        device_profile=profile,
+        device_profile_sha256="f" * 64,
+    )
+
+    assert result["generation_summary"] == {
+        "requested_count": 66,
+        "deduplicated_count": 54,
+        "rejected_count": 6,
+        "generated_candidate_count": 12,
+        "rejection_reasons": [
+            {"code": "configured_inverter_capacity_insufficient", "count": 6}
+        ],
+    }
+    assert result["design_context"]["generation_summary"] == result[
+        "generation_summary"
+    ]
+    assert [
+        item["pv_capacity_kwp_dc"] for item in result["candidates"][::2]
+    ] == [100.1, 110.5, 120.25, 130.0, 140.4, 150.15]
+    assert [
+        item["nominal_capacity_kwh"] for item in result["candidates"]
+    ] == [0.0, 389.76] * 6
+    assert {
+        item["pv_inverter_capacity_kw_ac"] for item in result["candidates"]
+    } == {300.0}
 
 
 def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
@@ -362,6 +462,417 @@ def test_design_request_requires_exactly_one_candidate_source() -> None:
             scenarios=[{"scenario_id": "legacy"}],
             generation_request=_request(),
         )
+    with pytest.raises(ValidationError, match="only be saved with generated solutions"):
+        CiDesignCandidatesRequest(
+            scenarios=[{"scenario_id": "legacy"}],
+            stc_settings=_stc_settings(),
+        )
+
+
+def test_generation_route_records_design_before_saving_stc_in_one_transaction(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "solution-generator-stc.sqlite3")
+    profile_digest = "c" * 64
+    observed: dict[str, object] = {}
+
+    def device_state(_session, *, actor):
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": profile_digest,
+            "profile": _device_profile(),
+            "suggested_profile": _device_profile(),
+        }
+
+    def save_stc(session, *, project_id, actor, **settings):
+        project = session.get(CiProjectModel, project_id)
+        assert project is not None
+        assert project.design_candidate_count == 4
+        assert isinstance(project.design_candidates_json, list)
+        assert len(project.design_candidates_json) == 4
+        assert project.design_context_json["profile_selection"][
+            "device_profile_sha256"
+        ] == profile_digest
+        observed.update(settings)
+        observed["actor_id"] = actor.actor_id
+        return {"status": "approved"}
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    monkeypatch.setattr("api.ci_routes.save_ci_project_stc_settings", save_stc)
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Generated STC solution project"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        response = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={
+                "generation_request": _request(),
+                "stc_settings": _stc_settings(),
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        assert observed == {**_stc_settings(), "actor_id": "local-analyst"}
+        restored = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates"
+        ).json()
+        assert restored["status"] == "ready"
+        assert restored["design"]["candidate_count"] == 4
+
+
+def test_generation_route_atomically_binds_stc_to_the_new_design(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "solution-generator-stc-binding.sqlite3")
+    profile = _device_profile()
+    profile_digest = device_profile_sha256(profile)
+
+    def device_state(_session, *, actor):
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": profile_digest,
+            "profile": profile,
+            "suggested_profile": profile,
+        }
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    monkeypatch.setattr(
+        "solar_battery.ci_project_rebate_profile.ci_device_profile_state",
+        device_state,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_project_rebate_profile._site_address",
+        lambda _evidence: "10 Collins Street Melbourne VIC, 3000",
+    )
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Atomic STC binding project"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        settings = {**_stc_settings(), "battery_stc_enabled": True}
+        response = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={"generation_request": _request(), "stc_settings": settings},
+        )
+
+        assert response.status_code == 200, response.json()
+        state = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/rebate-profile"
+        )
+        assert state.status_code == 200, state.json()
+        assert state.json()["status"] == "approved"
+        assert state.json()["blockers"] == []
+
+    with session_factory() as session:
+        project = session.get(CiProjectModel, UUID(project_id))
+        assert project is not None
+        calculation = approved_ci_project_rebate_calculation_profile(
+            session,
+            project_id=UUID(project_id),
+            actor=local_actor(),
+        )
+        assert calculation is not None
+        assert calculation["design_candidates_sha256"] == canonical_sha256(
+            project.design_candidates_json
+        )
+        assert calculation["design_context_sha256"] == canonical_sha256(
+            project.design_context_json
+        )
+        assert calculation["device_profile_sha256"] == profile_digest
+        assert calculation["programs"]["solar_stc"][
+            "eligibility_confirmed"
+        ] is True
+        assert calculation["programs"]["battery_stc"][
+            "certified_usable_capacity_fraction"
+        ] == 0.9
+
+
+def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "custom-solution-stc-binding.sqlite3")
+    profile = suggested_ci_device_profile()
+    profile_digest = device_profile_sha256(profile)
+
+    def device_state(_session, *, actor):
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": profile_digest,
+            "profile": profile,
+            "suggested_profile": profile,
+        }
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    monkeypatch.setattr(
+        "solar_battery.ci_project_rebate_profile.ci_device_profile_state",
+        device_state,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_project_rebate_profile._site_address",
+        lambda _evidence: "10 Collins Street Melbourne VIC, 3000",
+    )
+    selection = profile["default_solution_profile_selection"]
+    assert isinstance(selection, dict)
+    generation_request = _request()
+    generation_request.update(
+        {
+            "pv_range": {
+                "minimum_kwp_dc": 60.0,
+                "maximum_kwp_dc": 61.0,
+                "step_kwp_dc": 1.0,
+            },
+            "battery_range": {
+                "minimum_kwh": 0.0,
+                "maximum_kwh": 0.0,
+                "step_kwh": 1.0,
+            },
+            "solar_profile_id": selection["solar_profile_id"],
+            "battery_profile_id": selection["battery_profile_id"],
+        }
+    )
+
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Custom STC binding project"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        generated = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={
+                "generation_request": generation_request,
+                "stc_settings": _stc_settings(),
+            },
+        )
+        assert generated.status_code == 200, generated.json()
+        generated_count = generated.json()["candidate_count"]
+        assert client.get(
+            f"/api/commercial-industrial/projects/{project_id}/rebate-profile"
+        ).json()["status"] == "approved"
+
+        custom = client.post(
+            f"/api/commercial-industrial/projects/{project_id}"
+            "/design-candidates/custom",
+            json={
+                "contract_version": "ci_custom_design_candidate_request_v1",
+                "label": "Client STC option",
+                "pv_capacity_kwp_dc": 80.0,
+                "battery_capacity_kwh": 0.0,
+                "inverter_capacity_kw_ac": 70.0,
+                "quoted_net_capex_aud_ex_gst": 45000.0,
+                "stc_settings": _stc_settings(),
+            },
+        )
+
+        assert custom.status_code == 200, custom.json()
+        assert custom.json()["candidate_count"] == generated_count + 1
+        assert custom.json()["generation_summary"] == generated.json()[
+            "generation_summary"
+        ]
+        rebate_state = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/rebate-profile"
+        )
+        assert rebate_state.status_code == 200, rebate_state.json()
+        assert rebate_state.json()["status"] == "approved"
+        assert rebate_state.json()["blockers"] == []
+        preview = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
+        )
+        assert preview.status_code == 200, preview.json()
+        assert preview.json()["status"] == "ready"
+        assert preview.json()["candidate_count"] == generated_count + 1
+        assert preview.json()["rebate_profile_sha256"] is not None
+        assert all(
+            item["upfront_rebate_aud_ex_gst"] > 0
+            for item in preview.json()["solutions"]
+        )
+
+    with session_factory() as session:
+        project = session.get(CiProjectModel, UUID(project_id))
+        assert project is not None
+        calculation = approved_ci_project_rebate_calculation_profile(
+            session,
+            project_id=UUID(project_id),
+            actor=local_actor(),
+        )
+        assert calculation is not None
+        assert calculation["design_candidates_sha256"] == canonical_sha256(
+            project.design_candidates_json
+        )
+
+
+def test_custom_route_rolls_back_candidate_when_atomic_stc_save_fails(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "custom-solution-stc-rollback.sqlite3")
+
+    def device_state(_session, *, actor):
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": "c" * 64,
+            "profile": _device_profile(),
+            "suggested_profile": _device_profile(),
+        }
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Custom STC rollback project"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        baseline = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={"generation_request": _request()},
+        )
+        assert baseline.status_code == 200, baseline.json()
+
+        def fail_stc(session, *, project_id, actor, **_settings):
+            project = session.get(CiProjectModel, project_id)
+            assert project is not None
+            assert project.design_candidate_count == baseline.json()[
+                "candidate_count"
+            ] + 1
+            raise CiProjectError(
+                "synthetic_stc_save_failed",
+                "Synthetic STC save failed.",
+            )
+
+        monkeypatch.setattr("api.ci_routes.save_ci_project_stc_settings", fail_stc)
+        failed = client.post(
+            f"/api/commercial-industrial/projects/{project_id}"
+            "/design-candidates/custom",
+            json={
+                "contract_version": "ci_custom_design_candidate_request_v1",
+                "label": "Rolled back option",
+                "pv_capacity_kwp_dc": 120.0,
+                "battery_capacity_kwh": 14.0,
+                "inverter_capacity_kw_ac": 110.0,
+                "quoted_net_capex_aud_ex_gst": 245000.0,
+                "stc_settings": _stc_settings(),
+            },
+        )
+
+        assert failed.status_code == 422
+        assert failed.json()["detail"]["code"] == "synthetic_stc_save_failed"
+        restored = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates"
+        ).json()["design"]
+        assert restored["candidate_count"] == baseline.json()["candidate_count"]
+        assert restored["candidates"] == baseline.json()["candidates"]
+        assert restored["design_context"] == baseline.json()["design_context"]
+
+
+def test_generation_route_rolls_back_design_when_atomic_stc_save_fails(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(tmp_path / "solution-generator-stc-rollback.sqlite3")
+
+    def device_state(_session, *, actor):
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": "c" * 64,
+            "profile": _device_profile(),
+            "suggested_profile": _device_profile(),
+        }
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Atomic STC rollback project"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        baseline = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={"generation_request": _request()},
+        )
+        assert baseline.status_code == 200, baseline.json()
+
+        def fail_stc(session, *, project_id, actor, **_settings):
+            project = session.get(CiProjectModel, project_id)
+            assert project is not None
+            assert project.design_candidate_count == 6
+            raise CiProjectError(
+                "synthetic_stc_save_failed",
+                "Synthetic STC save failed.",
+            )
+
+        monkeypatch.setattr("api.ci_routes.save_ci_project_stc_settings", fail_stc)
+        failed = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={
+                "generation_request": _request(maximum_pv=102.0),
+                "stc_settings": _stc_settings(),
+            },
+        )
+
+        assert failed.status_code == 422
+        assert failed.json()["detail"]["code"] == "synthetic_stc_save_failed"
+        restored = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates"
+        ).json()
+        assert restored["status"] == "ready"
+        assert restored["design"]["candidate_count"] == baseline.json()[
+            "candidate_count"
+        ]
+        assert restored["design"]["candidates"] == baseline.json()["candidates"]
+        assert restored["design"]["design_context"] == baseline.json()[
+            "design_context"
+        ]
 
 
 def test_generation_route_reads_profile_generates_and_persists_context(
@@ -422,6 +933,7 @@ def test_generation_route_reads_profile_generates_and_persists_context(
             saved = restored.json()["design"]
             assert saved["candidate_count"] == 4
             assert saved["design_context"] == result["design_context"]
+            assert saved["generation_summary"] == result["generation_summary"]
 
             custom_payload = {
                 "contract_version": "ci_custom_design_candidate_request_v1",
@@ -430,6 +942,10 @@ def test_generation_route_reads_profile_generates_and_persists_context(
                 "battery_capacity_kwh": 14,
                 "inverter_capacity_kw_ac": 106,
                 "quoted_net_capex_aud_ex_gst": 245000,
+                "stc_settings": {
+                    **_stc_settings(),
+                    "solar_stc_enabled": False,
+                },
             }
             custom = client.post(
                 f"/api/commercial-industrial/projects/{project_id}"

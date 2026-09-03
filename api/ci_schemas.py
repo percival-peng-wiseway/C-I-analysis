@@ -158,6 +158,7 @@ class CiDesignCandidatesRequest(BaseModel):
     )
     generation_request: CiSolutionGenerationRequest | None = None
     design_context: dict[str, object] | None = None
+    stc_settings: CiProjectStcSettingsSaveRequest | None = None
 
     @model_validator(mode="after")
     def exactly_one_candidate_source(self):
@@ -169,16 +170,23 @@ class CiDesignCandidatesRequest(BaseModel):
             raise ValueError(
                 "Generated solutions derive their design context in Python."
             )
+        if self.stc_settings is not None and self.generation_request is None:
+            raise ValueError(
+                "STC settings can only be saved with generated solutions."
+            )
         return self
 
 
 class CiCustomDesignCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     contract_version: Literal["ci_custom_design_candidate_request_v1"]
     label: str = Field(min_length=1, max_length=80)
     pv_capacity_kwp_dc: float = Field(gt=0, le=1_000_000)
     battery_capacity_kwh: float = Field(ge=0, le=1_000_000)
     inverter_capacity_kw_ac: float = Field(gt=0, le=1_000_000)
     quoted_net_capex_aud_ex_gst: float = Field(gt=0, le=1_000_000_000_000)
+    stc_settings: CiProjectStcSettingsSaveRequest
 
 
 class CiIntervalActivityRequest(BaseModel):

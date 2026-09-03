@@ -57,9 +57,22 @@ describe("C&I project API", () => {
       generation_summary: { requested_count: 1, deduplicated_count: 0, rejected_count: 0, generated_candidate_count: 1, rejection_reasons: [] },
     }), { status: 200 }));
 
-    await expect(generateCiDesignCandidates("project-1", generationRequest, fetcher)).resolves.toMatchObject({ candidate_count: 1 });
+    await expect(generateCiDesignCandidates("project-1", generationRequest, {
+      solarStcEnabled: true,
+      solarStcPriceAudExGst: 39,
+      batteryStcEnabled: false,
+      batteryStcPriceAudExGst: 39,
+    }, fetcher)).resolves.toMatchObject({ candidate_count: 1 });
     const body = JSON.parse(fetcher.mock.calls[0][1].body);
-    expect(body).toEqual({ generation_request: generationRequest });
+    expect(body).toEqual({
+      generation_request: generationRequest,
+      stc_settings: {
+        solar_stc_enabled: true,
+        solar_stc_price_aud_ex_gst: 39,
+        battery_stc_enabled: false,
+        battery_stc_price_aud_ex_gst: 39,
+      },
+    });
     expect(body).not.toHaveProperty("scenarios");
   });
 
@@ -75,18 +88,28 @@ describe("C&I project API", () => {
       normalization: { requested_pv_capacity_kwp_dc: 120, actual_pv_capacity_kwp_dc: 120.6, requested_battery_capacity_kwh: 200, actual_battery_capacity_kwh: 200, requested_inverter_capacity_kw_ac: 110, actual_inverter_capacity_kw_ac: 110 },
     }), { status: 200 }));
     const request = { contract_version: "ci_custom_design_candidate_request_v1" as const, label: "Client option A", pv_capacity_kwp_dc: 120, battery_capacity_kwh: 200, inverter_capacity_kw_ac: 110, quoted_net_capex_aud_ex_gst: 245000 };
+    const stcSettings = { solarStcEnabled: true, solarStcPriceAudExGst: 39, batteryStcEnabled: false, batteryStcPriceAudExGst: 39 };
 
-    await expect(addCiCustomDesignCandidate("project-1", request, fetcher)).resolves.toMatchObject({ added_scenario_id: "custom-1", quoted_net_capex_aud_ex_gst: 245000 });
+    await expect(addCiCustomDesignCandidate("project-1", request, stcSettings, fetcher)).resolves.toMatchObject({ added_scenario_id: "custom-1", quoted_net_capex_aud_ex_gst: 245000 });
     expect(fetcher.mock.calls[0][0]).toBe("/api/commercial-industrial/projects/project-1/design-candidates/custom");
-    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual(request);
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+      ...request,
+      stc_settings: {
+        solar_stc_enabled: true,
+        solar_stc_price_aud_ex_gst: 39,
+        battery_stc_enabled: false,
+        battery_stc_price_aud_ex_gst: 39,
+      },
+    });
   });
 
   it("surfaces string and validation-list API errors instead of the generic fallback", async () => {
     const request = { contract_version: "ci_custom_design_candidate_request_v1" as const, label: "Client option A", pv_capacity_kwp_dc: 120, battery_capacity_kwh: 200, inverter_capacity_kw_ac: 110, quoted_net_capex_aud_ex_gst: 245000 };
+    const stcSettings = { solarStcEnabled: false, solarStcPriceAudExGst: 39, batteryStcEnabled: false, batteryStcPriceAudExGst: 39 };
     const stringError = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Custom route unavailable." }), { status: 405 }));
-    await expect(addCiCustomDesignCandidate("project-1", request, stringError)).rejects.toThrow("Custom route unavailable.");
+    await expect(addCiCustomDesignCandidate("project-1", request, stcSettings, stringError)).rejects.toThrow("Custom route unavailable.");
     const validationError = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: [{ msg: "PCS exceeds the allowed limit." }] }), { status: 422 }));
-    await expect(addCiCustomDesignCandidate("project-1", request, validationError)).rejects.toThrow("PCS exceeds the allowed limit.");
+    await expect(addCiCustomDesignCandidate("project-1", request, stcSettings, validationError)).rejects.toThrow("PCS exceeds the allowed limit.");
   });
 
   it("loads a saved design and represents a project with no design as null", async () => {
@@ -104,6 +127,16 @@ describe("C&I project API", () => {
 
     const emptyFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ contract_version: "ci_saved_design_state_v1", status: "not_saved", design: null }), { status: 200 }));
     await expect(fetchCiSavedDesign("project-1", emptyFetch)).resolves.toBeNull();
+
+    const unsafeSummaryFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      contract_version: "ci_saved_design_state_v1",
+      status: "ready",
+      design: {
+        ...design,
+        generation_summary: { requested_count: 1, generated_candidate_count: 1, deduplicated_count: 0, rejected_count: 0, rejection_reasons: [{ code: "invalid", count: 0.5 }] },
+      },
+    }), { status: 200 }));
+    await expect(fetchCiSavedDesign("project-1", unsafeSummaryFetch)).rejects.toThrow("Design validation returned an unsafe contract.");
   });
 });
 

@@ -103,6 +103,7 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
         _effective_derating,
         _inverter_performance,
         _profile_id,
+        _range_values,
         _site_factors,
         _solar_performance,
         _validated_range,
@@ -121,6 +122,13 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
         )
         battery_range = _validated_range(
             search_space.get("battery_range"), allow_zero=True
+        )
+        generation_summary = _validate_generation_summary(
+            value.get("generation_summary"),
+            expected_requested_count=(
+                len(_range_values(pv_range, allow_zero=False))
+                * len(_range_values(battery_range, allow_zero=True))
+            ),
         )
         site = _site_factors(value.get("site_factors"))
         selection = value.get("profile_selection")
@@ -230,6 +238,11 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             "pv_range": pv_range,
             "battery_range": battery_range,
         },
+        **(
+            {"generation_summary": generation_summary}
+            if generation_summary is not None
+            else {}
+        ),
         "site_factors": site,
         "profile_selection": {
             "solar_profile_id": solar_id,
@@ -247,6 +260,79 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             ),
         },
         "technical_options": options,
+    }
+
+
+def _validate_generation_summary(
+    value: object,
+    *,
+    expected_requested_count: int,
+) -> dict[str, object] | None:
+    # Older saved v2 contexts predate persisted generation statistics.
+    if value is None:
+        return None
+    expected_keys = {
+        "requested_count",
+        "deduplicated_count",
+        "rejected_count",
+        "generated_candidate_count",
+        "rejection_reasons",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError
+
+    def count(key: str, *, maximum: int) -> int:
+        result = value.get(key)
+        if isinstance(result, bool) or not isinstance(result, int):
+            raise ValueError
+        if not 0 <= result <= maximum:
+            raise ValueError
+        return result
+
+    requested = count("requested_count", maximum=100_000)
+    deduplicated = count("deduplicated_count", maximum=requested)
+    rejected = count("rejected_count", maximum=requested)
+    generated = count("generated_candidate_count", maximum=200)
+    feasible = requested - deduplicated - rejected
+    if (
+        requested != expected_requested_count
+        or requested < 1
+        or feasible < 1
+        or generated < feasible
+        or generated > feasible * 2
+    ):
+        raise ValueError
+
+    raw_reasons = value.get("rejection_reasons")
+    if not isinstance(raw_reasons, list):
+        raise ValueError
+    reasons: list[dict[str, object]] = []
+    seen_codes: set[str] = set()
+    for item in raw_reasons:
+        if not isinstance(item, dict) or set(item) != {"code", "count"}:
+            raise ValueError
+        code = item.get("code")
+        reason_count = item.get("count")
+        if (
+            not isinstance(code, str)
+            or not code.strip()
+            or len(code) > 120
+            or code in seen_codes
+            or isinstance(reason_count, bool)
+            or not isinstance(reason_count, int)
+            or reason_count < 1
+        ):
+            raise ValueError
+        seen_codes.add(code)
+        reasons.append({"code": code, "count": reason_count})
+    if sum(int(item["count"]) for item in reasons) != rejected:
+        raise ValueError
+    return {
+        "requested_count": requested,
+        "deduplicated_count": deduplicated,
+        "rejected_count": rejected,
+        "generated_candidate_count": generated,
+        "rejection_reasons": reasons,
     }
 
 
