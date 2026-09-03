@@ -100,6 +100,7 @@ def generate_ci_solutions(
     )
     scenarios_by_id: dict[str, dict[str, object]] = {}
     rejected_unique = 0
+    minimum_inverter_required: float | None = None
     for pv_actual, battery_units in sorted(snapped_pairs):
         battery_capacity = _clean_number(
             battery_units
@@ -112,6 +113,11 @@ def generate_ci_solutions(
         inverter_required = max(
             pv_actual / solar_performance["default_dc_ac_ratio"],
             battery_power,
+        )
+        minimum_inverter_required = (
+            inverter_required
+            if minimum_inverter_required is None
+            else min(minimum_inverter_required, inverter_required)
         )
         configured_quantity = connection["inverter_quantity"]
         inverter_capacity = (
@@ -173,6 +179,45 @@ def generate_ci_solutions(
     candidates = sorted(
         scenarios_by_id.values(), key=lambda item: str(item["scenario_id"])
     )
+    configured_quantity = connection["inverter_quantity"]
+    if not candidates and configured_quantity is not None:
+        configured_capacity = _clean_number(
+            int(configured_quantity) * connection["inverter_block_size_kw"]
+        )
+        if configured_capacity > connection["site_ac_headroom_kw"] + 1e-9:
+            raise _invalid(
+                f"The fixed {int(configured_quantity)}-inverter configuration provides "
+                f"{configured_capacity:g} kW AC, above the "
+                f"{connection['site_ac_headroom_kw']:g} kW AC site headroom. "
+                "Reduce inverter quantity or increase the evidenced site headroom."
+            )
+        if (
+            minimum_inverter_required is not None
+            and configured_capacity + 1e-9 < minimum_inverter_required
+        ):
+            required_quantity = _ceil_ratio(
+                minimum_inverter_required,
+                connection["inverter_block_size_kw"],
+            )
+            required_capacity = _clean_number(
+                required_quantity * connection["inverter_block_size_kw"]
+            )
+            if required_capacity > connection["site_ac_headroom_kw"] + 1e-9:
+                raise _invalid(
+                    f"The fixed {int(configured_quantity)}-inverter configuration provides "
+                    f"{configured_capacity:g} kW AC, but the smallest requested solution "
+                    f"requires {minimum_inverter_required:g} kW AC. The next valid block is "
+                    f"{required_quantity} inverters ({required_capacity:g} kW AC), above the "
+                    f"{connection['site_ac_headroom_kw']:g} kW AC site headroom. Reduce the "
+                    "PV/battery range, select a smaller inverter block, or increase the "
+                    "evidenced site headroom."
+                )
+            raise _invalid(
+                f"The fixed {int(configured_quantity)}-inverter configuration provides "
+                f"{configured_capacity:g} kW AC, but the smallest requested solution "
+                f"requires {minimum_inverter_required:g} kW AC. Use at least "
+                f"{required_quantity} inverters or reduce the PV/battery range."
+            )
     if not 1 <= len(candidates) <= 200:
         raise CiProjectError(
             "ci_solution_generation_invalid",

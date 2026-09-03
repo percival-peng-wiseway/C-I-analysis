@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, CircleAlert, Save } from "lucide-react";
+import { Check, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -68,10 +68,7 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
     <section aria-labelledby="rebate-profile-title">
       <div className="mb-3 flex gap-3">
         <span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">03</span>
-        <div>
-          <h2 className="font-semibold text-slate-950" id="rebate-profile-title" tabIndex={-1}>Rebates &amp; certificates</h2>
-          <p className="mt-0.5 max-w-4xl text-xs leading-5 text-slate-500">Choose whether Solar STCs and Battery STCs are included, then enter the ex-GST price received per certificate.</p>
-        </div>
+        <h2 className="font-semibold text-slate-950" id="rebate-profile-title" tabIndex={-1}>Rebates &amp; certificates</h2>
       </div>
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
         <header className="flex justify-end border-b border-slate-200 px-5 py-3 sm:px-6">
@@ -94,11 +91,6 @@ export function CiRebateProfilePanel({ projectId }: { projectId: string }) {
             onPrice={(batteryStcPriceAudExGst) => update({ batteryStcPriceAudExGst })}
             price={draft.batteryStcPriceAudExGst}
           />
-        </div>
-
-        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-5 text-amber-950">
-          <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <p>Saving applies these settings to pricing immediately. Python calculates the certificate quantity and deducts it from Gross CAPEX only when the solution satisfies the active STC rules; an ineligible solution remains at $0 rebate.</p>
         </div>
 
         {state.data.blockers.length && !isDirty ? <BlockerList blockers={state.data.blockers} /> : null}

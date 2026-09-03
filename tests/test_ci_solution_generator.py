@@ -206,6 +206,59 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     assert validate_ci_design_context(result["design_context"]) == result["design_context"]
 
 
+def test_python_generator_explains_an_undersized_fixed_inverter_count() -> None:
+    request = _request(maximum_pv=200.0, headroom=500.0)
+    request["pv_range"] = {
+        "minimum_kwp_dc": 200.0,
+        "maximum_kwp_dc": 200.0,
+        "step_kwp_dc": 1.0,
+    }
+    request["battery_range"] = {
+        "minimum_kwh": 0.0,
+        "maximum_kwh": 0.0,
+        "step_kwh": 1.0,
+    }
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        {"inverter_block_size_kw": 125.0, "inverter_quantity": 1}
+    )
+
+    with pytest.raises(CiProjectError, match=r"provides 125 kW AC.*Use at least 2"):
+        generate_ci_solutions(
+            request,
+            device_profile=_device_profile(),
+            device_profile_sha256="e" * 64,
+        )
+
+
+def test_python_generator_explains_when_the_next_inverter_block_exceeds_headroom() -> None:
+    request = _request(maximum_pv=200.0, headroom=200.0)
+    request["pv_range"] = {
+        "minimum_kwp_dc": 200.0,
+        "maximum_kwp_dc": 200.0,
+        "step_kwp_dc": 1.0,
+    }
+    request["battery_range"] = {
+        "minimum_kwh": 0.0,
+        "maximum_kwh": 0.0,
+        "step_kwh": 1.0,
+    }
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        {"inverter_block_size_kw": 125.0, "inverter_quantity": 1}
+    )
+
+    with pytest.raises(
+        CiProjectError,
+        match=r"next valid block is 2 inverters \(250 kW AC\), above the 200 kW AC",
+    ):
+        generate_ci_solutions(
+            request,
+            device_profile=_device_profile(),
+            device_profile_sha256="f" * 64,
+        )
+
+
 def test_python_generator_rejects_connection_overflow_without_clamping() -> None:
     request = _request(maximum_pv=100.0, headroom=50.0)
     request["pv_range"]["minimum_kwp_dc"] = 10.0

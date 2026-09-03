@@ -5,7 +5,6 @@ import {
   ExternalLink,
   MapPin,
   Play,
-  Settings2,
   SunMedium,
 } from "lucide-react";
 
@@ -211,9 +210,6 @@ export function CiScenarioBuilder({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Build the solution search space</h2>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">
-            Existing onsite PV and batteries are excluded in this version. Python snaps requested sizes to the selected equipment profiles and generates the auditable candidates.
-          </p>
         </div>
         <span className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium tabular-nums text-slate-700">{status}</span>
       </div>
@@ -225,18 +221,13 @@ export function CiScenarioBuilder({
           if (request && candidateUpperBound <= 200) onSubmit(request);
         }}
       >
-        <WorkflowSection
-          description="Location establishes the solar-resource context. The address is evidence only; the authored yield and losses below drive this screening run."
-          step="01"
-          title="Location & solar resource"
-        >
+        <WorkflowSection step="01" title="Location & solar resource">
           <div className="grid gap-4 xl:grid-cols-[minmax(260px,.8fr)_minmax(0,2.2fr)]">
             <LocationCard address={siteAddress} />
             <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h4 className="font-semibold text-slate-950">Site performance factors</h4>
-                  <p className="mt-1 text-xs leading-5 text-slate-500">Specific yield is gross, before the listed site losses. This prevents imported net-yield data from being derated twice.</p>
                 </div>
                 <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">Source required</span>
               </div>
@@ -275,11 +266,7 @@ export function CiScenarioBuilder({
           </div>
         </WorkflowSection>
 
-        <WorkflowSection
-          description="Choose the published Solar, Battery and Inverter profiles, set the search ranges and connection assumptions, then save the configuration to generate calculation-ready solutions."
-          step="02"
-          title="Solar, battery & inverter profiles"
-        >
+        <WorkflowSection step="02" title="Solar, battery & inverter profiles">
           <div className="grid gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
@@ -293,37 +280,30 @@ export function CiScenarioBuilder({
           </div>
           {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Publish at least one Solar profile, one AC-coupled Battery profile and one Inverter profile in Settings before generating solutions. DC-coupled battery profiles can remain in the library, but the current Python dispatch engine does not model them.</p>
-          ) : (
-            <p className="mt-3 text-xs leading-5 text-slate-500">Add, edit, publish or retire reusable profiles in Settings. The saved project keeps the exact selected profile snapshot so later library edits cannot silently change this design.</p>
-          )}
+          ) : null}
           <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
             <div className="flex items-center gap-3">
               <span className="grid size-9 place-items-center rounded-lg bg-white text-cyan-800 shadow-sm"><Cpu className="size-4" /></span>
               <div>
                 <h4 className="font-semibold text-slate-950">Python auto-sizing</h4>
-                <p className="text-xs leading-5 text-slate-500">Each PCS is rounded to the block size. Combinations above site headroom are rejected and reported, never silently clipped.</p>
               </div>
             </div>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <OptionGroup title="Connection capacity">
                 <ReadOnlyFact label="PCS block from selected inverter" value={inverterProfile ? `${formatNumber(inverterProfile.rated_active_power_kw)} kW AC` : "Select an inverter profile"} />
                 <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
-                <p className="col-span-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Replace the screening headroom with switchboard, export-limit or network evidence before relying on feasibility results.</p>
                 <CheckField checked={connection.reactive_support_enabled} label="Model inverter reactive support" onChange={(reactive_support_enabled) => setConnection({ ...connection, reactive_support_enabled })} />
                 {connection.reactive_support_enabled ? <NumberField label="Reactive support cap (kvar)" onChange={(reactive_support_max_kvar) => setConnection({ ...connection, reactive_support_max_kvar })} value={connection.reactive_support_max_kvar} /> : null}
               </OptionGroup>
               <OptionGroup title="Battery & environmental assumptions">
                 <CheckField checked={connection.allow_grid_charging} label="Allow grid charging" onChange={(allow_grid_charging) => setConnection({ ...connection, allow_grid_charging })} />
                 <NumberField allowBlank label="Grid emissions factor (kg CO2-e/kWh)" onChange={(grid_emissions_factor_kg_co2e_per_kwh) => setConnection({ ...connection, grid_emissions_factor_kg_co2e_per_kwh })} value={connection.grid_emissions_factor_kg_co2e_per_kwh} />
-                <p className="col-span-full text-xs leading-5 text-slate-500">Blank disables the operational emissions estimate. Use an approved region and reporting-year factor when required.</p>
-                <p className="col-span-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600"><strong className="text-slate-800">Initial SOC:</strong> full-SOC physical upper-bound. It is a stress case, not expected savings or a recommendation.</p>
               </OptionGroup>
             </div>
           </section>
         </WorkflowSection>
 
-        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 pt-5">
-          <div className="flex items-center gap-2 text-xs text-slate-500"><Settings2 className="size-4" />Profile performance and pricing remain separate assumptions.</div>
+        <div className="flex flex-wrap items-center justify-end gap-4 border-t border-slate-200 pt-5">
           <div className="flex flex-wrap items-center justify-end gap-3">
             {error ? <p className="max-w-xl text-sm text-destructive">{error}</p> : null}
             {candidateUpperBound > 200 ? <p className="max-w-xl text-sm text-amber-800">Reduce the PV or battery range. Battery cases can add matched PV-only comparators, so this request could create up to {candidateUpperBound} canonical candidates; the saved limit is 200.</p> : null}
@@ -345,7 +325,6 @@ function LocationCard({ address }: { address?: string | null }) {
       <span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><MapPin className="size-5" /></span>
       <p className="mt-4 text-xs font-semibold uppercase tracking-[.12em] text-cyan-800">Detected bill address</p>
       <strong className="mt-2 block text-sm leading-6 text-slate-950">{address ?? "No site address detected"}</strong>
-      <p className="mt-2 text-xs leading-5 text-slate-600">{address ? "Read from the saved bill evidence. Confirm it before importing any location dataset." : "Return to Evidence or use an analyst-labelled resource assumption."}</p>
       {mapsHref ? <a className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-800 hover:text-cyan-950" href={mapsHref} rel="noreferrer" target="_blank">Directions in Google Maps <ExternalLink className="size-3.5" /></a> : null}
     </section>
   );
@@ -372,7 +351,6 @@ function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, r
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
-      <p className="text-[11px] leading-4 text-slate-500">Actual capacity is rounded up to whole {profile ? `${formatNumber(profile.rated_power_w)} W` : "module"} increments.</p>
     </ProfileCard>
   );
 }
@@ -398,7 +376,6 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
         </dl>
       ) : <MissingProfile />}
       <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
-      <p className="text-[11px] leading-4 text-slate-500">Actual capacity is rounded to whole units and a matched PV-only comparator is added automatically.</p>
     </ProfileCard>
   );
 }
@@ -426,7 +403,6 @@ function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profi
           <ProfileFact label="Source" value={profile.source_label} />
         </dl>
       ) : <MissingProfile />}
-      <p className="text-[11px] leading-4 text-slate-500">The selected rated active power becomes the Python PCS sizing block; apparent and reactive limits are saved with the project design.</p>
     </ProfileCard>
   );
 }
@@ -434,7 +410,7 @@ function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profi
 function ProfileCard({ children, icon: Icon, title }: { children: ReactNode; icon: typeof SunMedium; title: string }) {
   return (
     <section aria-label={`${title} profile`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-      <div className="mb-4 flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><Icon className="size-5" /></span><div><h4 className="font-semibold text-slate-950">{title}</h4><p className="text-xs text-slate-500">Reusable workspace performance profile</p></div></div>
+      <div className="mb-4 flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><Icon className="size-5" /></span><h4 className="font-semibold text-slate-950">{title}</h4></div>
       <div className="space-y-3">{children}</div>
     </section>
   );
@@ -453,8 +429,8 @@ function RangeFields({ label, onChange, range, unit }: { label: string; onChange
   );
 }
 
-function WorkflowSection({ children, description, step, title }: { children: ReactNode; description?: string; step: string; title: string }) {
-  return <section><div className="mb-3 flex gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">{step}</span><div><h3 className="font-semibold text-slate-950">{title}</h3>{description ? <p className="mt-0.5 max-w-4xl text-xs leading-5 text-slate-500">{description}</p> : null}</div></div>{children}</section>;
+function WorkflowSection({ children, step, title }: { children: ReactNode; step: string; title: string }) {
+  return <section><div className="mb-3 flex gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">{step}</span><h3 className="font-semibold text-slate-950">{title}</h3></div>{children}</section>;
 }
 
 function OptionGroup({ children, title }: { children: ReactNode; title: string }) {
