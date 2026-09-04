@@ -29,6 +29,8 @@ CI_PROJECT_TARIFF_PROFILE_STATE_CONTRACT_VERSION = (
 )
 _ANNUAL_INTERVAL_DAYS = 365
 _ANNUAL_ESTIMATE_METHOD = "bill_derived_interval_scaled_v1"
+_LLVT2_TARIFF_CODE = "LLVT2"
+_LLVT2_INCENTIVE_DEMAND_MONTHS = [12, 1, 2, 3]
 
 _RATE_KEYS = {
     "retail_peak_c_per_kwh",
@@ -413,11 +415,13 @@ def _suggested_profile(
     network_rate = float(categories["network_charges"]) / consumption * 100
     regulated_rate = float(categories["regulated_charges"]) / consumption * 100
     environmental_rate = float(categories["environmental_charges"]) / consumption * 100
+    normalized_tariff_code = tariff_code.strip()
+    demand_windows = _suggested_demand_windows(normalized_tariff_code)
     return validate_ci_project_tariff_profile(
         {
             "contract_version": CI_PROJECT_TARIFF_PROFILE_CONTRACT_VERSION,
-            "display_label": f"{tariff_code.strip()} · bill-derived working copy",
-            "network_tariff_code": tariff_code.strip(),
+            "display_label": f"{normalized_tariff_code} · bill-derived working copy",
+            "network_tariff_code": normalized_tariff_code,
             "additional_bill_adjustment_aud": float(
                 categories["additional_charges"]
             ),
@@ -440,8 +444,7 @@ def _suggested_profile(
             "windows": {
                 "retail_energy": {"start": "07:00", "end": "22:00"},
                 "network_energy": {"start": "07:00", "end": "22:00"},
-                "rolling_demand": {"start": "07:00", "end": "22:00"},
-                "incentive_demand": {"start": "07:00", "end": "22:00"},
+                **demand_windows,
             },
             "minimum_chargeable_rolling_kva": 0.0,
         }
@@ -468,6 +471,8 @@ def _calculation_profile(
     if annual_period is None:
         raise _annual_interval_error()
     analysis_start, analysis_end = annual_period
+    rolling_end = date.fromisoformat(billing_end)
+    rolling_start = rolling_end - timedelta(days=_ANNUAL_INTERVAL_DAYS - 1)
     rates = editable["rates"]
     factors = editable["factors"]
     windows = editable["windows"]
@@ -487,7 +492,10 @@ def _calculation_profile(
             "additional_bill_adjustment_aud", 0.0
         ),
         "billing_period": {"start_date": billing_start, "end_date": billing_end},
-        "rolling_period": {"start_date": analysis_start, "end_date": analysis_end},
+        "rolling_period": {
+            "start_date": rolling_start.isoformat(),
+            "end_date": rolling_end.isoformat(),
+        },
         "analysis_period": {"start_date": analysis_start, "end_date": analysis_end},
         "minimum_chargeable_rolling_kva": editable["minimum_chargeable_rolling_kva"],
         "factors": dict(factors),
@@ -513,7 +521,9 @@ def _calculation_profile(
         },
         "annual_financial_model": {
             "method": "representative_year_repeat_v1",
-            "incentive_demand_months": list(range(1, 13)),
+            "incentive_demand_months": _incentive_demand_months(
+                editable["network_tariff_code"]
+            ),
             "incentive_demand_aud_per_kva_month": rates[
                 "incentive_demand_aud_per_kva_month"
             ],
@@ -534,6 +544,27 @@ def _calculation_profile(
             "excluded_dates": [],
         }
     return profile
+
+
+def _suggested_demand_windows(tariff_code: str) -> dict[str, dict[str, str]]:
+    if tariff_code.strip().upper() == _LLVT2_TARIFF_CODE:
+        return {
+            "rolling_demand": {"start": "07:00", "end": "19:00"},
+            "incentive_demand": {"start": "16:00", "end": "19:00"},
+        }
+    return {
+        "rolling_demand": {"start": "07:00", "end": "22:00"},
+        "incentive_demand": {"start": "07:00", "end": "22:00"},
+    }
+
+
+def _incentive_demand_months(tariff_code: object) -> list[int]:
+    if (
+        isinstance(tariff_code, str)
+        and tariff_code.strip().upper() == _LLVT2_TARIFF_CODE
+    ):
+        return list(_LLVT2_INCENTIVE_DEMAND_MONTHS)
+    return list(range(1, 13))
 
 
 def _require_approvable_evidence(evidence: CiProjectEvidenceModel) -> None:
@@ -702,11 +733,13 @@ def _annual_meter_date_period(
         bill_end = date.fromisoformat(str(bill["billing_period_end"]))
     except (KeyError, TypeError, ValueError):
         return None
+    bill_rolling_start = bill_end - timedelta(days=_ANNUAL_INTERVAL_DAYS - 1)
     if (
         annual_end - annual_start
         != timedelta(days=_ANNUAL_INTERVAL_DAYS - 1)
         or not nem12_start <= annual_start <= annual_end <= nem12_end
         or not annual_start <= bill_start <= bill_end <= annual_end
+        or not nem12_start <= bill_rolling_start <= bill_end <= nem12_end
     ):
         return None
     return annual_start.isoformat(), annual_end.isoformat()

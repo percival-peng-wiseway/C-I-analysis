@@ -8,6 +8,7 @@ import pytest
 from solar_battery.ci_tariff_analysis import (
     CiTariffAnalysisError,
     analyze_ci_nem12,
+    bind_ci_tariff_profile_to_nem12,
     load_ci_tariff_profile,
     validated_ci_nem12_evidence,
 )
@@ -184,6 +185,42 @@ def test_ci_analysis_accepts_one_cent_invoice_gst_rounding_difference() -> None:
     checks = {item["code"]: item for item in result["bill_reconciliation"]["checks"]}
     assert checks["gst_aud"]["passed"] is True
     assert checks["total_inc_gst_aud"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("meter_day", "expected_quantity", "expected_charge"),
+    [
+        ("20260105", 15.0, 150.0),
+        ("20260406", 0.0, 0.0),
+    ],
+)
+def test_bill_period_incentive_demand_respects_approved_months(
+    meter_day: str,
+    expected_quantity: float,
+    expected_charge: float,
+) -> None:
+    nem12 = _nem12_bytes_for_dates([meter_day])
+    profile = _profile(nem12)
+    iso_day = f"{meter_day[:4]}-{meter_day[4:6]}-{meter_day[6:]}"
+    profile["billing_period"] = {"start_date": iso_day, "end_date": iso_day}
+    profile["rolling_period"] = {"start_date": iso_day, "end_date": iso_day}
+    profile["rates"]["incentive_demand_aud_per_kva_month"] = 10.0
+    profile["annual_financial_model"] = {
+        "method": "representative_year_repeat_v1",
+        "incentive_demand_months": [12, 1, 2, 3],
+        "incentive_demand_aud_per_kva_month": 10.0,
+    }
+
+    bound = bind_ci_tariff_profile_to_nem12(nem12, profile=profile)
+    result = analyze_ci_nem12(nem12, profile=bound)
+
+    assert bound["expected_reconciliation"][
+        "incentive_demand_kva"
+    ] == expected_quantity
+    assert bound["expected_reconciliation"][
+        "category_network_charges_aud"
+    ] == expected_charge
+    assert result["demand_evidence"]["incentive_demand_kva"] == expected_quantity
 
 
 def test_bill_period_reconciliation_includes_a_signed_one_time_adjustment() -> None:

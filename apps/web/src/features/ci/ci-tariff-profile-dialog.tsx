@@ -14,8 +14,8 @@ type WindowKey = keyof CiProjectTariffProfile["windows"];
 const rateFields: Array<{ key: RateKey; label: string; unit: string }> = [
   { key: "retail_peak_c_per_kwh", label: "Retail peak", unit: "c/kWh" },
   { key: "retail_off_peak_c_per_kwh", label: "Retail off-peak", unit: "c/kWh" },
-  { key: "incentive_demand_aud_per_kva_month", label: "Incentive demand", unit: "AUD/kVA/month" },
   { key: "rolling_demand_aud_per_kva_month", label: "Rolling demand", unit: "AUD/kVA/month" },
+  { key: "incentive_demand_aud_per_kva_month", label: "Incentive demand", unit: "AUD/kVA/month" },
   { key: "network_peak_c_per_kwh", label: "Network peak", unit: "c/kWh" },
   { key: "network_off_peak_c_per_kwh", label: "Network off-peak", unit: "c/kWh" },
   { key: "aemo_ancillary_c_per_kwh", label: "AEMO ancillary", unit: "c/kWh" },

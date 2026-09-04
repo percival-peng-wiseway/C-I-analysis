@@ -166,7 +166,9 @@ def analyze_ci_nem12(
             "rolling_demand_kva": _round(rolling_peak["kva"], 3),
             "chargeable_rolling_demand_kva": _round(chargeable_rolling_kva, 3),
             "rolling_demand_timestamp": rolling_peak["local_end"].isoformat(),
-            "incentive_demand_kva": _round(incentive_peak["kva"], 3),
+            "incentive_demand_kva": _round(
+                quantities["incentive_demand_kva"], 3
+            ),
             "incentive_demand_timestamp": incentive_peak["local_end"].isoformat(),
             "billing_period_max_kva": _round(bill_peak["kva"], 3),
             "billing_period_max_kw": _round(bill_peak["kw"], 3),
@@ -265,16 +267,30 @@ def _ci_tariff_metered_facts(
     rolling_candidates = _demand_in_window(
         demand_intervals, required_dates, profile["rolling_demand_window"]
     )
-    incentive_candidates = _demand_in_window(
+    reported_incentive_candidates = _demand_in_window(
         demand_intervals, bill_dates, profile["incentive_demand_window"]
+    )
+    incentive_dates = [
+        day for day in bill_dates if day.month in _incentive_demand_months(profile)
+    ]
+    incentive_candidates = _demand_in_window(
+        demand_intervals, incentive_dates, profile["incentive_demand_window"]
     )
     bill_candidates = [
         row for row in demand_intervals if bill_start <= row["meter_date"] <= bill_end
     ]
-    if not rolling_candidates or not incentive_candidates or not bill_candidates:
+    if (
+        not rolling_candidates
+        or not reported_incentive_candidates
+        or not bill_candidates
+        or (incentive_dates and not incentive_candidates)
+    ):
         raise CiTariffAnalysisError("coverage_incomplete")
     rolling_peak = max(rolling_candidates, key=lambda row: row["kva"])
-    incentive_peak = max(incentive_candidates, key=lambda row: row["kva"])
+    incentive_peak = max(
+        incentive_candidates or reported_incentive_candidates,
+        key=lambda row: row["kva"],
+    )
     bill_peak = max(bill_candidates, key=lambda row: row["kva"])
     quantities = {
         "import_kwh": import_kwh,
@@ -286,7 +302,9 @@ def _ci_tariff_metered_facts(
         "rolling_demand_kva": max(
             rolling_peak["kva"], float(profile["minimum_chargeable_rolling_kva"])
         ),
-        "incentive_demand_kva": incentive_peak["kva"],
+        "incentive_demand_kva": (
+            incentive_peak["kva"] if incentive_candidates else 0.0
+        ),
         "billing_period_max_kva": bill_peak["kva"],
         "billing_period_max_power_factor": bill_peak["power_factor"],
     }
@@ -859,6 +877,16 @@ def _date_range(start: date, end: date) -> list[date]:
     if end < start:
         raise CiTariffAnalysisError("profile_invalid")
     return [start + timedelta(days=index) for index in range((end - start).days + 1)]
+
+
+def _incentive_demand_months(profile: dict[str, Any]) -> set[int]:
+    annual_model = profile.get("annual_financial_model")
+    if not isinstance(annual_model, dict):
+        return set(range(1, 13))
+    months = annual_model.get("incentive_demand_months")
+    if not isinstance(months, list):
+        raise CiTariffAnalysisError("profile_invalid")
+    return set(months)
 
 
 def _money(value: Decimal) -> Decimal:

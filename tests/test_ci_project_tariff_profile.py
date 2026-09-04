@@ -94,6 +94,43 @@ def _annual_nem12_bytes() -> bytes:
     return _nem12_bytes_for_dates(_annual_meter_dates())
 
 
+def _nem12_bytes_with_future_peak(
+    *,
+    start: date,
+    end: date,
+    future_peak_day: date,
+) -> bytes:
+    rows = ["100,NEM12,202601060000,SYNTHETIC"]
+    base_active = ",".join(["1.0"] * 288)
+    future_active = ",".join(["10.0"] * 288)
+    reactive = ",".join(["0.75"] * 288)
+    zeros = ",".join(["0.0"] * 288)
+    dates = [
+        start + timedelta(days=offset)
+        for offset in range((end - start).days + 1)
+    ]
+    for register, unit, base_intervals in (
+        ("B1", "kWh", zeros),
+        ("E1", "kWh", base_active),
+        ("K1", "kVArh", zeros),
+        ("Q1", "kVArh", reactive),
+    ):
+        rows.append(
+            f"200,SYNTH0001,B1E1K1Q1,{register},{register},N1,METER1,{unit},5"
+        )
+        for meter_day in dates:
+            intervals = (
+                future_active
+                if register == "E1" and meter_day == future_peak_day
+                else base_intervals
+            )
+            rows.append(
+                f"300,{meter_day.strftime('%Y%m%d')},{intervals},A,,,"
+            )
+    rows.append("900")
+    return ("\n".join(rows) + "\n").encode()
+
+
 def _annualized_evidence_inspection() -> dict[str, object]:
     inspection = _approved_evidence_inspection()
     inspection["nem12"] = {
@@ -116,6 +153,27 @@ def _annualized_evidence_inspection() -> dict[str, object]:
         "warning": "Internal evidence-limited estimate.",
         "assumptions": [],
         "groups": [],
+    }
+    return inspection
+
+
+def _future_peak_evidence_inspection() -> dict[str, object]:
+    inspection = _annualized_evidence_inspection()
+    inspection["bill"] = {
+        **inspection["bill"],
+        "billing_period_start": "2025-06-30",
+        "billing_period_end": "2025-06-30",
+    }
+    inspection["nem12"] = {
+        **inspection["nem12"],
+        "coverage_start": "2024-07-01",
+        "coverage_end": "2025-12-31",
+        "days_per_stream": 549,
+    }
+    inspection["annual_bill_estimate"] = {
+        **inspection["annual_bill_estimate"],
+        "coverage_start": "2025-01-01",
+        "coverage_end": "2025-12-31",
     }
     return inspection
 
@@ -210,6 +268,14 @@ def test_bill_evidence_produces_a_review_only_tariff_suggestion(
         "rolling_demand_aud_per_kva_month": 0.0,
         "value_added_c_per_day": 0.0,
     }
+    assert suggestion["windows"]["rolling_demand"] == {
+        "start": "07:00",
+        "end": "19:00",
+    }
+    assert suggestion["windows"]["incentive_demand"] == {
+        "start": "16:00",
+        "end": "19:00",
+    }
     assert "not detected contractual line items" in state["evidence_basis"][
         "derivation_notice"
     ]
@@ -279,6 +345,38 @@ def test_approval_requires_a_complete_365_day_fixed_aest_meter_period(
     assert response.json()["detail"]["code"] == "tariff_annual_interval_required"
 
 
+def test_approval_requires_365_days_ending_on_the_bill_end(
+    tmp_path, monkeypatch
+) -> None:
+    inspection = _annualized_evidence_inspection()
+    inspection["bill"] = {
+        **inspection["bill"],
+        "billing_period_start": "2025-07-01",
+        "billing_period_end": "2025-07-01",
+    }
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda *_args, **_kwargs: inspection,
+    )
+    database_url = sqlite_url_for_path(tmp_path / "bill-history-required.sqlite3")
+    nem12 = _annual_nem12_bytes()
+    with create_test_client(database_url) as client:
+        _, project_url = _create_project(client)
+        _save_evidence(client, project_url, bill_bytes=b"synthetic bill", nem12=nem12)
+        state = client.get(f"{project_url}/tariff-profile").json()
+        response = client.put(
+            f"{project_url}/tariff-profile",
+            json={
+                "profile": state["suggested_profile"],
+                "approve_for_calculation": True,
+            },
+        )
+
+    assert state["blockers"][0]["code"] == "tariff_annual_interval_required"
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "tariff_annual_interval_required"
+
+
 def test_approval_binds_the_real_saved_nem12_and_loads_a_calculation_profile(
     tmp_path, monkeypatch
 ) -> None:
@@ -327,10 +425,70 @@ def test_approval_binds_the_real_saved_nem12_and_loads_a_calculation_profile(
     assert calculation_profile["rolling_period"] == calculation_profile[
         "analysis_period"
     ]
+    assert calculation_profile["rolling_demand_window"] == {
+        "start": "07:00",
+        "end": "19:00",
+        "time_basis": "local",
+        "excluded_dates": [],
+    }
+    assert calculation_profile["incentive_demand_window"] == {
+        "start": "16:00",
+        "end": "19:00",
+        "time_basis": "local",
+        "excluded_dates": [],
+    }
+    assert calculation_profile["annual_financial_model"][
+        "incentive_demand_months"
+    ] == [12, 1, 2, 3]
     assert calculation_profile["expected_reconciliation"]["import_kwh"] == 288.0
     assert analyze_ci_nem12(nem12, profile=calculation_profile)[
         "analysis_status"
     ] == "ready"
+
+
+def test_bill_reconciliation_rolling_period_excludes_a_future_analysis_peak(
+    tmp_path, monkeypatch
+) -> None:
+    inspection = _future_peak_evidence_inspection()
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda *_args, **_kwargs: inspection,
+    )
+    nem12 = _nem12_bytes_with_future_peak(
+        start=date(2024, 7, 1),
+        end=date(2025, 12, 31),
+        future_peak_day=date(2025, 12, 1),
+    )
+    database_url = sqlite_url_for_path(tmp_path / "future-peak.sqlite3")
+    session_factory = create_sqlite_session_factory(database_url)
+    with create_test_client(database_url) as client:
+        project_id, project_url = _create_project(client)
+        _save_evidence(client, project_url, bill_bytes=b"synthetic bill", nem12=nem12)
+        suggestion = client.get(f"{project_url}/tariff-profile").json()[
+            "suggested_profile"
+        ]
+        response = client.put(
+            f"{project_url}/tariff-profile",
+            json={"profile": suggestion, "approve_for_calculation": True},
+        )
+
+    assert response.status_code == 200
+    with session_factory() as session:
+        calculation_profile = approved_ci_project_tariff_calculation_profile(
+            session, project_id=project_id, actor=local_actor()
+        )
+    assert calculation_profile is not None
+    assert calculation_profile["rolling_period"] == {
+        "start_date": "2024-07-01",
+        "end_date": "2025-06-30",
+    }
+    assert calculation_profile["analysis_period"] == {
+        "start_date": "2025-01-01",
+        "end_date": "2025-12-31",
+    }
+    assert calculation_profile["expected_reconciliation"][
+        "rolling_demand_kva"
+    ] == 15.0
 
 
 def test_replacing_evidence_marks_the_approved_tariff_profile_stale(
