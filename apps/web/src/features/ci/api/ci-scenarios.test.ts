@@ -489,6 +489,30 @@ describe("analyzeCiPhysicalScenarios", () => {
     await expect(fetchCiSavedTariffReplay("project-1", fetcher as typeof fetch)).resolves.toMatchObject({ status: "not_saved" });
   });
 
+  it("marks a legacy saved tariff replay calculation revision stale during a mixed rollout", async () => {
+    const legacyResult = {
+      ...physicalResultFor(scenarios),
+      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
+    };
+    const fetcher = async () => new Response(JSON.stringify({
+      contract_version: "ci_project_tariff_replay_state_v1",
+      status: "ready",
+      saved_at: "2026-09-04T00:00:00+00:00",
+      stale_reasons: [],
+      result: legacyResult,
+    }), { status: 200 });
+
+    await expect(
+      fetchCiSavedTariffReplay("project-1", fetcher as typeof fetch),
+    ).resolves.toEqual({
+      contract_version: "ci_project_tariff_replay_state_v1",
+      status: "stale",
+      saved_at: "2026-09-04T00:00:00+00:00",
+      stale_reasons: ["result_calculation_revision_unsupported"],
+      result: null,
+    });
+  });
+
   it("posts explicit scenarios and accepts only the fail-closed contract", async () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBe("/api/commercial-industrial/powercor-llvt2-physical-scenarios");
@@ -514,6 +538,17 @@ describe("analyzeCiPhysicalScenarios", () => {
         analyzeCiPhysicalScenarios(new File(["synthetic"], "synthetic.csv"), scenarios, unsafeFetcher as typeof fetch),
       ).rejects.toThrow("unsafe result contract");
     }
+  });
+
+  it("keeps newly posted legacy tariff replay results fail-closed", async () => {
+    const fetcher = async () => new Response(JSON.stringify({
+      ...physicalResultFor(scenarios),
+      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
+    }), { status: 200 });
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch),
+    ).rejects.toThrow("unsafe result contract");
   });
 
   it("rejects a contract that grants recommendation permission", async () => {

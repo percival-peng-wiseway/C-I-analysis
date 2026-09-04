@@ -563,6 +563,23 @@ async function loadCiSavedTariffReplayState(
     ) {
       throw new Error("Saved C&I tariff replay returned an unsafe state contract.");
     }
+    if (
+      payload.status === "ready" &&
+      payload.result !== null &&
+      payload.result.contract_version === "ci_physical_scenario_review_v6" &&
+      (payload.result as unknown as { calculation_revision?: unknown }).calculation_revision ===
+        "ci_physical_scenario_planner_limits_primal_simplex_v1"
+    ) {
+      return {
+        ...payload,
+        status: "stale",
+        stale_reasons: Array.from(new Set([
+          ...payload.stale_reasons,
+          "result_calculation_revision_unsupported" as const,
+        ])),
+        result: null,
+      };
+    }
     if (payload.result !== null) {
       payload.result = assertCiPhysicalScenarioResult(payload.result);
     }
