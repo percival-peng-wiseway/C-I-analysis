@@ -1,6 +1,10 @@
 .git
 .github
 .local
+.tmp
+.pytest_cache
+.mypy_cache
+.ruff_cache
 .pnpm-store
 .venv
 __pycache__
