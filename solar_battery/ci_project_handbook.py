@@ -309,12 +309,65 @@ def _solution_module(
         ("maximum_soc_percent", "Maximum SOC", "%", "model_policy", False, True),
         ("initial_soc_basis", "Initial SOC basis", None, "model_policy", False, True),
         ("allow_grid_charging", "Grid charging", None, "model_policy", False, True),
-        ("reactive_support_enabled", "Reactive support", None, "analyst_input", True, True),
-        ("reactive_support_max_kvar", "Reactive support cap", "kvar", "analyst_input", True, True),
+        (
+            "reactive_support_enabled",
+            "Reactive support",
+            None,
+            "profile_snapshot" if inverter_snapshot else "analyst_input",
+            not bool(inverter_snapshot),
+            True,
+        ),
+        (
+            "reactive_support_max_kvar",
+            (
+                "Per-inverter maximum reactive power"
+                if inverter_snapshot
+                else "Legacy reactive support cap"
+            ),
+            "kvar",
+            "profile_snapshot" if inverter_snapshot else "analyst_input",
+            not bool(inverter_snapshot),
+            True,
+        ),
         ("grid_emissions_factor_kg_co2e_per_kwh", "Grid emissions factor", "kg CO2-e/kWh", "analyst_input", True, True),
     )
+    reactive_snapshot_keys = {
+        "reactive_support_enabled": "reactive_support_enabled",
+        "reactive_support_max_kvar": "maximum_reactive_power_kvar",
+    }
+    inverter_source_label = str(
+        inverter_snapshot.get("name")
+        or inverter_snapshot.get("profile_id")
+        or "Saved inverter profile snapshot"
+    )
     for key, label, unit, source_kind, editable, active in technical_parameters:
-        parameters.append(_parameter(f"solution.technical.{key}", label, technical.get(key), unit=unit, source_kind=source_kind, source_label="Saved design context", source_path=f"design_context.technical_options.{key}", edit_stage="physical_feasibility", editable=editable, active=active))
+        snapshot_key = reactive_snapshot_keys.get(key) if inverter_snapshot else None
+        parameters.append(
+            _parameter(
+                f"solution.technical.{key}",
+                label,
+                (
+                    inverter_snapshot.get(snapshot_key)
+                    if snapshot_key is not None
+                    else technical.get(key)
+                ),
+                unit=unit,
+                source_kind=source_kind,
+                source_label=(
+                    inverter_source_label
+                    if snapshot_key is not None
+                    else "Saved design context"
+                ),
+                source_path=(
+                    f"design_context.profile_selection.inverter_profile.{snapshot_key}"
+                    if snapshot_key is not None
+                    else f"design_context.technical_options.{key}"
+                ),
+                edit_stage="physical_feasibility",
+                editable=editable,
+                active=active,
+            )
+        )
     for key, label in (
         ("solar_profile_id", "Solar performance profile"),
         ("battery_profile_id", "Battery performance profile"),
@@ -391,8 +444,8 @@ def _solution_module(
         _calculation("solution.minimum_soc", "Minimum state of charge", "minimum_SOC = 1 - usable_depth_of_discharge", "Converts usable DoD into the lower SOC bound.", ["usable depth of discharge"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.pcs_size", "Common screening PCS capacity", "requirement(PV,battery) = max(PV_kWp / DC_AC_ratio, battery_kW); PCS(PV) = max(requirement(PV,battery) for every headroom-feasible battery option in that PV row)", "Every surviving battery alternative for one PV target receives the same continuous PCS capacity. The value is not snapped to configured inverter quantity or block size.", ["PV capacity", "DC/AC ratio", "all feasible battery screening powers for the PV row"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.headroom_gate", "Site connection gate", "feasible when max(PV_kWp / DC_AC_ratio, battery_kW) <= site_AC_headroom_kW", "Rejects combinations above the saved site connection allowance.", ["PV requirement", "battery requirement", "site AC headroom"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
-        _calculation("solution.reactive_cap", "Reactive support limit", "Q_cap = min(configured_Q_cap, inverter_scale * profile_Q_max)", "Applies only when reactive support is enabled and an inverter profile exists.", ["configured support cap", "inverter scale", "profile reactive limit"], "solar_battery/ci_solution_generator.py::_scenario"),
-        _calculation("solution.pq_limit", "Circular P-Q capability", "P^2 + Q^2 <= S_limit^2", "Constrains shared inverter active and reactive power in dispatch.", ["active power", "reactive power", "apparent power limit"], "solar_battery/ci_peak_shaving_optimizer.py"),
+        _calculation("solution.reactive_cap", "Profile-scaled reactive support limit", "profile_scale = candidate_PCS_kW / profile_rated_active_kW; Q_cap = profile_scale * profile_Q_max when profile_reactive_enabled else 0; S_limit = profile_scale * profile_rated_apparent_kVA when enabled else null", "The immutable inverter profile snapshot is authoritative whenever it exists. Legacy project-level reactive switches and caps are used only for saved designs without an inverter profile.", ["candidate PCS capacity", "profile rated active power", "profile reactive-support switch", "profile maximum reactive power", "profile rated apparent power"], "solar_battery/ci_solution_generator.py::_scenario"),
+        _calculation("solution.pq_limit", "Circular P-Q capability", "P^2 + Q^2 <= S_limit^2", "Constrains shared inverter active and reactive power in dispatch. Q and S limits come from the scaled inverter profile snapshot, while the circular capability shape remains an analyst assumption because the current profile does not provide an executable P-Q curve.", ["active power", "reactive power", "profile-scaled apparent power limit"], "solar_battery/ci_peak_shaving_optimizer.py"),
         _calculation("solution.battery_curve_cost", "Battery equipment curve cost", "units = target_battery_kWh / module_capacity_kWh; cost = proportional below first point, linearly interpolated between points, and last-segment extrapolated above the final point", "The requested battery target remains continuous; its capacity is converted to a reference module quantity only for equipment pricing.", ["target battery capacity", "module capacity", "selected battery capital-cost curve"], "solar_battery/ci_annual_financial_comparison.py::_curve_cost"),
         _calculation("solution.inverter_curve_cost", "Inverter equipment curve cost", "cost = curve(capacity) when capacity <= sizing_unit; otherwise cost = capacity / sizing_unit * curve(sizing_unit)", "Above the selected inverter sizing unit, pricing scales the cost at that sizing unit rather than extrapolating the last curve segment.", ["screening inverter capacity", "sizing unit", "selected inverter capital-cost curve"], "solar_battery/ci_annual_financial_comparison.py::_profile_capex_breakdown"),
         _calculation("solution.gross_capex", "Gross equipment CAPEX", "gross_CAPEX = PV_kWp * selected_PV_AUD_per_kWp + battery_curve_cost + inverter_curve_cost", "Uses the selected workspace equipment catalogue. Each component is rounded to cents before the stored gross total is rounded to cents.", ["PV capacity", "battery reference quantity", "inverter capacity", "selected device prices"], "solar_battery/ci_annual_financial_comparison.py::_profile_capex_breakdown", example=_gross_capex_example(priced_solutions)),
@@ -460,7 +513,7 @@ def _solution_module(
         calculations=calculations,
         models=[
             _model("solution.cartesian_search", "Candidate generator", "Deterministic Cartesian search with connection rejection", "Generate every PV and battery target pair, then reject pairs above site AC headroom.", ["Maximum 20 PV candidates, 15 battery candidates and 200 total combinations.", "Target PV and battery capacities are preserved exactly for screening.", "PCS sizing is continuous; configured inverter quantity is currently not a sizing constraint."], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
-            _model("solution.profile_usage", "Equipment profile usage", "Performance-ratio projection", "Solar, battery and inverter profiles provide model performance inputs, not target-size snapping.", ["Solar module watts, module efficiency, temperature coefficient and degradation are not active in current physical calculations.", "Battery standby loss, annual degradation and profile min/max unit counts are not active in current physical calculations.", "Inverter efficiency, power-factor flags, night capability and PQ availability flags are not active in current physical calculations."], "solar_battery/ci_solution_generator.py"),
+            _model("solution.profile_usage", "Equipment profile usage", "Performance-ratio projection", "Solar, battery and inverter profiles provide model performance inputs, not target-size snapping.", ["Solar module watts, module efficiency, temperature coefficient and degradation are not active in current physical calculations.", "Battery standby loss, annual degradation and profile min/max unit counts are not active in current physical calculations.", "The inverter reactive-support switch, rated active/apparent power and maximum kvar are active and scale with candidate PCS capacity.", "Inverter efficiency, power-factor limits, night capability and P-Q availability flags are not active; the circular P-Q envelope remains an analyst assumption."], "solar_battery/ci_solution_generator.py"),
         ],
         result_sets=[
             _result_set("solution.solutions", "Generated solutions", [
@@ -560,11 +613,11 @@ def _scenario_module(
         _calculation("scenario.pv_export", "PV export constraints", "0 <= PV_export[t] <= PV_to_AC[t]; PV_to_AC[t] + discharge[t] - PV_export[t] <= load[t]", "Only PV may be exported under the current dispatch contract; battery discharge cannot supply export.", ["PV export", "PV to AC", "battery discharge", "load"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
         _calculation("scenario.pv_allocation", "Optimizer PV allocation", "PV_to_AC[t] + PV_charge[t] <= PV_available[t]", "PV charging is a separate DC-path variable in the optimizer and does not consume the shared AC port.", ["PV to AC", "PV charge", "available PV"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
         _calculation("scenario.shared_ac_port", "Shared AC-port power", "P_port[t] = PV_to_AC[t] + discharge[t] - grid_charge[t]; abs(P_port[t]) <= shared_AC_headroom_kW", "The headroom is bidirectional. The current optimizer excludes the PV-to-battery path from this AC-port expression.", ["PV to AC", "discharge", "grid charge", "shared AC headroom"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
-        _calculation("scenario.reactive_balance", "Reactive import after support", "post_kvar = measured_kvar - inverter_reactive_support", "Support cannot overcompensate the measured reactive import. It can reduce post-dispatch kVA through the post-kVA calculation, but that physical reduction changes the bill only through an approved non-zero kVA demand rate.", ["measured kvar", "reactive support kvar", "approved kVA demand rate"], "solar_battery/ci_scenario_analysis.py::_execute_scenario"),
+        _calculation("scenario.reactive_balance", "Reactive import after support", "post_kvar = measured_kvar - inverter_reactive_support", "The saved inverter profile snapshot enables or disables support and supplies the per-inverter kvar capability; the Solution Generator scales that capability to each candidate PCS. Support cannot overcompensate measured reactive import. The physical reduction changes the bill only through an approved non-zero kVA demand rate.", ["measured kvar", "profile-scaled reactive support kvar", "approved kVA demand rate"], "solar_battery/ci_scenario_analysis.py::_execute_scenario"),
         _calculation("scenario.post_kva", "Post-system apparent demand", "post_kVA = sqrt(post_kW^2 + post_kvar^2)", "Produces the kVA series used by rolling and incentive demand charges.", ["post kW", "post kvar"], "solar_battery/ci_scenario_analysis.py::_execute_scenario"),
         _calculation("scenario.optimizer_objective", "Tariff-aware dispatch objective", "min sum_t(delta_t * (grid_import[t] * import_rate[t] - PV_export[t] * export_credit[t] + discharge[t] * 0.05)) + sum_{d: approved_demand_rate[d] > 0}(demand_peak[d] * demand_rate[d])", "Tariff replay re-optimizes dispatch from the saved scenario using approved rates. The export credit is currently fixed to zero and the AUD 0.05/kWh discharge term is a deterministic throughput tie-break, not a finance cashflow. A zero-rate demand component is omitted, so the optimizer does not reserve battery energy solely to lower that unpriced kVA peak; reactive support may still reduce physical kVA but creates no demand-charge value at a zero rate.", ["interval imports", "zero export credit", "battery discharge", "positive-rate approved demand components"], "solar_battery/ci_peak_shaving_optimizer.py::_model_bill"),
         _calculation("scenario.saved_result_reuse", "Saved-result reuse gate", "reuse = interval_SHA256_match AND design_SHA256_match AND tariff_SHA256_match AND calculation_revision_match AND result_SHA256_valid AND exact_requested_scenario_ID_set_match", "A repeated Analysis request returns the saved authoritative result without starting HiGHS only when every input identity, calculation revision, result digest and requested solution set matches. Any mismatch runs the full Python calculation again.", ["saved NEM12 digest", "saved design digest", "approved tariff digest", "calculation revision", "saved result digest", "selected solution IDs"], "solar_battery/ci_project_tariff_replay.py::reusable_ci_tariff_replay_result"),
-        _calculation("scenario.pq_polygon", "Optimizer P-Q envelope", "for 16 segment normals: cos(theta_j) * P_port[t] + sin(theta_j) * Q_support[t] <= S_limit * cos(pi / 32)", "HiGHS uses a conservative 16-segment inner approximation of the circular inverter capability envelope; exact nonlinear replay verifies the resulting apparent power.", ["shared-port active power", "reactive support", "apparent-power limit"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
+        _calculation("scenario.pq_polygon", "Optimizer P-Q envelope", "for 16 segment normals: cos(theta_j) * P_port[t] + sin(theta_j) * Q_support[t] <= S_limit * cos(pi / 32)", "HiGHS uses a conservative 16-segment inner approximation of a circular inverter capability envelope; exact nonlinear replay verifies apparent power. The Q and S limits are scaled from the saved inverter profile snapshot, but the circular curve model itself remains an analyst assumption rather than a supplier P-Q curve.", ["shared-port active power", "reactive support", "profile-scaled apparent-power limit"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
         _calculation("scenario.demand_peak", "Demand-peak epigraph", "peak[d] >= minimum_chargeable[d] and peak[d] >= post_import_kW[t] or exact post_import_kVA[t] for every interval in priced demand window d", "This defines the smallest economically selected ceiling for a positive-rate demand component; it does not require every interval to equal the ceiling or minimise profile variance. Only binding peak intervals are expected to appear flat. kVA components start with linear bounds and receive tangent cuts until exact nonlinear replay is within the fixed materiality gate or the run fails closed.", ["priced demand window", "post-import kW/kVA", "minimum chargeable demand", "positive demand rate"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
         _calculation("scenario.peak_reduction", "Peak reduction", "peak_reduction = max(0, baseline_peak - post_system_peak)", "Reported for the saved measured coverage or billing period, depending on the result field.", ["baseline peak", "post-system peak"], "solar_battery/ci_design_feasibility.py::_performance_metrics"),
         _calculation("scenario.energy_reduction", "Grid import reduction", "reduction_kWh = max(0, baseline_import_kWh - post_import_kWh)", "Sums interval imports across the measured coverage.", ["baseline import", "post-system import"], "solar_battery/ci_design_feasibility.py::_energy_totals"),
@@ -1022,6 +1075,7 @@ def _profile_snapshot_parameters(
             (
                 ("rated_active_power_kw", "Rated active power", "kW AC", True),
                 ("rated_apparent_power_kva", "Rated apparent power", "kVA", True),
+                ("reactive_support_enabled", "Reactive support enabled", None, True),
                 ("maximum_reactive_power_kvar", "Maximum reactive power", "kvar", True),
                 ("european_efficiency_percent", "European efficiency", "%", False),
                 ("maximum_efficiency_percent", "Maximum efficiency", "%", False),

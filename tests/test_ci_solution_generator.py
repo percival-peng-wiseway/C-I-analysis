@@ -18,7 +18,10 @@ from solar_battery.ci_project_rebate_profile import (
     approved_ci_project_rebate_calculation_profile,
 )
 from solar_battery.ci_projects import CiProjectError
-from solar_battery.ci_solution_generator import generate_ci_solutions
+from solar_battery.ci_solution_generator import (
+    generate_ci_custom_solution,
+    generate_ci_solutions,
+)
 from solar_battery.durable_cockpit.orm import CiProjectModel
 from tests.durable_test_helpers import (
     create_sqlite_session_factory,
@@ -30,7 +33,7 @@ from tests.durable_test_helpers import (
 
 def _device_profile(*, solar_status: str = "published") -> dict[str, object]:
     return {
-        "contract_version": "ci_device_profile_v4",
+        "contract_version": "ci_device_profile_v5",
         "solution_profiles": {
             "solar_profiles": [
                 {
@@ -67,6 +70,7 @@ def _device_profile(*, solar_status: str = "published") -> dict[str, object]:
                     "version": 1,
                     "rated_active_power_kw": 125.0,
                     "rated_apparent_power_kva": 137.5,
+                    "reactive_support_enabled": True,
                     "maximum_reactive_power_kvar": 82.5,
                     "european_efficiency_percent": 98.1,
                     "maximum_efficiency_percent": 98.5,
@@ -318,8 +322,10 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
             # context canonicalizes it to the selected performance reference.
             "inverter_block_size_kw": 5.0,
             "inverter_quantity": 2,
-            "reactive_support_enabled": True,
-            "reactive_support_max_kvar": 200.0,
+            # A selected inverter profile is authoritative, so these legacy
+            # fields cannot disable or cap its saved reactive policy.
+            "reactive_support_enabled": False,
+            "reactive_support_max_kvar": 0.0,
         }
     )
 
@@ -351,11 +357,14 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     assert result["design_context"]["technical_options"]["inverter_quantity"] == 2
     assert result["design_context"]["technical_options"][
         "reactive_support_max_kvar"
-    ] == 200.0
+    ] == 82.5
+    assert result["design_context"]["technical_options"][
+        "reactive_support_enabled"
+    ] is True
     assert validate_ci_design_context(result["design_context"]) == result["design_context"]
 
 
-def test_python_generator_uses_site_reactive_cap_as_an_absolute_system_limit() -> None:
+def test_python_generator_scales_profile_reactive_cap_without_legacy_override() -> None:
     profile = _device_profile()
     inverter = profile["solution_profiles"]["inverter_profiles"][0]
     inverter.update(
@@ -375,8 +384,8 @@ def test_python_generator_uses_site_reactive_cap_as_an_absolute_system_limit() -
     request["inverter_profile_id"] = "inverter-125"
     request["connection_options"].update(
         {
-            "reactive_support_enabled": True,
-            "reactive_support_max_kvar": 60.0,
+            "reactive_support_enabled": False,
+            "reactive_support_max_kvar": 0.0,
         }
     )
 
@@ -396,13 +405,78 @@ def test_python_generator_uses_site_reactive_cap_as_an_absolute_system_limit() -
         91.666666666
     )
     assert by_pv[150.0]["pv_inverter_capacity_kw_ac"] == pytest.approx(125.0)
-    assert by_pv[150.0]["reactive_support_max_kvar"] == pytest.approx(60.0)
+    assert by_pv[150.0]["reactive_support_max_kvar"] == pytest.approx(82.5)
     assert by_pv[150.0]["shared_inverter_apparent_power_limit_kva"] == pytest.approx(
         137.5
     )
     assert result["design_context"]["technical_options"][
         "reactive_support_max_kvar"
-    ] == 60.0
+    ] == 66.0
+
+
+def test_python_generator_profile_can_disable_legacy_reactive_request() -> None:
+    profile = _device_profile()
+    inverter = profile["solution_profiles"]["inverter_profiles"][0]
+    inverter["reactive_support_enabled"] = False
+    request = _request(maximum_pv=100.0, headroom=250.0)
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        {
+            "reactive_support_enabled": True,
+            "reactive_support_max_kvar": 200.0,
+        }
+    )
+
+    result = generate_ci_solutions(
+        request,
+        device_profile=profile,
+        device_profile_sha256="f" * 64,
+    )
+
+    assert all(
+        candidate["reactive_support_enabled"] is False
+        and candidate["reactive_support_max_kvar"] == 0.0
+        and candidate["shared_inverter_apparent_power_limit_kva"] is None
+        for candidate in result["candidates"]
+    )
+    assert result["design_context"]["technical_options"][
+        "reactive_support_enabled"
+    ] is False
+    # Retain the profile-unit capability as an audit/reference operand even
+    # when the saved profile policy disables it.
+    assert result["design_context"]["technical_options"][
+        "reactive_support_max_kvar"
+    ] == 82.5
+
+
+def test_custom_solution_scales_reactive_capability_from_saved_profile() -> None:
+    request = _request(maximum_pv=100.0, headroom=250.0)
+    request["inverter_profile_id"] = "inverter-125"
+    generated = generate_ci_solutions(
+        request,
+        device_profile=_device_profile(),
+        device_profile_sha256="e" * 64,
+    )
+
+    custom = generate_ci_custom_solution(
+        {
+            "contract_version": "ci_custom_design_candidate_request_v1",
+            "label": "Custom 100 kW PCS",
+            "pv_capacity_kwp_dc": 100.0,
+            "battery_capacity_kwh": 0.0,
+            "inverter_capacity_kw_ac": 100.0,
+            "quoted_net_capex_aud_ex_gst": 100_000.0,
+        },
+        design_context=generated["design_context"],
+    )
+
+    candidate = custom["candidate"]
+    assert candidate["reactive_support_enabled"] is True
+    assert candidate["reactive_support_max_kvar"] == pytest.approx(66.0)
+    assert candidate["shared_inverter_apparent_power_limit_kva"] == pytest.approx(
+        110.0
+    )
+    assert candidate["reactive_capability_provenance"] == "analyst_assumption"
 
 
 def test_python_generator_includes_reactive_support_in_scenario_identity() -> None:

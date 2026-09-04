@@ -36,7 +36,7 @@ describe("project tariff profile API", () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ profile, approve_for_calculation: true });
   });
 
-  it("retries one recoverable container 503 with the same PUT body", async () => {
+  it("confirms an already-committed save after a recoverable container 503", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (fetcher.mock.calls.length === 1) {
         return new Response(JSON.stringify({
@@ -51,8 +51,49 @@ describe("project tariff profile API", () => {
     await expect(saveCiProjectTariffProfile("project-1", { profile, approveForCalculation: true }, fetcher)).resolves.toMatchObject({ status: "approved" });
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher.mock.calls[0]?.[1]?.method).toBe("PUT");
-    expect(fetcher.mock.calls[1]?.[1]?.method).toBe("PUT");
-    expect(fetcher.mock.calls[1]?.[1]?.body).toBe(fetcher.mock.calls[0]?.[1]?.body);
+    expect(fetcher.mock.calls[1]?.[1]?.method).toBeUndefined();
+  });
+
+  it("retries a recoverable 503 when GET does not confirm the requested profile", async () => {
+    const otherProfile = { ...structuredClone(profile), display_label: "Previously saved tariff" };
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (fetcher.mock.calls.length === 1) {
+        return new Response(JSON.stringify({
+          error_code: "container_unavailable",
+          message: "The analysis connection was interrupted.",
+          request_id: "req-interrupted",
+        }), { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "0" } });
+      }
+      if (fetcher.mock.calls.length === 2) {
+        return new Response(JSON.stringify({ ...state("approved"), profile: otherProfile }), { status: 200 });
+      }
+      return new Response(JSON.stringify(state("approved")), { status: 200 });
+    });
+
+    await expect(saveCiProjectTariffProfile("project-1", { profile, approveForCalculation: true }, fetcher)).resolves.toMatchObject({ status: "approved" });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.map((call) => call[1]?.method)).toEqual(["PUT", undefined, "PUT"]);
+    expect(fetcher.mock.calls[2]?.[1]?.body).toBe(fetcher.mock.calls[0]?.[1]?.body);
+  });
+
+  it("does not confirm the same profile with the wrong approval state", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (fetcher.mock.calls.length === 1) {
+        return new Response(JSON.stringify({
+          error_code: "container_unavailable",
+          message: "The analysis connection was interrupted.",
+          request_id: "req-approval",
+        }), { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "0" } });
+      }
+      if (fetcher.mock.calls.length === 2) {
+        return new Response(JSON.stringify(state("draft")), { status: 200 });
+      }
+      expect(init?.method).toBe("PUT");
+      return new Response(JSON.stringify(state("approved")), { status: 200 });
+    });
+
+    await expect(saveCiProjectTariffProfile("project-1", { profile, approveForCalculation: true }, fetcher)).resolves.toMatchObject({ status: "approved" });
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -70,18 +111,19 @@ describe("project tariff profile API", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it("retries one interrupted network request", async () => {
-    const fetcher = vi.fn(async () => {
+  it("confirms an already-committed draft after an interrupted network request", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
       if (fetcher.mock.calls.length === 1) throw new TypeError("Failed to fetch");
       return new Response(JSON.stringify(state("draft")), { status: 200 });
     });
 
     await expect(saveCiProjectTariffProfile("project-1", { profile, approveForCalculation: false }, fetcher)).resolves.toMatchObject({ status: "draft" });
     expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.map((call) => call[1]?.method)).toEqual(["PUT", undefined]);
   });
 
-  it("reports the final container failure message and request ID after one retry", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+  it("reports the final container failure message and request ID after bounded retries", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       error_code: "container_unavailable",
       message: "The analysis connection was interrupted before completion could be confirmed. Wait a moment, then try again.",
       request_id: "req-final",
@@ -89,7 +131,41 @@ describe("project tariff profile API", () => {
 
     await expect(saveCiProjectTariffProfile("project-1", { profile, approveForCalculation: true }, fetcher))
       .rejects.toThrow("The analysis connection was interrupted before completion could be confirmed. Wait a moment, then try again. Request ID: req-final.");
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(fetcher.mock.calls.map((call) => call[1]?.method)).toEqual([
+      "PUT", undefined, "PUT", undefined, "PUT", undefined,
+    ]);
+  });
+
+  it("honors Retry-After before replaying an unconfirmed PUT", async () => {
+    vi.useFakeTimers();
+    try {
+      const otherProfile = { ...structuredClone(profile), display_label: "Previous tariff" };
+      const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (fetcher.mock.calls.length === 1) {
+          return new Response(JSON.stringify({
+            error_code: "container_provisioning",
+            message: "The analysis service is starting.",
+            request_id: "req-wait",
+          }), { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "2" } });
+        }
+        if (fetcher.mock.calls.length === 2) {
+          return new Response(JSON.stringify({ ...state("approved"), profile: otherProfile }), { status: 200 });
+        }
+        return new Response(JSON.stringify(state("approved")), { status: 200 });
+      });
+
+      const saving = saveCiProjectTariffProfile("project-1", { profile, approveForCalculation: true }, fetcher);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(saving).resolves.toMatchObject({ status: "approved" });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects malformed state and imported JSON", () => {

@@ -52,8 +52,6 @@ type ConnectionOptionsForm = {
   inverter_block_size_kw: string;
   site_ac_headroom_kw: string;
   allow_grid_charging: boolean;
-  reactive_support_enabled: boolean;
-  reactive_support_max_kvar: string;
   grid_emissions_factor_kg_co2e_per_kwh: string;
 };
 type RestoredBuilderState = {
@@ -88,8 +86,6 @@ const defaultConnectionOptions = (): ConnectionOptionsForm => ({
   inverter_block_size_kw: "5",
   site_ac_headroom_kw: "250",
   allow_grid_charging: true,
-  reactive_support_enabled: false,
-  reactive_support_max_kvar: "",
   grid_emissions_factor_kg_co2e_per_kwh: "",
 });
 
@@ -206,9 +202,6 @@ export function CiScenarioBuilder({
     setConnection((current) => ({
       ...current,
       inverter_block_size_kw: formatNumber(selected.rated_active_power_kw),
-      reactive_support_max_kvar: current.reactive_support_enabled
-        ? formatNumber(selected.maximum_reactive_power_kvar)
-        : "",
     }));
   };
 
@@ -279,12 +272,10 @@ export function CiScenarioBuilder({
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Published Solar, AC Battery and Inverter profiles are required.</p>
           ) : null}
           <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-            <h4 className="font-semibold text-slate-950">Connection &amp; reactive support</h4>
+            <h4 className="font-semibold text-slate-950">Connection &amp; environment</h4>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <OptionGroup title="Connection capacity">
                 <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
-                <CheckField checked={connection.reactive_support_enabled} label="Model inverter reactive support" onChange={(reactive_support_enabled) => setConnection({ ...connection, reactive_support_enabled })} />
-                {connection.reactive_support_enabled ? <NumberField label="Reactive support cap (kvar)" onChange={(reactive_support_max_kvar) => setConnection({ ...connection, reactive_support_max_kvar })} value={connection.reactive_support_max_kvar} /> : null}
               </OptionGroup>
               <OptionGroup title="Environmental assumptions">
                 <NumberField allowBlank label="Grid emissions factor (kg CO2-e/kWh)" onChange={(grid_emissions_factor_kg_co2e_per_kwh) => setConnection({ ...connection, grid_emissions_factor_kg_co2e_per_kwh })} value={connection.grid_emissions_factor_kg_co2e_per_kwh} />
@@ -383,6 +374,8 @@ function InverterProfileCard({ onProfileChange, profile, profiles }: {
       <SelectField label="Inverter performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
       {profile ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3 xl:grid-cols-2">
+          <ProfileFact label="Reactive compensation" value={profile.reactive_support_enabled ? "On" : "Off"} />
+          <ProfileFact label="Cap per inverter" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
           <ProfileFact label="Apparent / active ratio" value={formatNumber(profile.rated_apparent_power_kva / profile.rated_active_power_kw)} />
           <ProfileFact label="Reactive / active ratio" value={formatNumber(profile.maximum_reactive_power_kvar / profile.rated_active_power_kw)} />
           <ProfileFact label="European efficiency" value={`${formatNumber(profile.european_efficiency_percent)}%`} />
@@ -449,10 +442,6 @@ function SelectField({ label, onChange, options, value }: { label: string; onCha
   return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><select aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-950" onChange={(event) => onChange(event.target.value)} value={value}>{options.length === 0 ? <option value="">No published profiles</option> : null}{options.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>;
 }
 
-function CheckField({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
-  return <label className="col-span-full flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700"><input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />{label}</label>;
-}
-
 function ProfileFact({ label, value }: { label: string; value: string }) {
   return <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[.08em] text-slate-400">{label}</dt><dd className="mt-1 truncate font-medium text-slate-800" title={value}>{value}</dd></div>;
 }
@@ -498,7 +487,8 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
   const availability = parseNumber(site.system_availability_percent);
   const block = parseNumber(connection.inverter_block_size_kw);
   const headroom = parseNumber(connection.site_ac_headroom_kw);
-  const reactive = connection.reactive_support_enabled ? parseNumber(connection.reactive_support_max_kvar) : 0;
+  const reactiveEnabled = inverterProfile.reactive_support_enabled;
+  const reactive = reactiveEnabled ? inverterProfile.maximum_reactive_power_kvar : 0;
   const emissions = connection.grid_emissions_factor_kg_co2e_per_kwh.trim() ? parseNumber(connection.grid_emissions_factor_kg_co2e_per_kwh) : null;
   const losses = [shading, soiling, temperature, wiring, other];
   if (
@@ -506,7 +496,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
     !between(annualYield, 500, 3000) || !between(azimuth, 0, 360) || !between(tilt, 0, 90) ||
     losses.some((value) => !between(value, 0, 99)) || !between(availability, 1, 100) ||
     !between(block, 0.1, 1000) || !positive(headroom) ||
-    (connection.reactive_support_enabled && !positive(reactive)) ||
+    (reactiveEnabled && !positive(reactive)) ||
     (emissions !== null && !between(emissions, 0, 5))
   ) return null;
   return {
@@ -534,7 +524,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
       inverter_block_size_kw: block,
       site_ac_headroom_kw: headroom,
       allow_grid_charging: true,
-      reactive_support_enabled: connection.reactive_support_enabled,
+      reactive_support_enabled: reactiveEnabled,
       reactive_support_max_kvar: reactive,
       grid_emissions_factor_kg_co2e_per_kwh: emissions,
       initial_soc_basis: "full_soc_physical_upper_bound",
@@ -628,8 +618,6 @@ function connectionFormFromTechnical(options: CiDesignContext["technical_options
     inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
     site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
     allow_grid_charging: true,
-    reactive_support_enabled: options.reactive_support_enabled,
-    reactive_support_max_kvar: options.reactive_support_enabled ? formatNumber(options.reactive_support_max_kvar) : "",
     grid_emissions_factor_kg_co2e_per_kwh: options.grid_emissions_factor_kg_co2e_per_kwh ? formatNumber(options.grid_emissions_factor_kg_co2e_per_kwh) : "",
   };
 }

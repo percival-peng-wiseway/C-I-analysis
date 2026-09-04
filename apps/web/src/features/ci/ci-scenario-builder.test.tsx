@@ -36,6 +36,10 @@ describe("CiScenarioBuilder", () => {
     expect(screen.queryByText("PCS block from selected inverter")).toBeNull();
     expect(screen.queryByLabelText(/Inverter quantity/)).toBeNull();
     expect(screen.queryByText("Configured PCS")).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Model inverter reactive support" })).toBeNull();
+    expect(screen.queryByLabelText("Reactive support cap (kvar)")).toBeNull();
+    expect(screen.getByRole("region", { name: "Inverter / PCS profile" }).textContent).toContain("Reactive compensationOn");
+    expect(screen.getByRole("region", { name: "Inverter / PCS profile" }).textContent).toContain("Cap per inverter82.5 kvar");
 
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
 
@@ -57,6 +61,8 @@ describe("CiScenarioBuilder", () => {
       connection_options: {
         site_ac_headroom_kw: 250,
         allow_grid_charging: true,
+        reactive_support_enabled: true,
+        reactive_support_max_kvar: 82.5,
         grid_emissions_factor_kg_co2e_per_kwh: null,
         initial_soc_basis: "full_soc_physical_upper_bound",
       },
@@ -143,7 +149,7 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByText("1 candidate:").parentElement?.textContent).toBe("1 candidate: 100.000976562 kWp");
   });
 
-  it("restores and resubmits saved nine-decimal ranges without truncation", async () => {
+  it("restores saved ranges but derives reactive settings from the selected inverter profile", async () => {
     const onSubmit = vi.fn();
     const initialContext = {
       contract_version: "ci_design_context_v2",
@@ -184,17 +190,17 @@ describe("CiScenarioBuilder", () => {
     const steps = screen.getAllByRole("spinbutton", { name: "Step" }) as HTMLInputElement[];
     expect([minimums[0].value, maximums[0].value, steps[0].value]).toEqual(["100.000000001", "100.000000002", "0.000000001"]);
     expect([minimums[1].value, maximums[1].value, steps[1].value]).toEqual(["350.000000001", "350.000000002", "0.000000001"]);
-    expect((screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement).value).toBe("57");
+    expect(screen.queryByLabelText("Reactive support cap (kvar)")).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
     expect(onSubmit.mock.calls[0][0]).toMatchObject({
       pv_range: { minimum_kwp_dc: 100.000000001, maximum_kwp_dc: 100.000000002, step_kwp_dc: 0.000000001 },
       battery_range: { minimum_kwh: 350.000000001, maximum_kwh: 350.000000002, step_kwh: 0.000000001 },
-      connection_options: { reactive_support_enabled: true, reactive_support_max_kvar: 57 },
+      connection_options: { reactive_support_enabled: true, reactive_support_max_kvar: 82.5 },
     });
   });
 
-  it("preserves a manual reactive cap until the inverter profile is deliberately changed", async () => {
+  it("updates reactive compensation when another published inverter profile is selected", async () => {
     const user = userEvent.setup();
     const profiles: CiDeviceProfile = structuredClone(deviceProfile);
     profiles.solution_profiles.inverter_profiles.push({
@@ -204,20 +210,22 @@ describe("CiScenarioBuilder", () => {
       model: "H3-100-Plus",
       rated_active_power_kw: 100,
       rated_apparent_power_kva: 110,
+      reactive_support_enabled: false,
       maximum_reactive_power_kvar: 66,
     });
-    const view = render(<CiScenarioBuilder deviceProfile={profiles} error={null} isPending={false} onSubmit={vi.fn()} />);
-
-    await user.click(screen.getByRole("checkbox", { name: "Model inverter reactive support" }));
-    const cap = screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement;
-    await user.type(cap, "57");
-    expect(cap.value).toBe("57");
-
-    view.rerender(<CiScenarioBuilder deviceProfile={structuredClone(profiles)} error={null} isPending={false} onSubmit={vi.fn()} />);
-    expect((screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement).value).toBe("57");
+    const onSubmit = vi.fn();
+    render(<CiScenarioBuilder deviceProfile={profiles} error={null} isPending={false} onSubmit={onSubmit} />);
 
     await user.selectOptions(screen.getByLabelText("Inverter performance profile"), "inverter-100");
-    expect((screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement).value).toBe("66");
+    const inverterCard = screen.getByRole("region", { name: "Inverter / PCS profile" });
+    expect(inverterCard.textContent).toContain("Reactive compensationOff");
+    expect(inverterCard.textContent).toContain("Cap per inverter66 kvar");
+
+    await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      inverter_profile_id: "inverter-100",
+      connection_options: { reactive_support_enabled: false, reactive_support_max_kvar: 0 },
+    });
   });
 
   it("adopts a newly saved published battery profile without remounting", async () => {
@@ -321,7 +329,7 @@ describe("CiScenarioBuilder", () => {
 });
 
 const deviceProfile: CiDeviceProfile = {
-  contract_version: "ci_device_profile_v4",
+  contract_version: "ci_device_profile_v5",
   profile_id: "workspace_device_profile",
   currency: "AUD",
   tax_basis: "gst_exclusive",
@@ -400,7 +408,7 @@ const deviceProfile: CiDeviceProfile = {
       source_label: "Generic screening assumption",
       source_date: null,
     }],
-      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "published", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
+      inverter_profiles: [{ profile_id: "fox_h3_125_plus_v1", version: 1, status: "published", name: "H3-125-Plus evidence", manufacturer: "Fox ESS", model: "H3-125-Plus", rated_active_power_kw: 125, rated_apparent_power_kva: 137.5, reactive_support_enabled: true, maximum_reactive_power_kvar: 82.5, power_factor_leading_limit: 0.8, power_factor_lagging_limit: 0.8, pq_capability_curve_available: false, reactive_power_at_zero_active_power: true, night_reactive_capability: true, european_efficiency_percent: 98.1, maximum_efficiency_percent: 98.5, source_type: "supplier_data", source_label: "Supplied C&I device workbook", source_date: null }],
   },
   default_solution_profile_selection: {
     solar_profile_id: "generic_crystalline_pv_v1",

@@ -61,9 +61,9 @@ export interface CiProjectTariffProfileState {
 export const ciProjectTariffProfileQueryKey = (projectId: string) =>
   ["ci-project-tariff-profile", projectId] as const;
 
-const TARIFF_PROFILE_SAVE_ATTEMPTS = 2;
-const TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS = 100;
-const TARIFF_PROFILE_MAX_RETRY_DELAY_MS = 1_000;
+const TARIFF_PROFILE_SAVE_ATTEMPTS = 3;
+const TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS = 500;
+const TARIFF_PROFILE_MAX_RETRY_DELAY_MS = 30_000;
 
 export async function fetchCiProjectTariffProfile(
   projectId: string,
@@ -98,21 +98,29 @@ export async function saveCiProjectTariffProfile(
         body,
       });
     } catch (error) {
-      if (isAbortError(error) || attempt + 1 >= TARIFF_PROFILE_SAVE_ATTEMPTS) {
+      if (isAbortError(error)) {
         throw new Error("The project tariff profile could not be saved because the cloud connection was interrupted. Please try again.");
       }
-      await waitForTariffProfileRetry(TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS);
+      const confirmed = await confirmTariffProfileSave(url, input, fetcher);
+      if (confirmed !== null) return confirmed;
+      if (attempt + 1 >= TARIFF_PROFILE_SAVE_ATTEMPTS) {
+        throw new Error("The project tariff profile could not be saved because the cloud connection was interrupted. Please try again.");
+      }
+      await waitForTariffProfileRetry(tariffProfileRetryDelay(null, attempt));
       continue;
     }
     if (response.ok) return assertCiProjectTariffProfileState(await response.json());
 
     const failure = await readTariffProfileFailure(response);
-    if (
-      attempt + 1 < TARIFF_PROFILE_SAVE_ATTEMPTS
-      && response.status === 503
-      && isRecoverableContainerFailure(failure.errorCode)
-    ) {
-      await waitForTariffProfileRetry(tariffProfileRetryDelay(response.headers.get("Retry-After")));
+    if (isRecoverableTariffSaveFailure(response.status, failure.errorCode)) {
+      const confirmed = await confirmTariffProfileSave(url, input, fetcher);
+      if (confirmed !== null) return confirmed;
+      if (attempt + 1 >= TARIFF_PROFILE_SAVE_ATTEMPTS) {
+        throw new Error(tariffProfileErrorMessage(failure, response.status));
+      }
+      await waitForTariffProfileRetry(
+        tariffProfileRetryDelay(response.headers.get("Retry-After"), attempt),
+      );
       continue;
     }
     throw new Error(tariffProfileErrorMessage(failure, response.status));
@@ -330,13 +338,64 @@ function isRecoverableContainerFailure(errorCode: string | null) {
     || errorCode === "container_unavailable";
 }
 
-function tariffProfileRetryDelay(retryAfter: string | null) {
-  if (retryAfter === null) return TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS;
+function isRecoverableTariffSaveFailure(status: number, errorCode: string | null) {
+  return status === 503 && isRecoverableContainerFailure(errorCode);
+}
+
+async function confirmTariffProfileSave(
+  url: string,
+  input: { profile: CiProjectTariffProfile; approveForCalculation: boolean },
+  fetcher: typeof fetch,
+): Promise<CiProjectTariffProfileState | null> {
+  try {
+    const response = await fetcher(url, { headers: { Accept: "application/json" } });
+    if (!response.ok) return null;
+    const state = assertCiProjectTariffProfileState(await response.json());
+    const expectedStatus = input.approveForCalculation ? "approved" : "draft";
+    if (state.status !== expectedStatus || state.profile === null) return null;
+    return sameJsonValue(state.profile, input.profile) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => sameJsonValue(item, right[index]));
+  }
+  if (
+    left === null || right === null
+    || typeof left !== "object" || typeof right !== "object"
+  ) return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index]
+      && sameJsonValue(leftRecord[key], rightRecord[key])
+    ));
+}
+
+function tariffProfileRetryDelay(retryAfter: string | null, attempt: number) {
+  if (retryAfter === null) {
+    return Math.min(
+      TARIFF_PROFILE_MAX_RETRY_DELAY_MS,
+      TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS * (2 ** attempt),
+    );
+  }
   const seconds = Number(retryAfter);
   const requestedDelay = Number.isFinite(seconds)
     ? seconds * 1_000
     : Date.parse(retryAfter) - Date.now();
-  if (!Number.isFinite(requestedDelay)) return TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS;
+  if (!Number.isFinite(requestedDelay)) {
+    return tariffProfileRetryDelay(null, attempt);
+  }
   return Math.min(TARIFF_PROFILE_MAX_RETRY_DELAY_MS, Math.max(0, requestedDelay));
 }
 

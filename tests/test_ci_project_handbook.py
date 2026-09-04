@@ -555,6 +555,7 @@ def test_handbook_projects_profile_operands_and_optimizer_snapshot() -> None:
                 "name": "Inverter snapshot",
                 "rated_active_power_kw": 125.0,
                 "rated_apparent_power_kva": 137.5,
+                "reactive_support_enabled": True,
                 "maximum_reactive_power_kvar": 82.5,
                 "european_efficiency_percent": 98.1,
                 "pq_capability_curve_available": True,
@@ -638,8 +639,28 @@ def test_handbook_projects_profile_operands_and_optimizer_snapshot() -> None:
         "solution.profile_snapshot.inverter.rated_apparent_power_kva"
     ]["active_in_current_model"] is True
     assert solution_parameters[
+        "solution.profile_snapshot.inverter.reactive_support_enabled"
+    ]["active_in_current_model"] is True
+    assert solution_parameters[
         "solution.profile_snapshot.inverter.european_efficiency_percent"
     ]["active_in_current_model"] is False
+    reactive_enabled = solution_parameters[
+        "solution.technical.reactive_support_enabled"
+    ]
+    assert reactive_enabled["value"] is True
+    assert reactive_enabled["source_kind"] == "profile_snapshot"
+    assert reactive_enabled["source_path"].endswith(
+        "inverter_profile.reactive_support_enabled"
+    )
+    assert reactive_enabled["editable"] is False
+    reactive_cap = solution_parameters[
+        "solution.technical.reactive_support_max_kvar"
+    ]
+    assert reactive_cap["value"] == 82.5
+    assert reactive_cap["source_kind"] == "profile_snapshot"
+    assert reactive_cap["source_path"].endswith(
+        "inverter_profile.maximum_reactive_power_kvar"
+    )
     assert all(
         item["editable"] is False
         for parameter_id, item in solution_parameters.items()
@@ -658,6 +679,26 @@ def test_handbook_projects_profile_operands_and_optimizer_snapshot() -> None:
     assert values["pv_charge"] == 12000.0
     assert values["exact_bill"] == 80000.0
     assert values["customer_facing_permission"] is False
+
+    solution_calculations = {
+        item["calculation_id"]: item
+        for item in modules["solution_generator"]["calculations"]
+    }
+    reactive_formula = solution_calculations["solution.reactive_cap"]
+    assert "candidate_PCS_kW / profile_rated_active_kW" in reactive_formula[
+        "formula"
+    ]
+    assert "Legacy project-level reactive switches" in reactive_formula[
+        "description"
+    ]
+    assert "configured_Q_cap" not in reactive_formula["formula"]
+    scenario_calculations = {
+        item["calculation_id"]: item
+        for item in modules["scenario_analysis"]["calculations"]
+    }
+    assert "remains an analyst assumption" in scenario_calculations[
+        "scenario.pq_polygon"
+    ]["description"]
 
 
 def test_handbook_explains_peak_dispatch_and_finance_provenance() -> None:

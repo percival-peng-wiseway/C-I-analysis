@@ -547,6 +547,11 @@ def _battery_performance(profile: dict[str, object]) -> dict[str, float | int | 
 def _inverter_performance(
     profile: dict[str, object],
 ) -> dict[str, float | int | str]:
+    reactive_support_enabled = profile.get("reactive_support_enabled")
+    if not isinstance(reactive_support_enabled, bool):
+        raise _invalid(
+            "The inverter profile reactive-support policy is invalid."
+        )
     active = _bounded(profile.get("rated_active_power_kw"), 1e-9, 1_000_000)
     apparent = _bounded(
         profile.get("rated_apparent_power_kva"), active, 1_000_000
@@ -554,11 +559,16 @@ def _inverter_performance(
     reactive = _bounded(
         profile.get("maximum_reactive_power_kvar"), 0, apparent
     )
+    if reactive_support_enabled and reactive <= 0:
+        raise _invalid(
+            "An inverter profile with reactive support enabled must provide a positive reactive-power capability."
+        )
     return {
         "profile_id": _profile_id(profile),
         "version": _integer(profile.get("version"), 1, 10_000),
         "rated_active_power_kw": active,
         "rated_apparent_power_kva": apparent,
+        "reactive_support_enabled": reactive_support_enabled,
         "maximum_reactive_power_kvar": reactive,
         "european_efficiency_percent": _bounded(
             profile.get("european_efficiency_percent"), 1, 100
@@ -608,30 +618,44 @@ def _scenario(
         if inverter_performance is not None
         else 0.0
     )
-    reactive_enabled = connection["reactive_support_enabled"]
-    # The authored cap is an absolute whole-system ceiling. The selected
-    # inverter profile contributes a separate capability ceiling that scales
-    # continuously with each candidate's configured PCS capacity.
-    reactive_cap = float(connection["reactive_support_max_kvar"])
-    if inverter_performance is not None and reactive_enabled:
-        reactive_cap = min(
-            reactive_cap,
-            inverter_performance_scale
-            * float(inverter_performance["maximum_reactive_power_kvar"]),
+    if inverter_performance is not None:
+        # A saved inverter snapshot is the hardware authority.  The candidate
+        # is a continuously scaled screening system, so both its Q capability
+        # and apparent-power envelope use the same PCS/rated-kW scale.  The
+        # request-level fields are retained only for designs without an
+        # inverter profile.
+        reactive_enabled = bool(
+            inverter_performance["reactive_support_enabled"]
         )
-    apparent_limit = (
-        (
+        reactive_cap = (
+            inverter_performance_scale
+            * float(inverter_performance["maximum_reactive_power_kvar"])
+            if reactive_enabled
+            else 0.0
+        )
+        apparent_limit = (
             inverter_performance_scale
             * float(inverter_performance["rated_apparent_power_kva"])
-            if inverter_performance is not None
-            else math.hypot(inverter_capacity_kw_ac, reactive_cap)
+            if reactive_enabled
+            else None
         )
-        if reactive_enabled
-        else None
-    )
+    else:
+        # Compatibility path for legacy designs that have no saved inverter
+        # profile snapshot.
+        reactive_enabled = connection["reactive_support_enabled"]
+        reactive_cap = (
+            float(connection["reactive_support_max_kvar"])
+            if reactive_enabled
+            else 0.0
+        )
+        apparent_limit = (
+            math.hypot(inverter_capacity_kw_ac, reactive_cap)
+            if reactive_enabled
+            else None
+        )
     reactive_signature = {
         "reactive_support_enabled": reactive_enabled,
-        "reactive_support_max_kvar": reactive_cap if reactive_enabled else 0.0,
+        "reactive_support_max_kvar": reactive_cap,
         "shared_inverter_apparent_power_limit_kva": apparent_limit,
         "reactive_capability_curve": "circular_pq",
         "reactive_capability_provenance": "analyst_assumption",
@@ -722,6 +746,16 @@ def _design_context(
         float(battery_performance["nominal_capacity_kwh_per_unit"])
         / float(battery_performance["continuous_power_kw_per_unit"])
     )
+    reactive_support_enabled = (
+        inverter_performance["reactive_support_enabled"]
+        if inverter_performance is not None
+        else connection["reactive_support_enabled"]
+    )
+    reactive_support_reference_kvar = (
+        inverter_performance["maximum_reactive_power_kvar"]
+        if inverter_performance is not None
+        else connection["reactive_support_max_kvar"]
+    )
     return {
         "contract_version": "ci_design_context_v2",
         "existing_solar": _empty_existing_solar(),
@@ -780,12 +814,11 @@ def _design_context(
             "minimum_soc_percent": round(minimum_soc * 100, 8),
             "maximum_soc_percent": 100.0,
             "allow_grid_charging": connection["allow_grid_charging"],
-            "reactive_support_enabled": connection[
-                "reactive_support_enabled"
-            ],
-            "reactive_support_max_kvar": connection[
-                "reactive_support_max_kvar"
-            ],
+            # With a selected inverter these values describe the saved profile
+            # reference unit.  Each candidate's executable Q/S limits are
+            # scaled from that immutable profile snapshot in `_scenario`.
+            "reactive_support_enabled": reactive_support_enabled,
+            "reactive_support_max_kvar": reactive_support_reference_kvar,
             "grid_emissions_factor_kg_co2e_per_kwh": (
                 connection["grid_emissions_factor_kg_co2e_per_kwh"] or 0.0
             ),

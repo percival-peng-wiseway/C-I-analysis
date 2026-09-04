@@ -51,6 +51,7 @@ export interface CiInverterSolutionProfile {
   model: string;
   rated_active_power_kw: number;
   rated_apparent_power_kva: number;
+  reactive_support_enabled: boolean;
   maximum_reactive_power_kvar: number;
   power_factor_leading_limit: number;
   power_factor_lagging_limit: number;
@@ -70,7 +71,7 @@ export interface CiSolutionProfileSelection {
 }
 
 export interface CiDeviceProfile {
-  contract_version: "ci_device_profile_v4";
+  contract_version: "ci_device_profile_v5";
   profile_id: "workspace_device_profile";
   currency: "AUD";
   tax_basis: "gst_exclusive";
@@ -177,7 +178,7 @@ export function assertCiDeviceProfileState(value: unknown): CiDeviceProfileState
 
 function isProfile(value: unknown): value is CiDeviceProfile {
   const profile = value as CiDeviceProfile;
-  if (!profile || profile.contract_version !== "ci_device_profile_v4") return false;
+  if (!profile || profile.contract_version !== "ci_device_profile_v5") return false;
   const solarProfiles = profile.solution_profiles?.solar_profiles;
   const batteryProfiles = profile.solution_profiles?.battery_profiles;
   const inverterProfiles = profile.solution_profiles?.inverter_profiles;
@@ -352,7 +353,7 @@ function isInverterSolutionProfile(value: unknown): value is CiInverterSolutionP
   const profile = value as CiInverterSolutionProfile;
   return Boolean(
     profile &&
-    hasExactKeys(profile, ["profile_id", "version", "status", "name", "manufacturer", "model", "rated_active_power_kw", "rated_apparent_power_kva", "maximum_reactive_power_kvar", "power_factor_leading_limit", "power_factor_lagging_limit", "pq_capability_curve_available", "reactive_power_at_zero_active_power", "night_reactive_capability", "european_efficiency_percent", "maximum_efficiency_percent", "source_type", "source_label", "source_date"]) &&
+    hasExactKeys(profile, ["profile_id", "version", "status", "name", "manufacturer", "model", "rated_active_power_kw", "rated_apparent_power_kva", "reactive_support_enabled", "maximum_reactive_power_kvar", "power_factor_leading_limit", "power_factor_lagging_limit", "pq_capability_curve_available", "reactive_power_at_zero_active_power", "night_reactive_capability", "european_efficiency_percent", "maximum_efficiency_percent", "source_type", "source_label", "source_date"]) &&
     isIdentifier(profile.profile_id) &&
     isVersion(profile.version) &&
     isStatus(profile.status) &&
@@ -360,7 +361,9 @@ function isInverterSolutionProfile(value: unknown): value is CiInverterSolutionP
     isPositiveFinite(profile.rated_active_power_kw) &&
     isPositiveFinite(profile.rated_apparent_power_kva) &&
     profile.rated_apparent_power_kva >= profile.rated_active_power_kw &&
+    typeof profile.reactive_support_enabled === "boolean" &&
     isFiniteInRange(profile.maximum_reactive_power_kvar, 0, 1_000_000) &&
+    (!profile.reactive_support_enabled || profile.maximum_reactive_power_kvar > 0) &&
     profile.maximum_reactive_power_kvar <= profile.rated_apparent_power_kva &&
     isFiniteInRange(profile.power_factor_leading_limit, 0, 1) &&
     isFiniteInRange(profile.power_factor_lagging_limit, 0, 1) &&

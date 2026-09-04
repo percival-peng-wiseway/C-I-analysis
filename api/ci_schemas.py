@@ -81,6 +81,7 @@ class CiDeviceProfileRequest(BaseModel):
         "ci_device_profile_v2",
         "ci_device_profile_v3",
         "ci_device_profile_v4",
+        "ci_device_profile_v5",
     ] = "ci_device_profile_v2"
     profile_id: Literal["workspace_device_profile"] = "workspace_device_profile"
     currency: Literal["AUD"] = "AUD"

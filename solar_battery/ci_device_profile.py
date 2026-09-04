@@ -14,7 +14,8 @@ from solar_battery.durable_cockpit.identity import LocalActorContext
 from solar_battery.durable_cockpit.orm import CiDeviceProfileModel
 
 
-CI_DEVICE_PROFILE_CONTRACT_VERSION = "ci_device_profile_v4"
+CI_DEVICE_PROFILE_CONTRACT_VERSION = "ci_device_profile_v5"
+CI_V4_DEVICE_PROFILE_CONTRACT_VERSION = "ci_device_profile_v4"
 CI_V3_DEVICE_PROFILE_CONTRACT_VERSION = "ci_device_profile_v3"
 CI_V2_DEVICE_PROFILE_CONTRACT_VERSION = "ci_device_profile_v2"
 CI_LEGACY_DEVICE_PROFILE_CONTRACT_VERSION = "ci_device_profile_v1"
@@ -90,6 +91,7 @@ _INVERTER_PROFILE_KEYS = {
     "model",
     "rated_active_power_kw",
     "rated_apparent_power_kva",
+    "reactive_support_enabled",
     "maximum_reactive_power_kvar",
     "power_factor_leading_limit",
     "power_factor_lagging_limit",
@@ -119,6 +121,7 @@ def _fox_h3_plus_profile(
         "model": f"H3-{size}-Plus",
         "rated_active_power_kw": active_power_kw,
         "rated_apparent_power_kva": apparent_power_kva,
+        "reactive_support_enabled": True,
         "maximum_reactive_power_kvar": reactive_power_kvar,
         "power_factor_leading_limit": 0.8,
         "power_factor_lagging_limit": 0.8,
@@ -315,6 +318,7 @@ def ci_device_profile_state(
     if (
         row.profile_contract_version not in {
             CI_DEVICE_PROFILE_CONTRACT_VERSION,
+            CI_V4_DEVICE_PROFILE_CONTRACT_VERSION,
             CI_V3_DEVICE_PROFILE_CONTRACT_VERSION,
             CI_V2_DEVICE_PROFILE_CONTRACT_VERSION,
             CI_LEGACY_DEVICE_PROFILE_CONTRACT_VERSION,
@@ -401,6 +405,8 @@ def validate_ci_device_profile(profile: dict[str, object]) -> dict[str, object]:
         return _upgrade_v2_profile(profile)
     if isinstance(profile, dict) and profile.get("contract_version") == CI_V3_DEVICE_PROFILE_CONTRACT_VERSION:
         return _upgrade_v3_profile(profile)
+    if isinstance(profile, dict) and profile.get("contract_version") == CI_V4_DEVICE_PROFILE_CONTRACT_VERSION:
+        return _upgrade_v4_profile(profile)
     if (
         not isinstance(profile, dict)
         or profile.get("contract_version") != CI_DEVICE_PROFILE_CONTRACT_VERSION
@@ -534,6 +540,50 @@ def _upgrade_v3_profile(profile: dict[str, object]) -> dict[str, object]:
         merged_profiles[group] = [*existing, *additions]
     merged_profiles["inverter_profiles"] = list(default_profiles["inverter_profiles"])
     upgraded["solution_profiles"] = merged_profiles
+    return validate_ci_device_profile(upgraded)
+
+
+def _upgrade_v4_profile(profile: dict[str, object]) -> dict[str, object]:
+    """Add an explicit reactive-control policy without inventing custom capability.
+
+    The six bundled Fox profiles were authored with reactive capability evidence
+    and are enabled by this contract migration when their saved kvar capability
+    remains positive.  Older user-created profiles are preserved byte-for-byte
+    apart from the new switch, which defaults closed until the user explicitly
+    enables and saves it.
+    """
+
+    upgraded = json.loads(json.dumps(profile))
+    solution_profiles = upgraded.get("solution_profiles")
+    if not isinstance(solution_profiles, dict):
+        raise CiProjectError(
+            "ci_device_profile_invalid",
+            "The v4 device solution profiles are unavailable.",
+        )
+    inverter_profiles = solution_profiles.get("inverter_profiles")
+    if not isinstance(inverter_profiles, list):
+        raise CiProjectError(
+            "ci_device_profile_invalid",
+            "The v4 inverter profiles are unavailable.",
+        )
+    bundled_profile_ids = {
+        f"fox_ess_h3_{size}_plus_v1" for size in (50, 60, 75, 80, 100, 125)
+    }
+    for inverter in inverter_profiles:
+        if not isinstance(inverter, dict):
+            raise CiProjectError(
+                "ci_device_profile_invalid",
+                "The v4 inverter profiles are invalid.",
+            )
+        maximum_kvar = inverter.get("maximum_reactive_power_kvar")
+        inverter["reactive_support_enabled"] = bool(
+            inverter.get("profile_id") in bundled_profile_ids
+            and isinstance(maximum_kvar, (int, float))
+            and not isinstance(maximum_kvar, bool)
+            and math.isfinite(maximum_kvar)
+            and maximum_kvar > 0
+        )
+    upgraded["contract_version"] = CI_DEVICE_PROFILE_CONTRACT_VERSION
     return validate_ci_device_profile(upgraded)
 
 
@@ -773,6 +823,9 @@ def _inverter_profile(value: object) -> dict[str, object]:
         "rated_apparent_power_kva": _profile_number(
             source.get("rated_apparent_power_kva"), "rated apparent power", minimum=0, minimum_inclusive=False
         ),
+        "reactive_support_enabled": _profile_boolean(
+            source.get("reactive_support_enabled"), "reactive support enabled"
+        ),
         "maximum_reactive_power_kvar": _profile_number(
             source.get("maximum_reactive_power_kvar"), "maximum reactive power", minimum=0
         ),
@@ -808,6 +861,14 @@ def _inverter_profile(value: object) -> dict[str, object]:
         raise CiProjectError(
             "ci_device_profile_invalid",
             "Inverter reactive power cannot exceed its apparent power rating.",
+        )
+    if (
+        normalized["reactive_support_enabled"]
+        and normalized["maximum_reactive_power_kvar"] <= 0
+    ):
+        raise CiProjectError(
+            "ci_device_profile_invalid",
+            "Enabled inverter reactive support requires a positive reactive power rating.",
         )
     if normalized["european_efficiency_percent"] > normalized["maximum_efficiency_percent"]:
         raise CiProjectError(
