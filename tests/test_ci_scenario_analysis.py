@@ -804,6 +804,22 @@ def test_complete_analysis_success_returns_coordinator_result(monkeypatch) -> No
     assert shutdown_calls == [(False, False)]
 
 
+def test_real_coordinator_process_propagates_safe_validation_error(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        analyze_ci_physical_scenarios(
+            b"unused-invalid-evidence",
+            profile={},
+            scenarios=[],
+        )
+
+    assert exc_info.value.code == "scenario_contract_invalid"
+
+
 def test_transient_coordinator_capability_failure_is_reprobed_safely(
     monkeypatch,
 ) -> None:
@@ -922,7 +938,76 @@ def test_coordinator_wraps_expected_errors_in_pickle_safe_values(
     )
 
 
-def test_posix_process_group_failure_fails_closed(monkeypatch) -> None:
+def test_coordinator_runs_core_without_a_nested_process_pool(monkeypatch) -> None:
+    observed_worker_counts: list[int | None] = []
+
+    def execute_core(
+        _upload_bytes,
+        *,
+        profile,
+        scenarios,
+        scenario_process_workers=None,
+    ):
+        assert profile == {"profile_id": "profile"}
+        assert scenarios == [{"scenario_id": "one"}]
+        observed_worker_counts.append(scenario_process_workers)
+        return {"contract_version": "serial-coordinator"}
+
+    monkeypatch.setattr(
+        scenario_module,
+        "_analyze_ci_physical_scenarios_core",
+        execute_core,
+    )
+
+    outcome = scenario_module._run_physical_analysis_coordinator(
+        b"evidence",
+        profile={"profile_id": "profile"},
+        scenarios=[{"scenario_id": "one"}],
+    )
+
+    assert outcome == (
+        scenario_module._COORDINATOR_RESULT_READY,
+        {"contract_version": "serial-coordinator"},
+    )
+    assert observed_worker_counts == [1]
+
+
+def test_explicit_serial_worker_count_never_creates_nested_pool(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the production coordinator must not create a nested process pool"
+        ),
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_run_scenario",
+        lambda scenario, *_args: {"scenario_id": scenario.scenario_id},
+    )
+
+    result = scenario_module._execute_authored_scenarios(
+        authored,
+        (),
+        {},
+        {},
+        {},
+        {},
+        {},
+        worker_count=1,
+    )
+
+    assert result == [{"scenario_id": "battery-a"}]
+
+
+def test_posix_process_group_failure_uses_direct_termination_fallback(
+    monkeypatch,
+    caplog,
+) -> None:
     class FakePosixOs:
         name = "posix"
 
@@ -932,11 +1017,12 @@ def test_posix_process_group_failure_fails_closed(monkeypatch) -> None:
 
     monkeypatch.setattr(scenario_module, "os", FakePosixOs)
 
-    with pytest.raises(RuntimeError, match="could not be established"):
-        scenario_module._start_analysis_process_group()
+    scenario_module._start_analysis_process_group()
+
+    assert "coordinator_process_group_unavailable" in caplog.text
 
 
-def test_coordinator_abort_kills_the_posix_solver_process_group(
+def test_coordinator_abort_kills_the_posix_coordinator_process_group(
     monkeypatch,
 ) -> None:
     signals: list[tuple[int, object]] = []

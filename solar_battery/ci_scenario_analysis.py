@@ -194,10 +194,10 @@ def analyze_ci_physical_scenarios(
 
     Production configurations run the *entire* calculation in a disposable
     coordinator process.  The parent API process owns the wall-clock deadline
-    and can terminate the coordinator (and its solver children on POSIX) even
-    when parsing, tariff reconstruction or a native solver call stops making
-    progress.  The one-worker configuration remains inline for local tests and
-    runtimes that explicitly choose the legacy serial execution mode.
+    and can terminate that coordinator even when parsing, tariff reconstruction
+    or a native solver call stops making progress.  The one-worker configuration
+    remains inline for local tests and runtimes that explicitly choose the
+    legacy serial execution mode.
     """
 
     if _configured_scenario_process_workers() <= 1:
@@ -218,6 +218,7 @@ def _analyze_ci_physical_scenarios_core(
     *,
     profile: dict[str, Any],
     scenarios: object,
+    scenario_process_workers: int | None = None,
 ) -> dict[str, object]:
     """Execute the complete physical analysis inside the selected process."""
 
@@ -255,6 +256,7 @@ def _analyze_ci_physical_scenarios_core(
         profile,
         annual_tariff_baseline_cache,
         pv_generation_cache,
+        worker_count=scenario_process_workers,
     )
     _LOGGER.info(
         "ci_scenario_analysis stage=complete scenarios=%d elapsed_s=%.3f",
@@ -359,10 +361,20 @@ def _execute_physical_analysis_in_coordinator(
         _ScenarioProcessPoolBroken,
         _ScenarioProcessExecutionFailed,
     ) as exc:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_failed error_type=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         _abort_analysis_coordinator(executor, futures)
         executor = None
         raise CiScenarioAnalysisError("scenario_execution_failed") from exc
     except Exception as exc:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_failed error_type=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         _abort_analysis_coordinator(executor, futures)
         executor = None
         raise CiScenarioAnalysisError("scenario_execution_failed") from exc
@@ -378,7 +390,13 @@ def _run_physical_analysis_coordinator(
     profile: dict[str, Any],
     scenarios: object,
 ) -> tuple[str, object]:
-    """Return only pickle-safe values across the coordinator boundary."""
+    """Return only pickle-safe values across the coordinator boundary.
+
+    The coordinator is already the disposable, deadline-owned isolation
+    boundary.  Run HiGHS directly in it instead of creating a second process
+    pool: nested pools are not portable across container runtimes, while
+    serial work here remains fully terminable by the parent watchdog.
+    """
 
     try:
         return (
@@ -387,6 +405,7 @@ def _run_physical_analysis_coordinator(
                 upload_bytes,
                 profile=profile,
                 scenarios=scenarios,
+                scenario_process_workers=1,
             ),
         )
     except CiScenarioAnalysisError as exc:
@@ -397,6 +416,7 @@ def _run_physical_analysis_coordinator(
         _LOGGER.warning(
             "ci_scenario_analysis stage=coordinator_execution_failed error_type=%s",
             type(exc).__name__,
+            exc_info=True,
         )
         return (_COORDINATOR_RESULT_EXECUTION_ERROR, None)
 
@@ -445,22 +465,26 @@ def _unwrap_physical_analysis_coordinator_outcome(
 
 
 def _start_analysis_process_group() -> None:
-    """Give a production coordinator its own POSIX process group."""
+    """Give a production coordinator its own POSIX process group when allowed.
+
+    The coordinator never creates child processes, so direct termination is a
+    complete fallback when a container runtime does not permit ``setsid``.
+    """
 
     if os.name != "posix":
         return
     if not hasattr(os, "setsid"):
-        raise RuntimeError(
-            "POSIX process-group isolation is unavailable for analysis"
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_process_group_unavailable"
         )
+        return
     try:
         os.setsid()
-    except OSError as exc:
-        # Never enter the core analysis without a group that the parent can
-        # terminate together with every nested solver process.
-        raise RuntimeError(
-            "POSIX process-group isolation could not be established"
-        ) from exc
+    except OSError:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_process_group_unavailable",
+            exc_info=True,
+        )
 
 
 def _execute_authored_scenarios(
@@ -471,16 +495,25 @@ def _execute_authored_scenarios(
     profile: dict[str, Any],
     annual_tariff_baseline_cache: dict[str, object],
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]],
+    *,
+    worker_count: int | None = None,
 ) -> list[dict[str, object]]:
     """Run only the requested scenarios, with bounded process isolation.
 
-    HiGHS has a process-global scheduler.  Independent spawned processes keep
-    one deterministic solver thread per process while allowing standard-4 to
-    solve a bounded number of battery scenarios concurrently. PV-only rows
-    remain in the coordinator because they do not invoke HiGHS.
+    HiGHS has a process-global scheduler.  Explicit callers can use bounded
+    spawned processes with one deterministic solver thread per process.  The
+    production coordinator passes ``worker_count=1`` so container execution
+    never nests process pools. PV-only rows remain inline because they do not
+    invoke HiGHS.
     """
 
-    workers = _configured_scenario_process_workers()
+    workers = (
+        _configured_scenario_process_workers()
+        if worker_count is None
+        else worker_count
+    )
+    if not 1 <= workers <= MAX_SCENARIO_PROCESS_WORKERS:
+        raise CiScenarioAnalysisError("scenario_execution_failed")
     indexed_battery = tuple(
         (index, scenario)
         for index, scenario in enumerate(authored)
@@ -774,7 +807,7 @@ def _abort_analysis_coordinator(
     executor: ProcessPoolExecutor | None,
     futures: list[Any],
 ) -> None:
-    """Stop the coordinator and its nested solver workers within four seconds."""
+    """Stop the coordinator within four seconds, using its group when present."""
 
     for future in futures:
         try:
