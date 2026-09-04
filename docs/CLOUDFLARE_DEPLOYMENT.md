@@ -93,8 +93,9 @@ this value.
 
 ## Verification
 
-1. Confirm `/api/health` returns `{"status":"healthy"}` after the container
-   has provisioned.
+1. Confirm `/api/health` returns `status: "healthy"` after the container has
+   provisioned, and that `scenario_analysis_source_sha256` matches the source
+   hash from the release being verified.
 2. Confirm an unauthenticated non-health API request is rejected.
 3. Sign in through Cloudflare Access and create a synthetic project.
 4. Upload only synthetic evidence, restart the container, and confirm the

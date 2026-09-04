@@ -23,7 +23,10 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY api ./api
-COPY solar_battery ./solar_battery
+# Keep the source-directory spelling explicit. Besides being clearer, changing
+# this instruction invalidates any stale remote-builder layer left by an older
+# deployment so the next image must recopy the authoritative Python package.
+COPY ./solar_battery/ ./solar_battery/
 COPY alembic_ci ./alembic_ci
 COPY alembic-ci.ini ./
 COPY scripts/start_cloudflare_container.sh /usr/local/bin/start-e3-ci
