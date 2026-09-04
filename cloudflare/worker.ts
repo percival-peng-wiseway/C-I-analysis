@@ -287,11 +287,11 @@ export class E3ApiContainer extends Container<Env> {
   }
 }
 
-// v2 intentionally leaves the pre-watchdog container/DO pairing behind.
+// The versioned name intentionally leaves earlier container/DO pairings behind.
 // Project records and evidence live in PostgreSQL/R2, so rotating this
 // infrastructure-only identity is data-safe and guarantees that requests
 // after the container rollout start against the current image.
-const PRIMARY_CONTAINER_NAME = "primary-v2";
+const PRIMARY_CONTAINER_NAME = "primary-v3";
 
 function primaryContainer(env: Env) {
   return env.E3_API.get(env.E3_API.idFromName(PRIMARY_CONTAINER_NAME));
