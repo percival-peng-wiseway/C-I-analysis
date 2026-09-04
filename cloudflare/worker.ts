@@ -175,6 +175,13 @@ function canRetryContainerProvisioning(
   ].includes(operation);
 }
 
+function canRecoverContainerFailure(
+  failureCode: InfrastructureErrorCode,
+): boolean {
+  return failureCode === "container_provisioning"
+    || failureCode === "container_unavailable";
+}
+
 export class E3ApiContainer extends Container<Env> {
   private lifecycleRequestId: string = crypto.randomUUID();
   private lifecycleStartedAt = Date.now();
@@ -424,16 +431,27 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
   let didRetry = false;
   try {
     let response = await container.fetch(upstreamRequest);
+    const initialFailureCode = await infrastructureErrorCode(response);
     if (
       retryRequest !== null &&
-      await infrastructureErrorCode(response) === "container_provisioning"
+      initialFailureCode !== null &&
+      canRecoverContainerFailure(initialFailureCode)
     ) {
       didRetry = true;
       logOperation("info", {
         request_id: requestId,
         operation,
-        status: "retrying_container_provisioning",
+        status: `retrying_${initialFailureCode}`,
         elapsed: Date.now() - startedAt,
+      });
+      await container.startAndWaitForPorts({
+        ports: API_PORT,
+        cancellationOptions: {
+          abort: request.signal,
+          instanceGetTimeoutMS: CONTAINER_INSTANCE_TIMEOUT_MS,
+          portReadyTimeoutMS: CONTAINER_PORT_TIMEOUT_MS,
+          waitInterval: CONTAINER_WAIT_INTERVAL_MS,
+        },
       });
       response = await container.fetch(retryRequest);
     }
@@ -457,16 +475,25 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
     if (
       retryRequest !== null &&
       !didRetry &&
-      failureCode === "container_provisioning"
+      canRecoverContainerFailure(failureCode)
     ) {
       didRetry = true;
       logOperation("info", {
         request_id: requestId,
         operation,
-        status: "retrying_container_provisioning",
+        status: `retrying_${failureCode}`,
         elapsed: Date.now() - startedAt,
       });
       try {
+        await container.startAndWaitForPorts({
+          ports: API_PORT,
+          cancellationOptions: {
+            abort: request.signal,
+            instanceGetTimeoutMS: CONTAINER_INSTANCE_TIMEOUT_MS,
+            portReadyTimeoutMS: CONTAINER_PORT_TIMEOUT_MS,
+            waitInterval: CONTAINER_WAIT_INTERVAL_MS,
+          },
+        });
         let response = await container.fetch(retryRequest);
         const retryFailureCode = await infrastructureErrorCode(response);
         if (retryFailureCode !== null) {
