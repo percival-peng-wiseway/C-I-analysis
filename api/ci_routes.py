@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -166,6 +168,7 @@ from solar_battery.durable_cockpit.object_store import ObjectStore
 
 
 router = APIRouter(tags=["commercial-industrial"])
+_LOGGER = logging.getLogger(__name__)
 
 
 @router.get("/commercial-industrial/workspace-readiness")
@@ -1258,6 +1261,8 @@ def post_ci_project_tariff_replay(
     payload: CiTariffReplayRequest | None = None,
 ) -> dict[str, object]:
     """Replay the selected saved designs against the approved evidence-bound tariff."""
+    started_at = time.perf_counter()
+    selected_scenario_count = 0
     actor = identity_provider.current()
     try:
         with session_factory() as session:
@@ -1285,6 +1290,7 @@ def post_ci_project_tariff_replay(
                 candidates,
                 scenario_ids=(payload.scenario_ids if payload is not None else None),
             )
+            selected_scenario_count = len(selected_candidates)
             feasibility_result = feasibility.get("result")
             feasibility_scenarios = (
                 feasibility_result.get("scenarios")
@@ -1353,10 +1359,20 @@ def post_ci_project_tariff_replay(
                 "Review and approve the project tariff table before running Finance Analysis.",
             )
         expected_profile_sha256 = tariff_profile_sha256(profile)
+        _LOGGER.info(
+            "ci_tariff_replay stage=analysis_start scenarios=%d elapsed_s=%.3f",
+            selected_scenario_count,
+            time.perf_counter() - started_at,
+        )
         result = analyze_ci_physical_scenarios(
             interval.data,
             profile=profile,
             scenarios=selected_candidates,
+        )
+        _LOGGER.info(
+            "ci_tariff_replay stage=analysis_complete scenarios=%d elapsed_s=%.3f",
+            selected_scenario_count,
+            time.perf_counter() - started_at,
         )
         stored_result = result
         with session_factory() as session:
@@ -1393,8 +1409,19 @@ def post_ci_project_tariff_replay(
                 )
                 if payload is not None and payload.persistence_mode == "merge_checkpoint":
                     stored_result = saved_state["result"]
+        _LOGGER.info(
+            "ci_tariff_replay stage=persisted scenarios=%d elapsed_s=%.3f",
+            selected_scenario_count,
+            time.perf_counter() - started_at,
+        )
         return stored_result
     except (CiEvidenceIntakeError, CiProjectError) as exc:
+        _LOGGER.warning(
+            "ci_tariff_replay stage=failed scenarios=%d error_type=%s elapsed_s=%.3f",
+            selected_scenario_count,
+            type(exc).__name__,
+            time.perf_counter() - started_at,
+        )
         if isinstance(exc, CiProjectError):
             raise _project_http_error(exc) from exc
         raise HTTPException(
@@ -1402,6 +1429,12 @@ def post_ci_project_tariff_replay(
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
     except (CiTariffAnalysisError, CiScenarioAnalysisError) as exc:
+        _LOGGER.warning(
+            "ci_tariff_replay stage=failed scenarios=%d error_type=%s elapsed_s=%.3f",
+            selected_scenario_count,
+            type(exc).__name__,
+            time.perf_counter() - started_at,
+        )
         raise _analysis_http_error(exc) from exc
 
 

@@ -479,6 +479,7 @@ def test_selected_battery_scenarios_use_bounded_process_chunks(
     monkeypatch,
 ) -> None:
     profile = _profile()
+    raw_streams = _streams()
     baseline = {
         "profile": {"profile_id": "synthetic"},
         "demand_evidence": {
@@ -491,31 +492,46 @@ def test_selected_battery_scenarios_use_bounded_process_chunks(
     }
     created_workers: list[int] = []
     submitted_ids: list[list[str]] = []
+    result_timeouts: list[float | None] = []
+    shutdown_calls: list[tuple[bool, bool]] = []
+    compiled_memberships = 0
+    real_compile_membership = (
+        scenario_module._compile_tariff_row_membership
+    )
+
+    def compile_membership(*args, **kwargs):
+        nonlocal compiled_memberships
+        compiled_memberships += 1
+        return real_compile_membership(*args, **kwargs)
 
     class ImmediateFuture:
         def __init__(self, value):
             self.value = value
 
-        def result(self):
+        def result(self, timeout=None):
+            result_timeouts.append(timeout)
             return self.value
 
     class ImmediateProcessPool:
         def __init__(self, *, max_workers, **_kwargs):
             created_workers.append(max_workers)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
         def submit(self, function, indexed, *args):
             submitted_ids.append(
                 [scenario.scenario_id for _index, scenario in indexed]
             )
+            assert all(argument is not raw_streams for argument in args)
+            assert any(
+                isinstance(argument, scenario_module._TariffRowMembership)
+                for argument in args
+            )
             return ImmediateFuture(function(indexed, *args))
 
+        def shutdown(self, *, wait, cancel_futures=False):
+            shutdown_calls.append((wait, cancel_futures))
+
     monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "120")
     monkeypatch.setattr(
         scenario_module,
         "ProcessPoolExecutor",
@@ -529,7 +545,19 @@ def test_selected_battery_scenarios_use_bounded_process_chunks(
     monkeypatch.setattr(
         scenario_module,
         "validated_ci_nem12_evidence",
-        lambda *_args, **_kwargs: {"streams": _streams()},
+        lambda *_args, **_kwargs: {"streams": raw_streams},
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_compile_tariff_row_membership",
+        compile_membership,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_row_in_window",
+        lambda *_args, **_kwargs: pytest.fail(
+            "tariff windows must not be reparsed inside each scenario"
+        ),
     )
     monkeypatch.setattr(
         scenario_module,
@@ -547,6 +575,13 @@ def test_selected_battery_scenarios_use_bounded_process_chunks(
     )
 
     assert created_workers == [2]
+    assert len(result_timeouts) == 2
+    assert all(
+        timeout is not None and 0 < timeout <= 120
+        for timeout in result_timeouts
+    )
+    assert shutdown_calls == [(False, False)]
+    assert compiled_memberships == 1
     assert submitted_ids == [["battery-a"], ["battery-b"]]
     assert {row["scenario_id"] for row in result["scenarios"]} == {
         "battery-a",
@@ -568,8 +603,42 @@ def test_scenario_worker_configuration_is_bounded(
     assert scenario_module._configured_scenario_process_workers() == expected
 
 
-def test_single_battery_scenario_stays_in_the_api_process(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("30", 30.0),
+        ("600", 600.0),
+        ("3600", 3600.0),
+        ("29", 600.0),
+        ("3601", 600.0),
+        ("nan", 600.0),
+        ("invalid", 600.0),
+    ],
+)
+def test_scenario_process_timeout_configuration_is_bounded(
+    monkeypatch,
+    configured,
+    expected,
+) -> None:
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", configured)
+
+    assert (
+        scenario_module._configured_scenario_process_timeout_seconds()
+        == expected
+    )
+
+
+def test_single_battery_scenario_uses_one_isolated_worker(monkeypatch) -> None:
     authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    worker_counts: list[int] = []
+
+    def execute(indexed, *_args, worker_count):
+        worker_counts.append(worker_count)
+        return {
+            index: {"scenario_id": scenario.scenario_id}
+            for index, scenario in indexed
+        }
+
     monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
     monkeypatch.setattr(
         scenario_module,
@@ -579,12 +648,12 @@ def test_single_battery_scenario_stays_in_the_api_process(monkeypatch) -> None:
     monkeypatch.setattr(
         scenario_module,
         "_execute_battery_scenarios_in_processes",
-        lambda *_args, **_kwargs: pytest.fail("a single scenario must not spawn"),
+        execute,
     )
     monkeypatch.setattr(
         scenario_module,
         "_run_scenario",
-        lambda scenario, *_args: {"scenario_id": scenario.scenario_id},
+        lambda *_args: pytest.fail("a battery scenario must stay isolated"),
     )
 
     result = scenario_module._execute_authored_scenarios(
@@ -598,6 +667,123 @@ def test_single_battery_scenario_stays_in_the_api_process(monkeypatch) -> None:
     )
 
     assert result == [{"scenario_id": "battery-a"}]
+    assert worker_counts == [1]
+
+
+def test_process_pool_timeout_terminates_children_and_releases_lock(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    result_timeouts: list[float] = []
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    class StubbornProcess:
+        def __init__(self):
+            self.alive = True
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self.join_calls: list[float] = []
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def kill(self):
+            self.kill_calls += 1
+            self.alive = False
+
+        def join(self, timeout):
+            self.join_calls.append(timeout)
+
+    class TimeoutFuture:
+        def __init__(self):
+            self.cancel_calls = 0
+
+        def result(self, timeout):
+            result_timeouts.append(timeout)
+            raise scenario_module.FutureTimeoutError()
+
+        def cancel(self):
+            self.cancel_calls += 1
+            return False
+
+    process = StubbornProcess()
+    future = TimeoutFuture()
+
+    class TimeoutProcessPool:
+        def __init__(self, **_kwargs):
+            self._processes = {1: process}
+
+        def submit(self, *_args):
+            return future
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(
+        scenario_module,
+        "ProcessPoolExecutor",
+        TimeoutProcessPool,
+    )
+
+    with pytest.raises(scenario_module._ScenarioProcessPoolTimedOut):
+        scenario_module._execute_battery_scenarios_in_processes(
+            tuple(enumerate(authored)),
+            (),
+            {},
+            {},
+            {},
+            worker_count=1,
+        )
+
+    assert len(result_timeouts) == 1
+    assert 0 < result_timeouts[0] <= 30
+    assert future.cancel_calls == 1
+    assert shutdown_calls == [(False, True)]
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert len(process.join_calls) == 2
+    assert all(0 <= timeout <= 2 for timeout in process.join_calls)
+    assert scenario_module._SCENARIO_PROCESS_POOL_LOCK.acquire(blocking=False)
+    scenario_module._SCENARIO_PROCESS_POOL_LOCK.release()
+
+
+def test_process_pool_timeout_fails_closed_without_serial_retry(monkeypatch) -> None:
+    authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setattr(
+        scenario_module,
+        "_SCENARIO_PROCESS_POOL_DISABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            scenario_module._ScenarioProcessPoolTimedOut("deadline")
+        ),
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_serially",
+        lambda *_args, **_kwargs: pytest.fail("timeout must not retry serially"),
+    )
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        scenario_module._execute_authored_scenarios(
+            authored,
+            (),
+            {},
+            {},
+            {},
+            {},
+            {},
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
 
 
 def test_process_capability_failure_falls_back_to_exact_serial_execution(
@@ -1140,6 +1326,50 @@ def test_physical_scenario_periods_use_explicit_analysis_period() -> None:
     assert len(periods) == 12
     assert periods[0].period_id == "2025-04"
     assert periods[-1].period_id == "2026-03"
+
+
+def test_precompiled_tariff_membership_matches_row_classification() -> None:
+    profile = _profile()
+    periods, evidence = _build_periods(_streams(), profile)
+    membership = scenario_module._compile_tariff_row_membership(
+        periods,
+        evidence,
+        profile,
+    )
+    rows = [
+        evidence[interval.timestamp]
+        for period in periods
+        for interval in period.intervals
+    ]
+
+    for index, row in enumerate(rows):
+        assert bool(membership.retail_energy_peak[index]) == (
+            scenario_module._row_in_window(
+                row,
+                profile["retail_energy_window"],
+            )
+        )
+        assert bool(membership.network_energy_peak[index]) == (
+            scenario_module._row_in_window(
+                row,
+                profile["network_energy_window"],
+            )
+        )
+        assert bool(membership.annual_rolling_demand[index]) == (
+            scenario_module._row_in_window(
+                row,
+                profile["rolling_demand_window"],
+            )
+        )
+        assert bool(membership.incentive_demand[index]) == (
+            scenario_module._row_in_window(
+                row,
+                profile["incentive_demand_window"],
+            )
+        )
+        assert membership.optimizer_import_rates[index] == pytest.approx(
+            scenario_module._optimizer_import_rate(row, profile)
+        )
 
 
 def test_physical_scenario_periods_support_a_rolling_annual_start_date() -> None:

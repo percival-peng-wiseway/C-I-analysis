@@ -376,8 +376,8 @@ describe("analyzeCiPhysicalScenarios", () => {
     expect(progress).toEqual([[1, 5], [3, 5], [5, 5]]);
   });
 
-  it("checkpoints up to three tariff scenarios per request by default", async () => {
-    const requested = ["a", "b"].map((scenarioId) => ({
+  it("checkpoints up to two tariff scenarios per request by default", async () => {
+    const requested = ["a", "b", "c", "d", "e"].map((scenarioId) => ({
       ...scenarios[0],
       scenario_id: scenarioId,
       label: `Scenario ${scenarioId}`,
@@ -410,7 +410,7 @@ describe("analyzeCiPhysicalScenarios", () => {
       requested.map((scenario) => scenario.scenario_id),
     );
 
-    expect(postedBatches).toEqual([["a", "b"]]);
+    expect(postedBatches).toEqual([["a", "b"], ["c", "d"], ["e"]]);
   });
 
   it("uses the same read-only recovery after a non-abort network disconnect", async () => {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -13,6 +13,7 @@ import multiprocessing
 import os
 import pickle
 from threading import Lock
+from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -59,6 +60,10 @@ MAX_BATTERY_SYSTEMS = 15
 MAX_PV_SYSTEMS = 20
 DEFAULT_SCENARIO_PROCESS_WORKERS = 1
 MAX_SCENARIO_PROCESS_WORKERS = 3
+DEFAULT_SCENARIO_PROCESS_TIMEOUT_SECONDS = 600.0
+MIN_SCENARIO_PROCESS_TIMEOUT_SECONDS = 30.0
+MAX_SCENARIO_PROCESS_TIMEOUT_SECONDS = 3600.0
+SCENARIO_PROCESS_TERMINATION_GRACE_SECONDS = 2.0
 
 _LOGGER = logging.getLogger(__name__)
 _SCENARIO_PROCESS_POOL_LOCK = Lock()
@@ -105,6 +110,10 @@ class _ScenarioProcessExecutionFailed(RuntimeError):
     pass
 
 
+class _ScenarioProcessPoolTimedOut(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class _Scenario:
     scenario_id: str
@@ -145,6 +154,28 @@ class _ScenarioExecution:
     dispatch: tuple[dict[str, object], ...]
 
 
+@dataclass(frozen=True)
+class _CompiledTariffWindow:
+    start: time
+    end: time
+    use_meter_aest: bool
+    excluded_dates: frozenset[date]
+
+
+@dataclass(frozen=True)
+class _TariffRowMembership:
+    """Compact, reusable tariff classification for every analysis interval."""
+
+    annual_period: bytes
+    billing_period: bytes
+    retail_energy_peak: bytes
+    network_energy_peak: bytes
+    annual_rolling_demand: bytes
+    incentive_demand: bytes
+    local_months: bytes
+    optimizer_import_rates: tuple[float, ...]
+
+
 def analyze_ci_physical_scenarios(
     upload_bytes: bytes,
     *,
@@ -152,7 +183,12 @@ def analyze_ci_physical_scenarios(
     scenarios: object,
 ) -> dict[str, object]:
     """Compare analyst-authored batteries using physical evidence only."""
+    started_at = monotonic()
     authored = _validated_scenarios(scenarios)
+    _LOGGER.info(
+        "ci_scenario_analysis stage=prepare_start scenarios=%d",
+        len(authored),
+    )
     parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
     tariff_result = analyze_ci_nem12(
         upload_bytes,
@@ -160,6 +196,16 @@ def analyze_ci_physical_scenarios(
         _validated_evidence=parsed,
     )
     periods, interval_evidence = _build_periods(parsed["streams"], profile)
+    tariff_membership = _compile_tariff_row_membership(
+        periods,
+        interval_evidence,
+        profile,
+    )
+    _LOGGER.info(
+        "ci_scenario_analysis stage=prepare_complete scenarios=%d elapsed_s=%.3f",
+        len(authored),
+        monotonic() - started_at,
+    )
     annual_tariff_baseline_cache: dict[str, object] = {}
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
 
@@ -167,10 +213,15 @@ def analyze_ci_physical_scenarios(
         authored,
         periods,
         interval_evidence,
-        parsed["streams"],
+        tariff_membership,
         profile,
         annual_tariff_baseline_cache,
         pv_generation_cache,
+    )
+    _LOGGER.info(
+        "ci_scenario_analysis stage=complete scenarios=%d elapsed_s=%.3f",
+        len(authored),
+        monotonic() - started_at,
     )
     return _physical_scenario_result(tariff_result=tariff_result, results=results)
 
@@ -179,7 +230,7 @@ def _execute_authored_scenarios(
     authored: tuple[_Scenario, ...],
     periods: tuple[PeakShavingPeriodInput, ...],
     interval_evidence: dict[datetime, dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
     annual_tariff_baseline_cache: dict[str, object],
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]],
@@ -188,8 +239,8 @@ def _execute_authored_scenarios(
 
     HiGHS has a process-global scheduler.  Independent spawned processes keep
     one deterministic solver thread per process while allowing standard-4 to
-    solve up to three battery scenarios concurrently.  PV-only rows remain in
-    the coordinator because they do not invoke HiGHS.
+    solve a bounded number of battery scenarios concurrently. PV-only rows
+    remain in the coordinator because they do not invoke HiGHS.
     """
 
     workers = _configured_scenario_process_workers()
@@ -200,7 +251,7 @@ def _execute_authored_scenarios(
     )
     if (
         workers <= 1
-        or len(indexed_battery) <= 1
+        or not indexed_battery
         or _scenario_process_pool_disabled()
     ):
         return [
@@ -208,7 +259,7 @@ def _execute_authored_scenarios(
                 item,
                 periods,
                 interval_evidence,
-                streams,
+                tariff_membership,
                 profile,
                 annual_tariff_baseline_cache,
                 pv_generation_cache,
@@ -223,7 +274,7 @@ def _execute_authored_scenarios(
                 scenario,
                 periods,
                 interval_evidence,
-                streams,
+                tariff_membership,
                 profile,
                 annual_tariff_baseline_cache,
                 pv_generation_cache,
@@ -234,7 +285,7 @@ def _execute_authored_scenarios(
             indexed_battery,
             periods,
             interval_evidence,
-            streams,
+            tariff_membership,
             profile,
             worker_count=min(workers, len(indexed_battery)),
         )
@@ -250,9 +301,16 @@ def _execute_authored_scenarios(
             indexed_battery,
             periods,
             interval_evidence,
-            streams,
+            tariff_membership,
             profile,
         )
+    except _ScenarioProcessPoolTimedOut as exc:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=pool_timeout scenarios=%d workers=%d",
+            len(indexed_battery),
+            min(workers, len(indexed_battery)),
+        )
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
     except _ScenarioProcessPoolBroken as exc:
         # A native solver failure must not take down the API process. Discard
         # every partial result and retry exactly once in a fresh isolated
@@ -266,7 +324,7 @@ def _execute_authored_scenarios(
                 indexed_battery,
                 periods,
                 interval_evidence,
-                streams,
+                tariff_membership,
                 profile,
                 worker_count=1,
             )
@@ -275,10 +333,14 @@ def _execute_authored_scenarios(
                 indexed_battery,
                 periods,
                 interval_evidence,
-                streams,
+                tariff_membership,
                 profile,
             )
-        except (_ScenarioProcessPoolBroken, _ScenarioProcessExecutionFailed) as retry_exc:
+        except (
+            _ScenarioProcessPoolBroken,
+            _ScenarioProcessExecutionFailed,
+            _ScenarioProcessPoolTimedOut,
+        ) as retry_exc:
             raise CiScenarioAnalysisError("scenario_execution_failed") from retry_exc
     except _ScenarioProcessExecutionFailed as exc:
         raise CiScenarioAnalysisError("scenario_execution_failed") from exc
@@ -305,16 +367,36 @@ def _configured_scenario_process_workers() -> int:
     return workers
 
 
+def _configured_scenario_process_timeout_seconds() -> float:
+    value = os.getenv(
+        "CI_SCENARIO_PROCESS_TIMEOUT_SECONDS",
+        str(DEFAULT_SCENARIO_PROCESS_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout_seconds = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SCENARIO_PROCESS_TIMEOUT_SECONDS
+    if (
+        not math.isfinite(timeout_seconds)
+        or not MIN_SCENARIO_PROCESS_TIMEOUT_SECONDS
+        <= timeout_seconds
+        <= MAX_SCENARIO_PROCESS_TIMEOUT_SECONDS
+    ):
+        return DEFAULT_SCENARIO_PROCESS_TIMEOUT_SECONDS
+    return timeout_seconds
+
+
 def _scenario_process_pool_disabled() -> bool:
-    with _SCENARIO_PROCESS_POOL_LOCK:
-        return _SCENARIO_PROCESS_POOL_DISABLED
+    # The boolean assignment is atomic in supported CPython versions. Avoid
+    # blocking here because pool acquisition itself has the watchdog deadline.
+    return _SCENARIO_PROCESS_POOL_DISABLED
 
 
 def _execute_battery_scenarios_serially(
     indexed_scenarios: tuple[tuple[int, _Scenario], ...],
     periods: tuple[PeakShavingPeriodInput, ...],
     interval_evidence: dict[datetime, dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
 ) -> dict[int, dict[str, object]]:
     try:
@@ -323,7 +405,7 @@ def _execute_battery_scenarios_serially(
                 indexed_scenarios,
                 periods,
                 interval_evidence,
-                streams,
+                tariff_membership,
                 profile,
             )
         )
@@ -337,23 +419,41 @@ def _execute_battery_scenarios_in_processes(
     indexed_scenarios: tuple[tuple[int, _Scenario], ...],
     periods: tuple[PeakShavingPeriodInput, ...],
     interval_evidence: dict[datetime, dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
     *,
     worker_count: int,
 ) -> dict[int, dict[str, object]]:
     global _SCENARIO_PROCESS_POOL_DISABLED
 
+    started_at = monotonic()
+    timeout_seconds = _configured_scenario_process_timeout_seconds()
+    deadline = started_at + timeout_seconds
     chunks: list[list[tuple[int, _Scenario]]] = [
         [] for _ in range(worker_count)
     ]
     for offset, item in enumerate(indexed_scenarios):
         chunks[offset % worker_count].append(item)
 
-    # ProcessPoolExecutor is created under one lock so concurrent API requests
-    # cannot multiply the configured CPU and memory ceiling inside one
-    # Cloudflare container.  Spawn avoids inheriting open DB/R2 connections.
-    with _SCENARIO_PROCESS_POOL_LOCK:
+    _LOGGER.info(
+        "ci_scenario_analysis stage=pool_wait scenarios=%d workers=%d timeout_s=%.1f",
+        len(indexed_scenarios),
+        worker_count,
+        timeout_seconds,
+    )
+    # Pool creation and execution share one wall-clock deadline. This prevents
+    # concurrent requests from waiting forever behind a wedged native solver.
+    acquired = _SCENARIO_PROCESS_POOL_LOCK.acquire(
+        timeout=max(0.0, deadline - monotonic())
+    )
+    if not acquired:
+        raise _ScenarioProcessPoolTimedOut(
+            "the scenario process pool lock exceeded its deadline"
+        )
+
+    executor: ProcessPoolExecutor | None = None
+    futures: list[Any] = []
+    try:
         if _SCENARIO_PROCESS_POOL_DISABLED:
             raise _ScenarioProcessPoolUnavailable(
                 "process execution was disabled after an earlier capability failure"
@@ -369,84 +469,203 @@ def _execute_battery_scenarios_in_processes(
                 "the process pool could not be created"
             ) from exc
 
-        try:
-            with executor:
-                futures = []
-                for chunk in chunks:
-                    if not chunk:
-                        continue
-                    try:
-                        futures.append(
-                            executor.submit(
-                                _execute_scenario_chunk,
-                                tuple(chunk),
-                                periods,
-                                interval_evidence,
-                                streams,
-                                profile,
-                            )
-                        )
-                    except BrokenProcessPool as exc:
-                        raise _ScenarioProcessPoolBroken(
-                            "the process pool broke while scheduling work"
-                        ) from exc
-                    except (OSError, RuntimeError) as exc:
-                        _SCENARIO_PROCESS_POOL_DISABLED = True
-                        raise _ScenarioProcessPoolUnavailable(
-                            "the process pool could not schedule work"
-                        ) from exc
+        for chunk in chunks:
+            if not chunk:
+                continue
+            try:
+                futures.append(
+                    executor.submit(
+                        _execute_scenario_chunk,
+                        tuple(chunk),
+                        periods,
+                        interval_evidence,
+                        tariff_membership,
+                        profile,
+                    )
+                )
+            except BrokenProcessPool as exc:
+                raise _ScenarioProcessPoolBroken(
+                    "the process pool broke while scheduling work"
+                ) from exc
+            except (OSError, RuntimeError) as exc:
+                _SCENARIO_PROCESS_POOL_DISABLED = True
+                raise _ScenarioProcessPoolUnavailable(
+                    "the process pool could not schedule work"
+                ) from exc
 
-                results: dict[int, dict[str, object]] = {}
-                for future in futures:
-                    try:
-                        rows = future.result()
-                    except CiScenarioAnalysisError:
-                        raise
-                    except BrokenProcessPool as exc:
-                        raise _ScenarioProcessPoolBroken(
-                            "a scenario process terminated unexpectedly"
-                        ) from exc
-                    except (pickle.PicklingError, EOFError, OSError) as exc:
-                        _SCENARIO_PROCESS_POOL_DISABLED = True
-                        raise _ScenarioProcessPoolUnavailable(
-                            "scenario inputs or outputs could not cross the process boundary"
-                        ) from exc
-                    except Exception as exc:
-                        raise _ScenarioProcessExecutionFailed(
-                            "a scenario process returned an unexpected failure"
-                        ) from exc
-                    results.update(rows)
-                return results
-        except (
-            CiScenarioAnalysisError,
-            _ScenarioProcessPoolUnavailable,
-            _ScenarioProcessPoolBroken,
-            _ScenarioProcessExecutionFailed,
-        ):
-            raise
-        except Exception as exc:
-            raise _ScenarioProcessExecutionFailed(
-                "the scenario process pool could not close cleanly"
-            ) from exc
+        _LOGGER.info(
+            "ci_scenario_analysis stage=pool_started scenarios=%d workers=%d elapsed_s=%.3f",
+            len(indexed_scenarios),
+            worker_count,
+            monotonic() - started_at,
+        )
+        results: dict[int, dict[str, object]] = {}
+        for completed_chunks, future in enumerate(futures, start=1):
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0.0:
+                raise FutureTimeoutError()
+            try:
+                rows = future.result(timeout=remaining_seconds)
+            except FutureTimeoutError as exc:
+                raise _ScenarioProcessPoolTimedOut(
+                    "the scenario process pool exceeded its deadline"
+                ) from exc
+            except CiScenarioAnalysisError:
+                raise
+            except BrokenProcessPool as exc:
+                raise _ScenarioProcessPoolBroken(
+                    "a scenario process terminated unexpectedly"
+                ) from exc
+            except (pickle.PicklingError, EOFError, OSError) as exc:
+                _SCENARIO_PROCESS_POOL_DISABLED = True
+                raise _ScenarioProcessPoolUnavailable(
+                    "scenario inputs or outputs could not cross the process boundary"
+                ) from exc
+            except Exception as exc:
+                raise _ScenarioProcessExecutionFailed(
+                    "a scenario process returned an unexpected failure"
+                ) from exc
+            results.update(rows)
+            _LOGGER.info(
+                "ci_scenario_analysis stage=pool_chunk_complete completed=%d total=%d elapsed_s=%.3f",
+                completed_chunks,
+                len(futures),
+                monotonic() - started_at,
+            )
+
+        if monotonic() > deadline:
+            raise FutureTimeoutError()
+        # Every submitted result has crossed the process boundary. Do not let
+        # executor teardown extend the request beyond the watchdog deadline.
+        executor.shutdown(wait=False)
+        executor = None
+        _LOGGER.info(
+            "ci_scenario_analysis stage=pool_complete scenarios=%d workers=%d elapsed_s=%.3f",
+            len(indexed_scenarios),
+            worker_count,
+            monotonic() - started_at,
+        )
+        return results
+    except FutureTimeoutError as exc:
+        _abort_scenario_process_pool(executor, futures)
+        executor = None
+        raise _ScenarioProcessPoolTimedOut(
+            "the scenario process pool exceeded its deadline"
+        ) from exc
+    except (
+        CiScenarioAnalysisError,
+        _ScenarioProcessPoolUnavailable,
+        _ScenarioProcessPoolBroken,
+        _ScenarioProcessPoolTimedOut,
+        _ScenarioProcessExecutionFailed,
+    ):
+        _abort_scenario_process_pool(executor, futures)
+        executor = None
+        raise
+    except Exception as exc:
+        _abort_scenario_process_pool(executor, futures)
+        executor = None
+        raise _ScenarioProcessExecutionFailed(
+            "the scenario process pool could not close cleanly"
+        ) from exc
+    finally:
+        if executor is not None:
+            _abort_scenario_process_pool(executor, futures)
+        _SCENARIO_PROCESS_POOL_LOCK.release()
+
+
+def _abort_scenario_process_pool(
+    executor: ProcessPoolExecutor | None,
+    futures: list[Any],
+) -> None:
+    """Cancel queued work and forcibly stop running Python 3.12 workers."""
+
+    for future in futures:
+        try:
+            future.cancel()
+        except Exception:
+            pass
+    if executor is None:
+        return
+
+    process_map = getattr(executor, "_processes", None)
+    processes = (
+        tuple(process_map.values()) if isinstance(process_map, dict) else ()
+    )
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=pool_abort_shutdown_failed",
+            exc_info=True,
+        )
+
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            _LOGGER.warning(
+                "ci_scenario_analysis stage=pool_terminate_failed",
+                exc_info=True,
+            )
+    _join_scenario_processes(
+        processes,
+        timeout_seconds=SCENARIO_PROCESS_TERMINATION_GRACE_SECONDS,
+    )
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.kill()
+        except Exception:
+            _LOGGER.warning(
+                "ci_scenario_analysis stage=pool_kill_failed",
+                exc_info=True,
+            )
+    _join_scenario_processes(
+        processes,
+        timeout_seconds=SCENARIO_PROCESS_TERMINATION_GRACE_SECONDS,
+    )
+
+
+def _join_scenario_processes(
+    processes: tuple[Any, ...],
+    *,
+    timeout_seconds: float,
+) -> None:
+    deadline = monotonic() + timeout_seconds
+    for process in processes:
+        try:
+            process.join(timeout=max(0.0, deadline - monotonic()))
+        except Exception:
+            _LOGGER.warning(
+                "ci_scenario_analysis stage=pool_join_failed",
+                exc_info=True,
+            )
 
 
 def _execute_scenario_chunk(
     indexed_scenarios: tuple[tuple[int, _Scenario], ...],
     periods: tuple[PeakShavingPeriodInput, ...],
     interval_evidence: dict[datetime, dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
 ) -> list[tuple[int, dict[str, object]]]:
+    started_at = monotonic()
+    _LOGGER.info(
+        "ci_scenario_analysis stage=chunk_start scenarios=%d",
+        len(indexed_scenarios),
+    )
     annual_tariff_baseline_cache: dict[str, object] = {}
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
-    return [
+    results = [
         (
             index,
             _run_scenario(
                 scenario,
                 periods,
                 interval_evidence,
-                streams,
+                tariff_membership,
                 profile,
                 annual_tariff_baseline_cache,
                 pv_generation_cache,
@@ -454,6 +673,12 @@ def _execute_scenario_chunk(
         )
         for index, scenario in indexed_scenarios
     ]
+    _LOGGER.info(
+        "ci_scenario_analysis stage=chunk_complete scenarios=%d elapsed_s=%.3f",
+        len(indexed_scenarios),
+        monotonic() - started_at,
+    )
+    return results
 
 
 def validate_ci_design_candidates(scenarios: object) -> dict[str, object]:
@@ -588,13 +813,18 @@ def analyze_ci_three_case_comparison(
         _validated_evidence=parsed,
     )
     periods, interval_evidence = _build_periods(parsed["streams"], profile)
+    tariff_membership = _compile_tariff_row_membership(
+        periods,
+        interval_evidence,
+        profile,
+    )
     annual_tariff_baseline_cache: dict[str, object] = {}
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
     pv_only_execution = _execute_scenario(
         pv_only,
         periods,
         interval_evidence,
-        parsed["streams"],
+        tariff_membership,
         profile,
         annual_tariff_baseline_cache,
         pv_generation_cache,
@@ -603,7 +833,7 @@ def analyze_ci_three_case_comparison(
         pv_battery,
         periods,
         interval_evidence,
-        parsed["streams"],
+        tariff_membership,
         profile,
         annual_tariff_baseline_cache,
         pv_generation_cache,
@@ -638,6 +868,11 @@ def analyze_ci_internal_report_source(
         _validated_evidence=parsed,
     )
     periods, interval_evidence = _build_periods(parsed["streams"], profile)
+    tariff_membership = _compile_tariff_row_membership(
+        periods,
+        interval_evidence,
+        profile,
+    )
     annual_tariff_baseline_cache: dict[str, object] = {}
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
     executions = {
@@ -645,7 +880,7 @@ def analyze_ci_internal_report_source(
             item,
             periods,
             interval_evidence,
-            parsed["streams"],
+            tariff_membership,
             profile,
             annual_tariff_baseline_cache,
             pv_generation_cache,
@@ -726,7 +961,7 @@ def _run_scenario(
     scenario: _Scenario,
     periods: tuple[PeakShavingPeriodInput, ...],
     evidence: dict[datetime, dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
     annual_tariff_baseline_cache: dict[str, object] | None = None,
     pv_generation_cache: (
@@ -737,7 +972,7 @@ def _run_scenario(
         scenario,
         periods,
         evidence,
-        streams,
+        tariff_membership,
         profile,
         annual_tariff_baseline_cache,
         pv_generation_cache,
@@ -748,7 +983,7 @@ def _execute_scenario(
     scenario: _Scenario,
     periods: tuple[PeakShavingPeriodInput, ...],
     evidence: dict[datetime, dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
     annual_tariff_baseline_cache: dict[str, object] | None = None,
     pv_generation_cache: (
@@ -758,6 +993,7 @@ def _execute_scenario(
     flat_intervals = tuple(
         interval for period in periods for interval in period.intervals
     )
+    _validate_tariff_row_membership(tariff_membership, len(flat_intervals))
     pv_cache_key = (
         scenario.pv_profile_id,
         scenario.pv_capacity_kwp_dc,
@@ -838,6 +1074,7 @@ def _execute_scenario(
             flat_intervals,
             raw_pv_kw,
             evidence,
+            tariff_membership,
             profile,
         )
         try:
@@ -918,17 +1155,25 @@ def _execute_scenario(
                 "post_kva": math.hypot(post_kw, post_kvar),
             }
         )
-    bill_start = date.fromisoformat(profile["billing_period"]["start_date"])
-    bill_end = date.fromisoformat(profile["billing_period"]["end_date"])
     incentive_rows = [
         row
-        for row in rows
-        if bill_start <= row["meter_date"] <= bill_end
-        and _row_in_window(row, profile["incentive_demand_window"])
+        for row, in_billing_period, in_incentive_window in zip(
+            rows,
+            tariff_membership.billing_period,
+            tariff_membership.incentive_demand,
+            strict=True,
+        )
+        if in_billing_period and in_incentive_window
     ]
     rolling_rows = [row for row in rows if row["rolling_window"]]
     bill_rows = [
-        row for row in rows if bill_start <= row["meter_date"] <= bill_end
+        row
+        for row, included in zip(
+            rows,
+            tariff_membership.billing_period,
+            strict=True,
+        )
+        if included
     ]
     if not rolling_rows or (bill_rows and not incentive_rows):
         raise CiScenarioAnalysisError("scenario_execution_failed")
@@ -1031,7 +1276,7 @@ def _execute_scenario(
         ),
         "annual_tariff_value": _annual_tariff_value(
             rows,
-            streams,
+            tariff_membership,
             profile,
             baseline_cache=annual_tariff_baseline_cache,
         ),
@@ -1489,6 +1734,7 @@ def _optimizer_problem(
     flat_intervals: tuple[CleanedInterval, ...],
     raw_pv_kw: tuple[float, ...],
     evidence: dict[datetime, dict[str, object]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
 ) -> CiOptimizerProblem:
     optimizer_intervals = tuple(
@@ -1498,8 +1744,8 @@ def _optimizer_problem(
             load_kw=interval.load_kw_avg,
             pv_kw=raw_pv_kw[index],
             reactive_kvar=float(evidence[interval.timestamp]["kvar"]),
-            import_rate_aud_per_kwh=_optimizer_import_rate(
-                evidence[interval.timestamp], profile
+            import_rate_aud_per_kwh=(
+                tariff_membership.optimizer_import_rates[index]
             ),
             export_credit_aud_per_kwh=_optimizer_export_credit(profile),
         )
@@ -1544,12 +1790,8 @@ def _optimizer_problem(
         selected = tuple(
             index
             for index in indexes
-            if evidence[flat_intervals[index].timestamp]["local_start"].month
-            in incentive_months
-            and _row_in_window(
-                evidence[flat_intervals[index].timestamp],
-                profile["incentive_demand_window"],
-            )
+            if tariff_membership.local_months[index] in incentive_months
+            and tariff_membership.incentive_demand[index]
         )
         if selected and incentive_rate > 0.0:
             demand_charges.append(
@@ -1605,16 +1847,31 @@ def _optimizer_problem(
 def _optimizer_import_rate(
     row: dict[str, object], profile: dict[str, Any]
 ) -> float:
+    retail_peak = _row_in_window(row, profile["retail_energy_window"])
+    network_peak = _row_in_window(row, profile["network_energy_window"])
+    return _optimizer_import_rate_from_membership(
+        retail_peak=retail_peak,
+        network_peak=network_peak,
+        profile=profile,
+    )
+
+
+def _optimizer_import_rate_from_membership(
+    *,
+    retail_peak: bool,
+    network_peak: bool,
+    profile: dict[str, Any],
+) -> float:
     rates = profile["rates"]
     factors = profile["factors"]
     retail_key = (
         "retail_peak_c_per_kwh"
-        if _row_in_window(row, profile["retail_energy_window"])
+        if retail_peak
         else "retail_off_peak_c_per_kwh"
     )
     network_key = (
         "network_peak_c_per_kwh"
-        if _row_in_window(row, profile["network_energy_window"])
+        if network_peak
         else "network_off_peak_c_per_kwh"
     )
     retail = float(rates[retail_key]) * float(factors["mlf"]) * float(
@@ -1890,7 +2147,7 @@ def _canonical_sha256(value: object) -> str:
 
 def _annual_tariff_value(
     rows: list[dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
     *,
     baseline_cache: dict[str, object] | None = None,
@@ -1920,7 +2177,7 @@ def _annual_tariff_value(
 
     scenario_quantities = _annual_tariff_quantities(
         rows,
-        streams,
+        tariff_membership,
         profile,
         demand_key="post_kva",
         import_kw_key="post_kw",
@@ -1941,7 +2198,7 @@ def _annual_tariff_value(
     else:
         baseline_quantities = _annual_tariff_quantities(
             rows,
-            streams,
+            tariff_membership,
             profile,
             demand_key="baseline_kva",
             import_kw_key="baseline_kw",
@@ -2007,7 +2264,7 @@ def _annual_tariff_value(
 
 def _annual_tariff_quantities(
     rows: list[dict[str, object]],
-    streams: dict[str, dict[date, list[float]]],
+    tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
     *,
     demand_key: str,
@@ -2015,11 +2272,18 @@ def _annual_tariff_quantities(
     export_kw_key: str,
     incentive_months: set[int],
 ) -> dict[str, float]:
-    analysis_period = _analysis_period(profile)
-    rolling_start = date.fromisoformat(analysis_period["start_date"])
-    rolling_end = date.fromisoformat(analysis_period["end_date"])
+    _validate_tariff_row_membership(tariff_membership, len(rows))
+    rolling_start = date.fromisoformat(
+        _analysis_period(profile)["start_date"]
+    )
     annual_rows = [
-        row for row in rows if rolling_start <= row["meter_date"] <= rolling_end
+        row
+        for row, included in zip(
+            rows,
+            tariff_membership.annual_period,
+            strict=True,
+        )
+        if included
     ]
     if not annual_rows:
         raise CiScenarioAnalysisError("annual_value_unavailable")
@@ -2029,24 +2293,46 @@ def _annual_tariff_quantities(
     )
     retail_peak_kwh = sum(
         float(row[import_kw_key]) * 0.25
-        for row in annual_rows
-        if _row_in_window(row, profile["retail_energy_window"])
+        for row, in_annual_period, is_peak in zip(
+            rows,
+            tariff_membership.annual_period,
+            tariff_membership.retail_energy_peak,
+            strict=True,
+        )
+        if in_annual_period and is_peak
     )
     network_peak_kwh = sum(
         float(row[import_kw_key]) * 0.25
-        for row in annual_rows
-        if _row_in_window(row, profile["network_energy_window"])
+        for row, in_annual_period, is_peak in zip(
+            rows,
+            tariff_membership.annual_period,
+            tariff_membership.network_energy_peak,
+            strict=True,
+        )
+        if in_annual_period and is_peak
     )
     rolling_rows = [
         row
-        for row in annual_rows
-        if _row_in_window(row, profile["rolling_demand_window"])
+        for row, in_annual_period, in_demand_window in zip(
+            rows,
+            tariff_membership.annual_period,
+            tariff_membership.annual_rolling_demand,
+            strict=True,
+        )
+        if in_annual_period and in_demand_window
     ]
     incentive_rows = [
         row
-        for row in annual_rows
-        if row["local_start"].month in incentive_months
-        and _row_in_window(row, profile["incentive_demand_window"])
+        for row, in_annual_period, local_month, in_demand_window in zip(
+            rows,
+            tariff_membership.annual_period,
+            tariff_membership.local_months,
+            tariff_membership.incentive_demand,
+            strict=True,
+        )
+        if in_annual_period
+        and local_month in incentive_months
+        and in_demand_window
     ]
     if not rolling_rows or not incentive_rows:
         raise CiScenarioAnalysisError("annual_value_unavailable")
@@ -2072,22 +2358,127 @@ def _annual_tariff_quantities(
     }
 
 
-def _row_in_window(row: dict[str, object], window: dict[str, Any]) -> bool:
-    excluded = {date.fromisoformat(value) for value in window["excluded_dates"]}
+def _compile_tariff_row_membership(
+    periods: tuple[PeakShavingPeriodInput, ...],
+    evidence: dict[datetime, dict[str, object]],
+    profile: dict[str, Any],
+) -> _TariffRowMembership:
+    """Classify tariff windows once before scenarios enter the hot path."""
+
+    analysis_period = _analysis_period(profile)
+    annual_start = date.fromisoformat(analysis_period["start_date"])
+    annual_end = date.fromisoformat(analysis_period["end_date"])
+    billing_start = date.fromisoformat(profile["billing_period"]["start_date"])
+    billing_end = date.fromisoformat(profile["billing_period"]["end_date"])
+    retail_window = _compile_tariff_window(profile["retail_energy_window"])
+    network_window = _compile_tariff_window(profile["network_energy_window"])
+    rolling_window = _compile_tariff_window(profile["rolling_demand_window"])
+    incentive_window = _compile_tariff_window(
+        profile["incentive_demand_window"]
+    )
+
+    annual_membership = bytearray()
+    billing_membership = bytearray()
+    retail_membership = bytearray()
+    network_membership = bytearray()
+    rolling_membership = bytearray()
+    incentive_membership = bytearray()
+    local_months = bytearray()
+    import_rates: list[float] = []
+    import_rate_cache: dict[tuple[bool, bool], float] = {}
+
+    for period in periods:
+        for interval in period.intervals:
+            row = evidence[interval.timestamp]
+            meter_day = row["meter_date"]
+            local_start = row["local_start"]
+            retail_peak = _row_in_compiled_window(row, retail_window)
+            network_peak = _row_in_compiled_window(row, network_window)
+            rate_key = (retail_peak, network_peak)
+            if rate_key not in import_rate_cache:
+                import_rate_cache[rate_key] = (
+                    _optimizer_import_rate_from_membership(
+                        retail_peak=retail_peak,
+                        network_peak=network_peak,
+                        profile=profile,
+                    )
+                )
+            annual_membership.append(annual_start <= meter_day <= annual_end)
+            billing_membership.append(
+                billing_start <= meter_day <= billing_end
+            )
+            retail_membership.append(retail_peak)
+            network_membership.append(network_peak)
+            rolling_membership.append(
+                _row_in_compiled_window(row, rolling_window)
+            )
+            incentive_membership.append(
+                _row_in_compiled_window(row, incentive_window)
+            )
+            local_months.append(local_start.month)
+            import_rates.append(import_rate_cache[rate_key])
+
+    return _TariffRowMembership(
+        annual_period=bytes(annual_membership),
+        billing_period=bytes(billing_membership),
+        retail_energy_peak=bytes(retail_membership),
+        network_energy_peak=bytes(network_membership),
+        annual_rolling_demand=bytes(rolling_membership),
+        incentive_demand=bytes(incentive_membership),
+        local_months=bytes(local_months),
+        optimizer_import_rates=tuple(import_rates),
+    )
+
+
+def _compile_tariff_window(window: dict[str, Any]) -> _CompiledTariffWindow:
+    return _CompiledTariffWindow(
+        start=time.fromisoformat(window["start"]),
+        end=time.fromisoformat(window["end"]),
+        use_meter_aest=window.get("time_basis") == "meter_aest",
+        excluded_dates=frozenset(
+            date.fromisoformat(value) for value in window["excluded_dates"]
+        ),
+    )
+
+
+def _row_in_compiled_window(
+    row: dict[str, object],
+    window: _CompiledTariffWindow,
+) -> bool:
     classified = (
         row["meter_start"]
-        if window.get("time_basis") == "meter_aest"
+        if window.use_meter_aest
         else row["local_start"]
     )
     classified_date = classified.date()
     classified_time = classified.timetz().replace(tzinfo=None)
     return (
         classified_date.weekday() < 5
-        and classified_date not in excluded
-        and time.fromisoformat(window["start"])
-        <= classified_time
-        < time.fromisoformat(window["end"])
+        and classified_date not in window.excluded_dates
+        and window.start <= classified_time < window.end
     )
+
+
+def _row_in_window(row: dict[str, object], window: dict[str, Any]) -> bool:
+    return _row_in_compiled_window(row, _compile_tariff_window(window))
+
+
+def _validate_tariff_row_membership(
+    membership: _TariffRowMembership,
+    expected_rows: int,
+) -> None:
+    lengths = (
+        len(membership.annual_period),
+        len(membership.billing_period),
+        len(membership.retail_energy_peak),
+        len(membership.network_energy_peak),
+        len(membership.annual_rolling_demand),
+        len(membership.incentive_demand),
+        len(membership.local_months),
+        len(membership.optimizer_import_rates),
+    )
+    if any(length != expected_rows for length in lengths):
+        raise CiScenarioAnalysisError("scenario_execution_failed")
 
 
 def _analysis_period(profile: dict[str, Any]) -> dict[str, str]:

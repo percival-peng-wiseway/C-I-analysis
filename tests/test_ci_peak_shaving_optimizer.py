@@ -413,6 +413,149 @@ def test_reactive_support_known_answer_respects_shared_pq_apparent_limit():
     assert row.post_grid_reactive_kvar == 0.0
 
 
+def test_redundant_reactive_pq_facets_are_elided_without_changing_result(
+    monkeypatch,
+):
+    problem = _problem(
+        intervals=_intervals(
+            (250.0, 100.0),
+            pv=(250.0, 0.0),
+            kvar=(80.0, 80.0),
+        ),
+        battery=_battery(),
+        demand_charges=(
+            CiDemandCharge("shared_kva", 20.0, (0, 1), basis="kva"),
+        ),
+        reactive_support=CiReactiveSupportSpec(
+            enabled=True,
+            max_reactive_support_kvar=80.0,
+            inverter_apparent_power_limit_kva=275.0,
+        ),
+    )
+
+    optimized_model = optimizer_module._build_model(
+        problem,
+        cuts={},
+        binary=False,
+    )
+    optimized = optimize_ci_peak_shaving(problem)
+    assert all(
+        optimizer_module._reactive_pq_facets_are_redundant(
+            problem,
+            row,
+            forced_idle=False,
+        )
+        for row in problem.intervals
+    )
+    optimized_lp = optimized_model.highs.getLp()
+    assert all(
+        optimized_lp.col_lower_[column]
+        == optimized_lp.col_upper_[column]
+        == problem.intervals[index].reactive_kvar
+        for index, column in enumerate(optimized_model.reactive_support)
+    )
+
+    monkeypatch.setattr(
+        optimizer_module,
+        "_reactive_pq_facets_are_redundant",
+        lambda *_args, **_kwargs: False,
+    )
+    reference_model = optimizer_module._build_model(
+        problem,
+        cuts={},
+        binary=False,
+    )
+    reference = optimize_ci_peak_shaving(problem)
+
+    assert reference_model.highs.getNumRow() - optimized_model.highs.getNumRow() == (
+        len(problem.intervals) * optimizer_module.PQ_CAPABILITY_SEGMENTS
+    )
+    assert optimized.status == reference.status
+    assert optimized.primary_objective_aud == reference.primary_objective_aud
+    assert optimized.exact_replay_bill_aud == reference.exact_replay_bill_aud
+    assert optimized.demand_charges == reference.demand_charges
+    for actual, expected in zip(
+        optimized.intervals,
+        reference.intervals,
+        strict=True,
+    ):
+        assert actual.grid_import_kw == pytest.approx(expected.grid_import_kw)
+        assert actual.shared_ac_port_kw == pytest.approx(expected.shared_ac_port_kw)
+        assert actual.inverter_reactive_support_kvar == pytest.approx(
+            expected.inverter_reactive_support_kvar
+        )
+        assert actual.shared_inverter_apparent_power_kva <= 275.0 + 1e-6
+
+
+def test_circle_containment_alone_does_not_elide_a_binding_inner_facet():
+    apparent_limit = 100.0
+    angle = optimizer_module.PQ_CAPABILITY_ANGLE_STEP / 2
+    active_bound = apparent_limit * math.cos(angle)
+    reactive_bound = apparent_limit * math.sin(angle)
+    problem = _problem(
+        intervals=_intervals(
+            (active_bound,),
+            pv=(active_bound,),
+            kvar=(reactive_bound,),
+        ),
+        battery=_battery(max_charge_kw=1.0, max_discharge_kw=1.0),
+        demand_charges=(CiDemandCharge("kva", 1.0, (0,), basis="kva"),),
+        shared_ac_headroom_kw=active_bound,
+        reactive_support=CiReactiveSupportSpec(
+            enabled=True,
+            max_reactive_support_kvar=reactive_bound,
+            inverter_apparent_power_limit_kva=apparent_limit,
+        ),
+    )
+
+    assert math.hypot(active_bound, reactive_bound) == pytest.approx(
+        apparent_limit
+    )
+    assert not optimizer_module._reactive_pq_facets_are_redundant(
+        problem,
+        problem.intervals[0],
+        forced_idle=False,
+    )
+
+
+def test_redundant_reactive_fixed_limit_uses_exact_residual_without_cuts():
+    problem = _problem(
+        intervals=_intervals(
+            (6.0, 10.0, 6.0),
+            kvar=(8.0, 8.0, 8.0),
+            rates=(0.1, 0.3, 0.1),
+        ),
+        battery=_battery(),
+        demand_charges=(
+            CiDemandCharge("kva", 20.0, (0, 1, 2), basis="kva"),
+        ),
+        shared_ac_headroom_kw=10.0,
+        reactive_support=CiReactiveSupportSpec(
+            enabled=True,
+            max_reactive_support_kvar=5.0,
+            inverter_apparent_power_limit_kva=20.0,
+        ),
+    )
+    fixed_limit = 9.5
+
+    outcome = optimizer_module._solve_fixed_limit_window(
+        problem,
+        fixed_soc_boundaries={0: 10.0, 3: 10.0},
+        fixed_demand_limits={"kva": fixed_limit},
+    )
+
+    assert outcome.solved is not None
+    assert outcome.kva_iterations == 0
+    assert all(
+        value == pytest.approx(5.0)
+        for value in outcome.solved.reactive_support
+    )
+    assert all(
+        math.hypot(grid_import, 3.0) <= fixed_limit + 1e-6
+        for grid_import in outcome.solved.grid_import
+    )
+
+
 def test_reactive_support_is_constrained_by_site_cap_and_pq_envelope():
     cap_limited = _problem(
         intervals=_intervals((100.0,), kvar=(80.0,)),

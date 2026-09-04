@@ -5,10 +5,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import lru_cache
+import logging
 import math
+import time
 from typing import Literal
 
 import highspy
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 CI_PEAK_SHAVING_OPTIMIZER_ID = "ci_peak_shaving_highs_v2"
@@ -499,9 +504,28 @@ def optimize_ci_peak_shaving(problem: CiOptimizerProblem) -> CiOptimizerResult:
     binary = False
     simultaneous_detected = False
     kva_iterations = 0
+    trace_large_model = len(problem.intervals) >= PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS
 
     while True:
+        solve_started_at = time.perf_counter()
+        if trace_large_model:
+            _LOGGER.info(
+                "ci_optimizer stage=annual_solve_start intervals=%d kva_iteration=%d binary=%s reactive=%s",
+                len(problem.intervals),
+                kva_iterations,
+                binary,
+                problem.reactive_support.enabled,
+            )
         solved = _solve_two_stage(problem, cuts=cuts, binary=binary)
+        if trace_large_model:
+            _LOGGER.info(
+                "ci_optimizer stage=annual_solve_complete intervals=%d kva_iteration=%d binary=%s model_status=%s elapsed_s=%.3f",
+                len(problem.intervals),
+                kva_iterations,
+                binary,
+                solved.model_status.name,
+                time.perf_counter() - solve_started_at,
+            )
         failure = _failure_status(problem, solved, binary=binary)
         if failure is not None:
             return _failed_result(
@@ -708,6 +732,7 @@ def execute_ci_peak_shaving_rolling(
 
     if not isinstance(problem, CiOptimizerProblem):
         raise ValueError("problem must be a CiOptimizerProblem")
+    replay_started_at = time.perf_counter()
     if (
         problem.reactive_support.enabled
         and not any(
@@ -718,7 +743,21 @@ def execute_ci_peak_shaving_rolling(
         return _execute_unpriced_reactive_support_rolling(problem)
     horizon_count, commit_count, cycle_delta = _rolling_shape(problem)
     planner_problem, planner_aggregation = _annual_planner_problem(problem)
+    planner_started_at = time.perf_counter()
+    _LOGGER.info(
+        "ci_optimizer stage=planner_start intervals=%d components=%d reactive=%s",
+        len(planner_problem.intervals),
+        len(planner_problem.demand_charges),
+        planner_problem.reactive_support.enabled,
+    )
     planner = optimize_ci_peak_shaving(planner_problem)
+    _LOGGER.info(
+        "ci_optimizer stage=planner_complete intervals=%d status=%s kva_iterations=%d elapsed_s=%.3f",
+        len(planner_problem.intervals),
+        planner.status.value,
+        planner.kva_cut_iterations,
+        time.perf_counter() - planner_started_at,
+    )
     idle_bill = _idle_bill(problem)
     if planner.status not in {
         CiOptimizerStatus.OPTIMAL_LP_EXACT,
@@ -803,7 +842,8 @@ def execute_ci_peak_shaving_rolling(
         problem.battery.nominal_capacity_kwh
         * problem.battery.initial_soc_fraction
     )
-    for topology in window_topologies:
+    rolling_started_at = time.perf_counter()
+    for window_number, topology in enumerate(window_topologies, start=1):
         start = topology.start_interval_index
         source_indexes = topology.source_indexes
         wrapped_count = topology.wrapped_interval_count
@@ -956,6 +996,13 @@ def execute_ci_peak_shaving_rolling(
         corrections.extend(outcome.corrections)
         any_milp = any_milp or outcome.solver_mode == "milp"
         any_bounded = any_bounded or outcome.status is CiOptimizerStatus.BOUNDED_OPTIMAL
+        if window_number % 50 == 0 or window_number == len(window_topologies):
+            _LOGGER.info(
+                "ci_optimizer stage=rolling_progress completed_windows=%d total_windows=%d elapsed_s=%.3f",
+                window_number,
+                len(window_topologies),
+                time.perf_counter() - rolling_started_at,
+            )
 
     full_solved = _solved_from_dispatch_rows(problem, tuple(committed_rows))
     demand_results = _exact_demand_results(problem, full_solved)
@@ -1046,7 +1093,7 @@ def execute_ci_peak_shaving_rolling(
         if any_milp
         else CiOptimizerStatus.OPTIMAL_LP_EXACT
     )
-    return CiRollingReplayResult(
+    result = CiRollingReplayResult(
         algorithm_id=CI_PEAK_SHAVING_ROLLING_REPLAY_ID,
         status=status,
         planner_status=planner.status,
@@ -1075,6 +1122,14 @@ def execute_ci_peak_shaving_rolling(
             for component in problem.demand_charges
         ),
     )
+    _LOGGER.info(
+        "ci_optimizer stage=replay_complete intervals=%d windows=%d status=%s elapsed_s=%.3f",
+        len(problem.intervals),
+        len(window_topologies),
+        result.status.value,
+        time.perf_counter() - replay_started_at,
+    )
+    return result
 
 
 def _execute_unpriced_reactive_support_rolling(
@@ -1504,6 +1559,78 @@ def _conservative_reactive_support_bound(
         for active_weight, reactive_weight in PQ_CAPABILITY_WEIGHTS
     )
     return min(exact_bound, max(0.0, polygon_bound))
+
+
+def _shared_ac_port_absolute_bound(
+    problem: CiOptimizerProblem,
+    row: CiOptimizerInterval,
+    *,
+    forced_idle: bool,
+) -> float:
+    """Return a safe box bound for the shared-port active-power expression."""
+
+    pv_to_ac_upper = min(row.pv_kw, problem.shared_ac_headroom_kw)
+    discharge_upper = (
+        0.0
+        if forced_idle
+        else min(row.load_kw, problem.battery.max_discharge_kw)
+    )
+    grid_charge_upper = (
+        min(
+            problem.battery.max_charge_kw,
+            problem.shared_ac_headroom_kw,
+        )
+        if problem.config.allow_grid_charging and not forced_idle
+        else 0.0
+    )
+    positive_upper = min(
+        problem.shared_ac_headroom_kw,
+        pv_to_ac_upper + discharge_upper,
+    )
+    negative_magnitude_upper = min(
+        problem.shared_ac_headroom_kw,
+        grid_charge_upper,
+    )
+    return max(positive_upper, negative_magnitude_upper)
+
+
+def _reactive_pq_facets_are_redundant(
+    problem: CiOptimizerProblem,
+    row: CiOptimizerInterval,
+    *,
+    forced_idle: bool,
+) -> bool:
+    """Prove that the interval's P-Q capability rows cannot bind.
+
+    The circular-envelope test is necessary but not sufficient because this
+    optimizer deliberately uses a conservative 16-facet inner approximation.
+    The second test proves redundancy against that existing polygon too, so
+    elision preserves the exact feasible set and result semantics.
+    """
+
+    if not problem.reactive_support.enabled:
+        return False
+    apparent_limit = problem.reactive_support.inverter_apparent_power_limit_kva
+    if apparent_limit is None:
+        raise ValueError("reactive apparent-power limit is missing")
+    active_bound = _shared_ac_port_absolute_bound(
+        problem,
+        row,
+        forced_idle=forced_idle,
+    )
+    reactive_bound = min(
+        row.reactive_kvar,
+        problem.reactive_support.max_reactive_support_kvar,
+    )
+    if math.hypot(active_bound, reactive_bound) > apparent_limit:
+        return False
+    conservative_radius = apparent_limit * PQ_CAPABILITY_RADIUS_FACTOR
+    return all(
+        abs(active_weight) * active_bound
+        + reactive_weight * reactive_bound
+        <= conservative_radius
+        for active_weight, reactive_weight in PQ_CAPABILITY_WEIGHTS
+    )
 
 
 def _rolling_shape(
@@ -2029,6 +2156,7 @@ def _build_model(
     pv_export: list[int] = []
     discharge: list[int] = []
     reactive_support: list[int] = []
+    pq_facets_redundant: list[bool] = []
     modes: list[int] = []
     primary_offset = 0.0
     for index, row in enumerate(problem.intervals):
@@ -2101,16 +2229,24 @@ def _build_model(
                 secondary_cost=row.duration_hours * (1.0 + stable_weight),
             )
         )
+        interval_pq_facets_redundant = _reactive_pq_facets_are_redundant(
+            problem,
+            row,
+            forced_idle=index in forced_idle_indexes,
+        )
+        pq_facets_redundant.append(interval_pq_facets_redundant)
+        reactive_upper = (
+            min(
+                row.reactive_kvar,
+                problem.reactive_support.max_reactive_support_kvar,
+            )
+            if problem.reactive_support.enabled
+            else 0.0
+        )
         reactive_support.append(
             add_column(
-                upper=(
-                    min(
-                        row.reactive_kvar,
-                        problem.reactive_support.max_reactive_support_kvar,
-                    )
-                    if problem.reactive_support.enabled
-                    else 0.0
-                ),
+                lower=reactive_upper if interval_pq_facets_redundant else 0.0,
+                upper=reactive_upper,
                 secondary_cost=(
                     -row.duration_hours * 1e-6
                     if problem.reactive_support.enabled
@@ -2207,7 +2343,10 @@ def _build_model(
             lower=-problem.shared_ac_headroom_kw,
             upper=problem.shared_ac_headroom_kw,
         )
-        if problem.reactive_support.enabled:
+        if (
+            problem.reactive_support.enabled
+            and not pq_facets_redundant[index]
+        ):
             apparent_limit = (
                 problem.reactive_support.inverter_apparent_power_limit_kva
             )
@@ -2285,7 +2424,14 @@ def _build_model(
                 )
             else:
                 kvar = problem.intervals[index].reactive_kvar
-                if fixed_limit is None or problem.reactive_support.enabled:
+                exact_fixed_reactive_limit = (
+                    fixed_limit is not None
+                    and pq_facets_redundant[index]
+                )
+                if fixed_limit is None or (
+                    problem.reactive_support.enabled
+                    and not exact_fixed_reactive_limit
+                ):
                     add_row(
                         (
                             (grid_charge[index], 1.0),
@@ -2297,8 +2443,24 @@ def _build_model(
                         upper=-problem.intervals[index].load_kw,
                     )
                 else:
+                    residual_kvar = (
+                        max(
+                            0.0,
+                            kvar
+                            - min(
+                                kvar,
+                                problem.reactive_support.max_reactive_support_kvar,
+                            ),
+                        )
+                        if exact_fixed_reactive_limit
+                        else kvar
+                    )
                     exact_active_limit = math.sqrt(
-                        max(0.0, fixed_limit * fixed_limit - kvar * kvar)
+                        max(
+                            0.0,
+                            fixed_limit * fixed_limit
+                            - residual_kvar * residual_kvar,
+                        )
                     )
                     add_row(
                         (
@@ -2316,9 +2478,12 @@ def _build_model(
                     ((peak, 1.0), (reactive_support[index], 1.0)),
                     lower=kvar,
                 )
-                for reference_import, reference_post_kvar in cuts.get(
-                    component.component_id, []
-                ):
+                component_cuts = (
+                    ()
+                    if exact_fixed_reactive_limit
+                    else cuts.get(component.component_id, [])
+                )
+                for reference_import, reference_post_kvar in component_cuts:
                     radius = math.hypot(reference_import, reference_post_kvar)
                     if radius > 0:
                         add_row(

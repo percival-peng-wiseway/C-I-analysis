@@ -45,7 +45,8 @@
     "LOCAL_OWNER_ID": "e3-ci-internal",
     "LOCAL_ACTOR_ID": "public-web-user",
     "LOCAL_ACTOR_DISPLAY_NAME": "Public web user",
-    "CI_SCENARIO_PROCESS_WORKERS": "3"
+    "CI_SCENARIO_PROCESS_WORKERS": "2",
+    "CI_SCENARIO_PROCESS_TIMEOUT_SECONDS": "600"
   },
   "observability": {
     "enabled": true
