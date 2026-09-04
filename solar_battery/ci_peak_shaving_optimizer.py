@@ -25,6 +25,11 @@ SIMULTANEOUS_FLOW_TOLERANCE_KW = 1e-7
 PRIMARY_COST_BOUND_BLOCK_NONZEROS = 384
 PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS = 1024
 KVA_CUT_BATCH_SIZE = 4
+SERIAL_HIGHS_THREADS = 1
+SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS = 4
+PAMI_SIMPLEX_STRATEGY = int(
+    highspy.simplex_constants.kSimplexStrategyDualMulti
+)
 WEAR_SHADOW_COST_AUD_PER_DISCHARGED_KWH = 0.05
 DEFAULT_SHARED_AC_HEADROOM_KW = 250.0
 PQ_CAPABILITY_SEGMENTS = 16
@@ -486,6 +491,59 @@ def optimize_ci_peak_shaving(
     problem: CiOptimizerProblem,
     *,
     _planner_primary_only: bool = False,
+    _planner_highs_threads: int = SERIAL_HIGHS_THREADS,
+) -> CiOptimizerResult:
+    """Optimize a C&I horizon and contain any parallel annual-planner state.
+
+    Four-thread PAMI is an explicit annual-planner-only execution mode. HiGHS
+    owns a process-global scheduler, so that mode resets the scheduler before
+    its first model and again on every return or exception. The authoritative
+    rolling windows and every ordinary scenario remain deterministic,
+    single-threaded solves.
+    """
+
+    if _planner_highs_threads not in {
+        SERIAL_HIGHS_THREADS,
+        SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
+    }:
+        raise ValueError("annual planner HiGHS threads must be one or four")
+    if (
+        _planner_highs_threads != SERIAL_HIGHS_THREADS
+        and not _planner_primary_only
+    ):
+        raise ValueError(
+            "parallel HiGHS is restricted to the primary-only annual planner"
+        )
+    if _planner_highs_threads == SERIAL_HIGHS_THREADS:
+        return _optimize_ci_peak_shaving(
+            problem,
+            planner_primary_only=_planner_primary_only,
+            planner_highs_threads=SERIAL_HIGHS_THREADS,
+        )
+
+    try:
+        _reset_highs_global_scheduler()
+        return _optimize_ci_peak_shaving(
+            problem,
+            planner_primary_only=True,
+            planner_highs_threads=_planner_highs_threads,
+        )
+    finally:
+        # This also runs for LP failure, LP-to-MILP fallback, kVA-cut failure,
+        # timeout and unexpected exceptions. Rolling models must always start
+        # from a clean one-thread scheduler.
+        _reset_highs_global_scheduler()
+
+
+def _reset_highs_global_scheduler() -> None:
+    highspy.Highs.resetGlobalScheduler(True)
+
+
+def _optimize_ci_peak_shaving(
+    problem: CiOptimizerProblem,
+    *,
+    planner_primary_only: bool,
+    planner_highs_threads: int,
 ) -> CiOptimizerResult:
     """Optimize one synthetic/internal C&I horizon with HiGHS.
 
@@ -524,7 +582,17 @@ def optimize_ci_peak_shaving(
             problem,
             cuts=cuts,
             binary=binary,
-            run_secondary_tiebreak=not _planner_primary_only,
+            run_secondary_tiebreak=not planner_primary_only,
+            highs_threads=(
+                planner_highs_threads
+                if not binary
+                else SERIAL_HIGHS_THREADS
+            ),
+            parallel_simplex=(
+                planner_highs_threads
+                != SERIAL_HIGHS_THREADS
+                and not binary
+            ),
         )
         if trace_large_model:
             _LOGGER.info(
@@ -571,6 +639,10 @@ def optimize_ci_peak_shaving(
         )
         if simultaneous and not binary:
             simultaneous_detected = True
+            if planner_highs_threads != SERIAL_HIGHS_THREADS:
+                # The MILP fallback must return to the deterministic
+                # single-thread scheduler before its first model is built.
+                _reset_highs_global_scheduler()
             binary = True
             corrections.append("lp_to_milp_simultaneous_charge_discharge")
             continue
@@ -729,6 +801,8 @@ def optimize_ci_peak_shaving(
 
 def execute_ci_peak_shaving_rolling(
     problem: CiOptimizerProblem,
+    *,
+    annual_planner_highs_threads: int = SERIAL_HIGHS_THREADS,
 ) -> CiRollingReplayResult:
     """Plan annually, then replay 48-hour perfect-foresight windows.
 
@@ -741,6 +815,11 @@ def execute_ci_peak_shaving_rolling(
 
     if not isinstance(problem, CiOptimizerProblem):
         raise ValueError("problem must be a CiOptimizerProblem")
+    if annual_planner_highs_threads not in {
+        SERIAL_HIGHS_THREADS,
+        SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
+    }:
+        raise ValueError("annual planner HiGHS threads must be one or four")
     replay_started_at = time.perf_counter()
     if (
         problem.reactive_support.enabled
@@ -749,15 +828,19 @@ def execute_ci_peak_shaving_rolling(
             for component in problem.demand_charges
         )
     ):
-        return _execute_unpriced_reactive_support_rolling(problem)
+        return _execute_unpriced_reactive_support_rolling(
+            problem,
+            annual_planner_highs_threads=annual_planner_highs_threads,
+        )
     horizon_count, commit_count, cycle_delta = _rolling_shape(problem)
     planner_problem, planner_aggregation = _annual_planner_problem(problem)
     planner_started_at = time.perf_counter()
     _LOGGER.info(
-        "ci_optimizer stage=planner_start intervals=%d components=%d reactive=%s",
+        "ci_optimizer stage=planner_start intervals=%d components=%d reactive=%s highs_threads=%d",
         len(planner_problem.intervals),
         len(planner_problem.demand_charges),
         planner_problem.reactive_support.enabled,
+        annual_planner_highs_threads,
     )
     # The annual pass supplies feasible primary-cost ceilings and SOC
     # boundaries to the authoritative rolling replay; its interval dispatch is
@@ -770,6 +853,7 @@ def execute_ci_peak_shaving_rolling(
     planner = optimize_ci_peak_shaving(
         planner_problem,
         _planner_primary_only=True,
+        _planner_highs_threads=annual_planner_highs_threads,
     )
     _LOGGER.info(
         "ci_optimizer stage=planner_complete intervals=%d status=%s kva_iterations=%d elapsed_s=%.3f",
@@ -796,6 +880,13 @@ def execute_ci_peak_shaving_rolling(
     planner_corrections: tuple[str, ...] = (
         "annual_planner_primary_solution_seed_without_throughput_tiebreak",
     )
+    if (
+        annual_planner_highs_threads
+        == SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+    ):
+        planner_corrections += (
+            "single_scenario_annual_planner_pami_4_threads_then_scheduler_reset",
+        )
     if planner_references is not None and planner_aggregation is not None:
         planner_references = _expand_planner_references(
             problem,
@@ -1156,6 +1247,8 @@ def execute_ci_peak_shaving_rolling(
 
 def _execute_unpriced_reactive_support_rolling(
     problem: CiOptimizerProblem,
+    *,
+    annual_planner_highs_threads: int,
 ) -> CiRollingReplayResult:
     """Separate optional Q support when no billed kVA component can value it.
 
@@ -1181,7 +1274,10 @@ def _execute_unpriced_reactive_support_rolling(
         ),
         reactive_support=CiReactiveSupportSpec(),
     )
-    active_result = execute_ci_peak_shaving_rolling(active_problem)
+    active_result = execute_ci_peak_shaving_rolling(
+        active_problem,
+        annual_planner_highs_threads=annual_planner_highs_threads,
+    )
     if not active_result.intervals:
         return replace(
             active_result,
@@ -2001,7 +2097,13 @@ def _solve_two_stage(
     fixed_demand_limits: dict[str, float] | None = None,
     forced_idle_period_ids: set[str] | None = None,
     run_secondary_tiebreak: bool = True,
+    highs_threads: int = SERIAL_HIGHS_THREADS,
+    parallel_simplex: bool = False,
 ) -> _SolvedDispatch:
+    if parallel_simplex and run_secondary_tiebreak:
+        raise ValueError(
+            "parallel simplex is restricted to a primary-only annual solve"
+        )
     primary_model = _build_model(
         problem,
         cuts=cuts,
@@ -2010,6 +2112,8 @@ def _solve_two_stage(
         minimum_soc_boundaries=minimum_soc_boundaries,
         fixed_demand_limits=fixed_demand_limits,
         forced_idle_period_ids=forced_idle_period_ids,
+        highs_threads=highs_threads,
+        parallel_simplex=parallel_simplex,
     )
     primary = _run_model(primary_model, binary=binary)
     if primary.objective is None or primary.model_status not in {
@@ -2025,6 +2129,8 @@ def _solve_two_stage(
                 minimum_soc_boundaries=minimum_soc_boundaries,
                 fixed_demand_limits=fixed_demand_limits,
                 forced_idle_period_ids=forced_idle_period_ids,
+                highs_threads=highs_threads,
+                parallel_simplex=parallel_simplex,
             )
             primary = _run_model(retry_model, binary=False)
             primary_model = retry_model
@@ -2113,15 +2219,34 @@ def _build_model(
     minimum_soc_boundaries: dict[int, float] | None = None,
     fixed_demand_limits: dict[str, float] | None = None,
     forced_idle_period_ids: set[str] | None = None,
+    highs_threads: int = SERIAL_HIGHS_THREADS,
+    parallel_simplex: bool = False,
 ) -> _ModelArtifacts:
+    if highs_threads not in {
+        SERIAL_HIGHS_THREADS,
+        SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
+    }:
+        raise ValueError("HiGHS threads must be one or four")
+    if parallel_simplex and (
+        binary
+        or highs_threads == SERIAL_HIGHS_THREADS
+        or secondary_objective
+    ):
+        raise ValueError(
+            "parallel simplex is restricted to the primary annual LP"
+        )
+    if highs_threads != SERIAL_HIGHS_THREADS and not parallel_simplex:
+        raise ValueError("four HiGHS threads require parallel simplex")
     highs = highspy.Highs()
     highs.setOptionValue("output_flag", False)
-    highs.setOptionValue("threads", 1)
-    highs.setOptionValue("parallel", "off")
+    highs.setOptionValue("threads", highs_threads)
+    highs.setOptionValue("parallel", "on" if parallel_simplex else "off")
     highs.setOptionValue("random_seed", 0)
     highs.setOptionValue("time_limit", problem.config.time_limit_seconds)
     if not binary:
         highs.setOptionValue("solver", "simplex")
+        if parallel_simplex:
+            highs.setOptionValue("simplex_strategy", PAMI_SIMPLEX_STRATEGY)
     highs.setOptionValue(
         "mip_abs_gap",
         0.0 if secondary_objective else problem.config.materiality_tolerance_aud,

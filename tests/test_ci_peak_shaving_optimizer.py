@@ -158,6 +158,47 @@ def _calendar_year_problem(
     )
 
 
+def test_parallel_annual_planner_builds_pami_and_rolling_defaults_to_serial():
+    problem = _problem(
+        intervals=_intervals((2.0, 8.0, 2.0)),
+        battery=_battery(),
+        demand_charges=(CiDemandCharge("peak", 20.0, (0, 1, 2)),),
+    )
+
+    annual = optimizer_module._build_model(
+        problem,
+        cuts={},
+        binary=False,
+        highs_threads=(
+            optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        ),
+        parallel_simplex=True,
+    )
+    rolling = optimizer_module._build_model(
+        problem,
+        cuts={},
+        binary=False,
+    )
+
+    assert annual.highs.getOptionValue("threads")[1] == 4
+    assert annual.highs.getOptionValue("parallel")[1] == "on"
+    assert annual.highs.getOptionValue("simplex_strategy")[1] == (
+        optimizer_module.PAMI_SIMPLEX_STRATEGY
+    )
+    assert rolling.highs.getOptionValue("threads")[1] == 1
+    assert rolling.highs.getOptionValue("parallel")[1] == "off"
+    with pytest.raises(ValueError, match="primary-only annual solve"):
+        optimizer_module._solve_two_stage(
+            problem,
+            cuts={},
+            binary=False,
+            highs_threads=(
+                optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+            ),
+            parallel_simplex=True,
+        )
+
+
 def test_joint_kw_plan_reconciles_soc_monthly_and_rolling_demand():
     intervals = _intervals((2.0, 2.0, 10.0, 2.0, 2.0, 8.0, 2.0, 2.0))
     problem = _problem(
@@ -655,23 +696,45 @@ def test_unpriced_kva_reactive_support_is_applied_after_active_dispatch(
             inverter_apparent_power_limit_kva=250.0,
         ),
     )
-    built_reactive_models: list[bool] = []
+    built_models: list[tuple[bool, int, bool]] = []
     real_build_model = optimizer_module._build_model
 
     def tracked_build_model(*args, **kwargs):
-        built_reactive_models.append(args[0].reactive_support.enabled)
+        built_models.append(
+            (
+                args[0].reactive_support.enabled,
+                kwargs.get(
+                    "highs_threads",
+                    optimizer_module.SERIAL_HIGHS_THREADS,
+                ),
+                kwargs.get("parallel_simplex", False),
+            )
+        )
         return real_build_model(*args, **kwargs)
 
     monkeypatch.setattr(optimizer_module, "_build_model", tracked_build_model)
 
-    result = execute_ci_peak_shaving_rolling(problem)
+    result = execute_ci_peak_shaving_rolling(
+        problem,
+        annual_planner_highs_threads=(
+            optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        ),
+    )
 
     assert result.status in {
         CiOptimizerStatus.OPTIMAL_LP_EXACT,
         CiOptimizerStatus.OPTIMAL_MILP,
         CiOptimizerStatus.BOUNDED_OPTIMAL,
     }
-    assert built_reactive_models and not any(built_reactive_models)
+    assert built_models and not any(item[0] for item in built_models)
+    assert built_models[0][1:] == (
+        optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
+        True,
+    )
+    assert all(
+        threads == optimizer_module.SERIAL_HIGHS_THREADS and not parallel
+        for _reactive, threads, parallel in built_models[1:]
+    )
     assert len(result.demand_charges) == len(problem.demand_charges)
     assert max(
         row.inverter_reactive_support_kvar for row in result.intervals
@@ -1170,6 +1233,116 @@ def test_lp_simultaneous_flow_triggers_same_horizon_milp_fallback(monkeypatch):
     assert "lp_to_milp_simultaneous_charge_discharge" in result.corrections
 
 
+def test_parallel_annual_planner_resets_before_serial_milp_fallback(
+    monkeypatch,
+):
+    problem = _problem(
+        intervals=_intervals((2.0, 2.0, 10.0, 2.0)),
+        battery=_battery(),
+        demand_charges=(CiDemandCharge("peak", 20.0, (0, 1, 2, 3)),),
+    )
+    real_solve = optimizer_module._solve_two_stage
+    real_reset = optimizer_module._reset_highs_global_scheduler
+    modes: list[tuple[bool, int, bool]] = []
+    reset_calls: list[bool] = []
+
+    def tracked_reset():
+        reset_calls.append(True)
+        real_reset()
+
+    def injected_simultaneous_flow(
+        problem,
+        *,
+        cuts,
+        binary,
+        highs_threads,
+        parallel_simplex,
+        **kwargs,
+    ):
+        modes.append((binary, highs_threads, parallel_simplex))
+        solved = real_solve(
+            problem,
+            cuts=cuts,
+            binary=binary,
+            highs_threads=highs_threads,
+            parallel_simplex=parallel_simplex,
+            **kwargs,
+        )
+        if binary:
+            return solved
+        return replace(
+            solved,
+            grid_charge=(1.0,) + solved.grid_charge[1:],
+            discharge=(1.0,) + solved.discharge[1:],
+        )
+
+    monkeypatch.setattr(
+        optimizer_module,
+        "_reset_highs_global_scheduler",
+        tracked_reset,
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "_solve_two_stage",
+        injected_simultaneous_flow,
+    )
+
+    result = optimize_ci_peak_shaving(
+        problem,
+        _planner_primary_only=True,
+        _planner_highs_threads=(
+            optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        ),
+    )
+
+    assert modes == [(False, 4, True), (True, 1, False)]
+    assert reset_calls == [True, True, True]
+    assert result.status is CiOptimizerStatus.OPTIMAL_MILP
+
+
+def test_parallel_annual_planner_resets_after_kva_cut_exception(monkeypatch):
+    problem = _problem(
+        intervals=_intervals(
+            (6.0, 12.0, 6.0, 6.0),
+            kvar=(8.0, 8.0, 8.0, 8.0),
+        ),
+        battery=_battery(),
+        demand_charges=(
+            CiDemandCharge("monthly_kva", 20.0, (0, 1, 2, 3), basis="kva"),
+        ),
+    )
+    real_reset = optimizer_module._reset_highs_global_scheduler
+    reset_calls: list[bool] = []
+
+    def tracked_reset():
+        reset_calls.append(True)
+        real_reset()
+
+    monkeypatch.setattr(
+        optimizer_module,
+        "_reset_highs_global_scheduler",
+        tracked_reset,
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "_new_kva_cuts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic kVA cut failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic kVA cut failure"):
+        optimize_ci_peak_shaving(
+            problem,
+            _planner_primary_only=True,
+            _planner_highs_threads=(
+                optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+            ),
+        )
+
+    assert reset_calls == [True, True]
+
+
 def test_year_boundary_intervals_remain_chronological_and_soc_continuous():
     start = datetime(2025, 12, 31, 22, tzinfo=timezone.utc)
     problem = _problem(
@@ -1257,6 +1430,79 @@ def test_rolling_replay_commits_24_hours_wraps_january_and_reconciles():
     assert (
         "annual_planner_primary_solution_seed_without_throughput_tiebreak"
         in result.corrections
+    )
+
+
+def test_single_scenario_parallel_annual_planner_matches_serial_real_year(
+    monkeypatch,
+):
+    problem = _calendar_year_problem()
+    reset_calls: list[bool] = []
+    real_reset = optimizer_module._reset_highs_global_scheduler
+
+    def tracked_reset():
+        reset_calls.append(True)
+        real_reset()
+
+    monkeypatch.setattr(
+        optimizer_module,
+        "_reset_highs_global_scheduler",
+        tracked_reset,
+    )
+
+    parallel = execute_ci_peak_shaving_rolling(
+        problem,
+        annual_planner_highs_threads=(
+            optimizer_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        ),
+    )
+    serial = execute_ci_peak_shaving_rolling(problem)
+
+    assert reset_calls == [True, True]
+    assert parallel.status is serial.status
+    assert parallel.planner_status is serial.planner_status
+    assert parallel.exact_replay_bill_aud == serial.exact_replay_bill_aud
+    assert parallel.idle_baseline_bill_aud == serial.idle_baseline_bill_aud
+    assert parallel.demand_charges == serial.demand_charges
+    assert parallel.billing_periods == serial.billing_periods
+    assert len(parallel.intervals) == len(serial.intervals)
+    for parallel_row, serial_row in zip(
+        parallel.intervals,
+        serial.intervals,
+        strict=True,
+    ):
+        assert parallel_row.timestamp == serial_row.timestamp
+        for field in (
+            "grid_import_kw",
+            "pv_export_kw",
+            "pv_to_ac_kw",
+            "grid_charge_kw",
+            "pv_charge_kw",
+            "discharge_kw",
+            "soc_start_kwh",
+            "soc_end_kwh",
+            "exact_grid_import_kva",
+        ):
+            assert getattr(parallel_row, field) == pytest.approx(
+                getattr(serial_row, field),
+                abs=1e-7,
+            )
+    parallel_limits = dict(parallel.annual_planner_demand_limits)
+    serial_limits = dict(serial.annual_planner_demand_limits)
+    assert parallel_limits.keys() == serial_limits.keys()
+    for component_id, parallel_limit in parallel_limits.items():
+        serial_limit = serial_limits[component_id]
+        if parallel_limit is None:
+            assert serial_limit is None
+        else:
+            assert parallel_limit == pytest.approx(serial_limit, abs=1e-7)
+    assert (
+        "single_scenario_annual_planner_pami_4_threads_then_scheduler_reset"
+        in parallel.corrections
+    )
+    assert (
+        "single_scenario_annual_planner_pami_4_threads_then_scheduler_reset"
+        not in serial.corrections
     )
 
 

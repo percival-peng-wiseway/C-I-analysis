@@ -42,6 +42,8 @@ from solar_battery.ci_peak_shaving_optimizer import (
     CiOptimizerProblem,
     CiOptimizerStatus,
     CiReactiveSupportSpec,
+    SERIAL_HIGHS_THREADS,
+    SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
     execute_ci_peak_shaving_rolling,
 )
 from solar_battery.models import CleanedInterval
@@ -69,7 +71,7 @@ MAX_BATTERY_SYSTEMS = 15
 MAX_PV_SYSTEMS = 20
 DEFAULT_SCENARIO_PROCESS_WORKERS = 1
 MAX_SCENARIO_PROCESS_WORKERS = 3
-MAX_COORDINATOR_SCENARIO_THREADS = 2
+MAX_COORDINATOR_SCENARIO_THREADS = 4
 DEFAULT_SCENARIO_PROCESS_TIMEOUT_SECONDS = 600.0
 MIN_SCENARIO_PROCESS_TIMEOUT_SECONDS = 30.0
 MAX_SCENARIO_PROCESS_TIMEOUT_SECONDS = 3600.0
@@ -469,10 +471,12 @@ def _run_physical_analysis_coordinator(
     """Return only pickle-safe values across the coordinator boundary.
 
     The coordinator is already the disposable, deadline-owned isolation
-    boundary. Run at most two selected battery scenarios concurrently in
+    boundary. Run at most four selected battery scenarios concurrently in
     threads, with one HiGHS thread per scenario, instead of creating a nested
-    process pool. The parent watchdog can still terminate the whole
-    coordinator and every solver thread on expiry.
+    process pool. A request containing exactly one battery scenario may use
+    four HiGHS threads only for its annual primary LP planner. The parent
+    watchdog can still terminate the whole coordinator and every solver
+    thread on expiry.
     """
 
     try:
@@ -582,10 +586,11 @@ def _execute_authored_scenarios(
     HiGHS has a process-global scheduler.  Explicit callers can use bounded
     spawned processes with one deterministic solver thread per process.  The
     production coordinator passes ``worker_count=1`` and explicitly enables
-    at most two scenario threads, so container execution never nests process
-    pools. Each scenario thread owns its mutable caches and each HiGHS model
-    remains single-threaded. PV-only rows remain inline because they do not
-    invoke HiGHS.
+    at most four scenario threads, so container execution never nests process
+    pools. Each scenario thread owns its mutable caches and each multi-scenario
+    HiGHS model remains single-threaded. An isolated one-battery request may
+    use four HiGHS threads only for its annual primary LP planner. PV-only rows
+    remain inline because they do not invoke HiGHS.
     """
 
     workers = (
@@ -601,6 +606,12 @@ def _execute_authored_scenarios(
         (index, scenario)
         for index, scenario in enumerate(authored)
         if scenario.nominal_capacity_kwh > 0.0
+    )
+    annual_planner_highs_threads = (
+        SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        if len(indexed_battery) == 1
+        and (workers > 1 or coordinator_thread_workers > 1)
+        else SERIAL_HIGHS_THREADS
     )
     if not indexed_battery or (
         workers <= 1
@@ -618,6 +629,11 @@ def _execute_authored_scenarios(
                 profile,
                 annual_tariff_baseline_cache,
                 pv_generation_cache,
+                annual_planner_highs_threads=(
+                    annual_planner_highs_threads
+                    if item.nominal_capacity_kwh > 0.0
+                    else SERIAL_HIGHS_THREADS
+                ),
             )
             for item in authored
         ]
@@ -632,6 +648,7 @@ def _execute_authored_scenarios(
                 profile,
                 annual_tariff_baseline_cache,
                 pv_generation_cache,
+                annual_planner_highs_threads=SERIAL_HIGHS_THREADS,
             )
 
     if workers <= 1:
@@ -669,6 +686,7 @@ def _execute_authored_scenarios(
             tariff_membership,
             profile,
             worker_count=min(workers, len(indexed_battery)),
+            annual_planner_highs_threads=annual_planner_highs_threads,
         )
     except _ScenarioProcessPoolUnavailable as exc:
         _LOGGER.warning(
@@ -699,6 +717,7 @@ def _execute_authored_scenarios(
                 tariff_membership,
                 profile,
                 worker_count=1,
+                annual_planner_highs_threads=annual_planner_highs_threads,
             )
         except (
             _ScenarioProcessPoolUnavailable,
@@ -737,7 +756,8 @@ def _execute_battery_scenarios_in_threads(
 
     if not 2 <= worker_count <= MAX_COORDINATOR_SCENARIO_THREADS:
         raise _ScenarioThreadExecutionFailed(
-            "scenario thread execution requires exactly two bounded workers"
+            "scenario thread execution requires between two and "
+            f"{MAX_COORDINATOR_SCENARIO_THREADS} bounded workers"
         )
     chunks: list[list[tuple[int, _Scenario]]] = [
         [] for _ in range(worker_count)
@@ -766,6 +786,7 @@ def _execute_battery_scenarios_in_threads(
                 interval_evidence,
                 tariff_membership,
                 profile,
+                SERIAL_HIGHS_THREADS,
             )
             for chunk in chunks
             if chunk
@@ -849,9 +870,25 @@ def _execute_battery_scenarios_in_processes(
     profile: dict[str, Any],
     *,
     worker_count: int,
+    annual_planner_highs_threads: int = SERIAL_HIGHS_THREADS,
 ) -> dict[int, dict[str, object]]:
     global _SCENARIO_PROCESS_POOL_DISABLED
 
+    if annual_planner_highs_threads not in {
+        SERIAL_HIGHS_THREADS,
+        SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
+    }:
+        raise _ScenarioProcessExecutionFailed(
+            "annual planner HiGHS threads are outside the safe execution modes"
+        )
+    if (
+        annual_planner_highs_threads
+        == SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        and len(indexed_scenarios) != 1
+    ):
+        raise _ScenarioProcessExecutionFailed(
+            "parallel annual planning requires exactly one battery scenario"
+        )
     started_at = monotonic()
     timeout_seconds = _configured_scenario_process_timeout_seconds()
     deadline = started_at + timeout_seconds
@@ -907,6 +944,7 @@ def _execute_battery_scenarios_in_processes(
                         interval_evidence,
                         tariff_membership,
                         profile,
+                        annual_planner_highs_threads,
                     )
                 )
             except BrokenProcessPool as exc:
@@ -1146,7 +1184,17 @@ def _execute_scenario_chunk(
     interval_evidence: dict[datetime, dict[str, object]],
     tariff_membership: _TariffRowMembership,
     profile: dict[str, Any],
+    annual_planner_highs_threads: int = SERIAL_HIGHS_THREADS,
 ) -> list[tuple[int, dict[str, object]]]:
+    if annual_planner_highs_threads not in {
+        SERIAL_HIGHS_THREADS,
+        SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS,
+    } or (
+        annual_planner_highs_threads
+        == SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+        and len(indexed_scenarios) != 1
+    ):
+        raise CiScenarioAnalysisError("scenario_execution_failed")
     started_at = monotonic()
     _LOGGER.info(
         "ci_scenario_analysis stage=chunk_start scenarios=%d",
@@ -1165,6 +1213,7 @@ def _execute_scenario_chunk(
                 profile,
                 annual_tariff_baseline_cache,
                 pv_generation_cache,
+                annual_planner_highs_threads=annual_planner_highs_threads,
             ),
         )
         for index, scenario in indexed_scenarios
@@ -1463,6 +1512,8 @@ def _run_scenario(
     pv_generation_cache: (
         dict[tuple[object, ...], tuple[float, ...]] | None
     ) = None,
+    *,
+    annual_planner_highs_threads: int = SERIAL_HIGHS_THREADS,
 ) -> dict[str, object]:
     return _execute_scenario(
         scenario,
@@ -1472,6 +1523,7 @@ def _run_scenario(
         profile,
         annual_tariff_baseline_cache,
         pv_generation_cache,
+        annual_planner_highs_threads=annual_planner_highs_threads,
     ).public_result
 
 
@@ -1485,6 +1537,8 @@ def _execute_scenario(
     pv_generation_cache: (
         dict[tuple[object, ...], tuple[float, ...]] | None
     ) = None,
+    *,
+    annual_planner_highs_threads: int = SERIAL_HIGHS_THREADS,
 ) -> _ScenarioExecution:
     flat_intervals = tuple(
         interval for period in periods for interval in period.intervals
@@ -1574,7 +1628,10 @@ def _execute_scenario(
             profile,
         )
         try:
-            rolling = execute_ci_peak_shaving_rolling(problem)
+            rolling = execute_ci_peak_shaving_rolling(
+                problem,
+                annual_planner_highs_threads=annual_planner_highs_threads,
+            )
         except (RuntimeError, ValueError) as exc:
             raise CiScenarioAnalysisError("scenario_execution_failed") from exc
         if rolling.status not in {

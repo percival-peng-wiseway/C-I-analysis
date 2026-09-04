@@ -176,7 +176,7 @@ def _run_reactive_pv_only_scenarios(monkeypatch, profile):
     }
 
 
-def _stub_rolling(problem):
+def _stub_rolling(problem, **_kwargs):
     soc = problem.battery.nominal_capacity_kwh * problem.battery.initial_soc_fraction
     intervals = tuple(
         CiDispatchInterval(
@@ -1026,7 +1026,7 @@ def test_coordinator_wraps_expected_errors_in_pickle_safe_values(
     )
 
 
-def test_coordinator_runs_core_with_two_threads_and_no_nested_process_pool(
+def test_coordinator_runs_core_with_four_threads_and_no_nested_process_pool(
     monkeypatch,
 ) -> None:
     observed_worker_counts: list[tuple[int | None, int]] = []
@@ -1062,7 +1062,7 @@ def test_coordinator_runs_core_with_two_threads_and_no_nested_process_pool(
         scenario_module._COORDINATOR_RESULT_READY,
         {"contract_version": "threaded-coordinator"},
     )
-    assert observed_worker_counts == [(1, 2)]
+    assert observed_worker_counts == [(1, 4)]
 
 
 def test_one_selected_scenario_never_creates_a_thread_or_process_pool(
@@ -1084,11 +1084,13 @@ def test_one_selected_scenario_never_creates_a_thread_or_process_pool(
             "one selected scenario must not create a thread pool"
         ),
     )
-    monkeypatch.setattr(
-        scenario_module,
-        "_run_scenario",
-        lambda scenario, *_args: {"scenario_id": scenario.scenario_id},
-    )
+    observed_planner_threads: list[int] = []
+
+    def run_scenario(scenario, *_args, annual_planner_highs_threads):
+        observed_planner_threads.append(annual_planner_highs_threads)
+        return {"scenario_id": scenario.scenario_id}
+
+    monkeypatch.setattr(scenario_module, "_run_scenario", run_scenario)
 
     result = scenario_module._execute_authored_scenarios(
         authored,
@@ -1099,10 +1101,72 @@ def test_one_selected_scenario_never_creates_a_thread_or_process_pool(
         {},
         {},
         worker_count=1,
-        coordinator_thread_workers=2,
+        coordinator_thread_workers=4,
     )
 
     assert result == [{"scenario_id": "battery-a"}]
+    assert observed_planner_threads == [
+        scenario_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+    ]
+
+
+def test_inline_single_battery_keeps_highs_serial_without_process_isolation(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    observed_planner_threads: list[int] = []
+
+    def run_scenario(scenario, *_args, annual_planner_highs_threads):
+        observed_planner_threads.append(annual_planner_highs_threads)
+        return {"scenario_id": scenario.scenario_id}
+
+    monkeypatch.setattr(scenario_module, "_run_scenario", run_scenario)
+
+    result = scenario_module._execute_authored_scenarios(
+        authored,
+        (),
+        {},
+        {},
+        {},
+        {},
+        {},
+        worker_count=1,
+        coordinator_thread_workers=1,
+    )
+
+    assert result == [{"scenario_id": "battery-a"}]
+    assert observed_planner_threads == [scenario_module.SERIAL_HIGHS_THREADS]
+
+
+def test_coordinator_rejects_more_than_four_scenario_threads(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios(
+        [
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ]
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_run_scenario",
+        lambda *_args: pytest.fail("an unsafe worker count must fail closed"),
+    )
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        scenario_module._execute_authored_scenarios(
+            authored,
+            (),
+            {},
+            {},
+            {},
+            {},
+            {},
+            worker_count=1,
+            coordinator_thread_workers=5,
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
 
 
 def test_coordinator_threads_preserve_order_and_keep_caches_private(
@@ -1113,17 +1177,32 @@ def test_coordinator_threads_preserve_order_and_keep_caches_private(
             _scenario("battery-a", 10.0, 5.0),
             _scenario("pv-only", 0.0, 0.0),
             _scenario("battery-b", 20.0, 10.0),
+            _scenario("battery-c", 30.0, 15.0),
+            _scenario("battery-d", 40.0, 20.0),
         ]
     )
-    battery_barrier = Barrier(2)
-    battery_b_complete = Event()
+    battery_barrier = Barrier(4)
+    release_next = {
+        "battery-d": Event(),
+        "battery-c": Event(),
+        "battery-b": Event(),
+        "battery-a": Event(),
+    }
+    release_next["battery-d"].set()
     observation_lock = ThreadLock()
     thread_ids: dict[str, int] = {}
     cache_ids: dict[str, tuple[int, int]] = {}
     completion_order: list[str] = []
 
-    def run_scenario(scenario, *_args):
+    planner_threads: dict[str, int] = {}
+
+    def run_scenario(
+        scenario,
+        *_args,
+        annual_planner_highs_threads,
+    ):
         baseline_cache, pv_cache = _args[-2:]
+        planner_threads[scenario.scenario_id] = annual_planner_highs_threads
         if scenario.nominal_capacity_kwh > 0.0:
             with observation_lock:
                 thread_ids[scenario.scenario_id] = get_ident()
@@ -1131,15 +1210,17 @@ def test_coordinator_threads_preserve_order_and_keep_caches_private(
                     id(baseline_cache),
                     id(pv_cache),
                 )
-            battery_barrier.wait(timeout=3)
-            if scenario.scenario_id == "battery-a":
-                assert battery_b_complete.wait(timeout=3)
-            else:
-                with observation_lock:
-                    completion_order.append(scenario.scenario_id)
-                battery_b_complete.set()
-        with observation_lock:
-            completion_order.append(scenario.scenario_id)
+            battery_barrier.wait(timeout=5)
+            assert release_next[scenario.scenario_id].wait(timeout=5)
+            with observation_lock:
+                completion_order.append(scenario.scenario_id)
+            successor = {
+                "battery-d": "battery-c",
+                "battery-c": "battery-b",
+                "battery-b": "battery-a",
+            }.get(scenario.scenario_id)
+            if successor is not None:
+                release_next[successor].set()
         return {"scenario_id": scenario.scenario_id}
 
     monkeypatch.setattr(scenario_module, "_run_scenario", run_scenario)
@@ -1160,20 +1241,26 @@ def test_coordinator_threads_preserve_order_and_keep_caches_private(
         {},
         {},
         worker_count=1,
-        coordinator_thread_workers=2,
+        coordinator_thread_workers=4,
     )
 
     assert [row["scenario_id"] for row in result] == [
         "battery-a",
         "pv-only",
         "battery-b",
+        "battery-c",
+        "battery-d",
     ]
-    assert thread_ids["battery-a"] != thread_ids["battery-b"]
-    assert cache_ids["battery-a"][0] != cache_ids["battery-b"][0]
-    assert cache_ids["battery-a"][1] != cache_ids["battery-b"][1]
-    assert completion_order.index("battery-b") < completion_order.index(
-        "battery-a"
-    )
+    assert len(set(thread_ids.values())) == 4
+    assert len({ids[0] for ids in cache_ids.values()}) == 4
+    assert len({ids[1] for ids in cache_ids.values()}) == 4
+    assert completion_order == [
+        "battery-d",
+        "battery-c",
+        "battery-b",
+        "battery-a",
+    ]
+    assert set(planner_threads.values()) == {scenario_module.SERIAL_HIGHS_THREADS}
 
 
 def test_coordinator_thread_failure_discards_partial_results(monkeypatch) -> None:
@@ -1181,14 +1268,21 @@ def test_coordinator_thread_failure_discards_partial_results(monkeypatch) -> Non
         [
             _scenario("battery-a", 10.0, 5.0),
             _scenario("battery-b", 20.0, 10.0),
+            _scenario("battery-c", 30.0, 15.0),
+            _scenario("battery-d", 40.0, 20.0),
         ]
     )
-    battery_barrier = Barrier(2)
+    battery_barrier = Barrier(4)
+    completed: set[str] = set()
+    completion_lock = ThreadLock()
 
-    def run_scenario(scenario, *_args):
-        battery_barrier.wait(timeout=3)
+    def run_scenario(scenario, *_args, annual_planner_highs_threads):
+        assert annual_planner_highs_threads == scenario_module.SERIAL_HIGHS_THREADS
+        battery_barrier.wait(timeout=5)
         if scenario.scenario_id == "battery-b":
             raise RuntimeError("synthetic solver failure")
+        with completion_lock:
+            completed.add(scenario.scenario_id)
         return {"scenario_id": scenario.scenario_id}
 
     monkeypatch.setattr(scenario_module, "_run_scenario", run_scenario)
@@ -1203,10 +1297,11 @@ def test_coordinator_thread_failure_discards_partial_results(monkeypatch) -> Non
             {},
             {},
             worker_count=1,
-            coordinator_thread_workers=2,
+            coordinator_thread_workers=4,
         )
 
     assert exc_info.value.code == "scenario_execution_failed"
+    assert completed == {"battery-a", "battery-c", "battery-d"}
 
 
 def test_posix_process_group_failure_uses_direct_termination_fallback(
@@ -1288,9 +1383,16 @@ def test_coordinator_abort_kills_the_posix_coordinator_process_group(
 def test_single_battery_scenario_uses_one_isolated_worker(monkeypatch) -> None:
     authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
     worker_counts: list[int] = []
+    planner_thread_counts: list[int] = []
 
-    def execute(indexed, *_args, worker_count):
+    def execute(
+        indexed,
+        *_args,
+        worker_count,
+        annual_planner_highs_threads,
+    ):
         worker_counts.append(worker_count)
+        planner_thread_counts.append(annual_planner_highs_threads)
         return {
             index: {"scenario_id": scenario.scenario_id}
             for index, scenario in indexed
@@ -1325,6 +1427,9 @@ def test_single_battery_scenario_uses_one_isolated_worker(monkeypatch) -> None:
 
     assert result == [{"scenario_id": "battery-a"}]
     assert worker_counts == [1]
+    assert planner_thread_counts == [
+        scenario_module.SINGLE_SCENARIO_ANNUAL_PLANNER_HIGHS_THREADS
+    ]
 
 
 def test_process_pool_timeout_terminates_children_and_releases_lock(
@@ -1526,9 +1631,16 @@ def test_broken_process_pool_retries_once_in_one_isolated_worker(
         ]
     )
     worker_counts = []
+    planner_thread_counts = []
 
-    def execute(indexed, *_args, worker_count):
+    def execute(
+        indexed,
+        *_args,
+        worker_count,
+        annual_planner_highs_threads,
+    ):
         worker_counts.append(worker_count)
+        planner_thread_counts.append(annual_planner_highs_threads)
         if len(worker_counts) == 1:
             raise scenario_module._ScenarioProcessPoolBroken("child exited")
         return {
@@ -1559,6 +1671,10 @@ def test_broken_process_pool_retries_once_in_one_isolated_worker(
     )
 
     assert worker_counts == [2, 1]
+    assert planner_thread_counts == [
+        scenario_module.SERIAL_HIGHS_THREADS,
+        scenario_module.SERIAL_HIGHS_THREADS,
+    ]
     assert [row["scenario_id"] for row in result] == ["battery-a", "battery-b"]
 
 
@@ -1616,9 +1732,11 @@ def test_zero_priced_demand_components_are_unplanned_and_report_null_limits(
         },
     }
     captured_problems = []
+    captured_planner_threads: list[int] = []
 
-    def capture_problem(problem):
+    def capture_problem(problem, **kwargs):
         captured_problems.append(problem)
+        captured_planner_threads.append(kwargs["annual_planner_highs_threads"])
         return _stub_rolling(problem)
 
     monkeypatch.setattr(
@@ -1641,6 +1759,7 @@ def test_zero_priced_demand_components_are_unplanned_and_report_null_limits(
     )
 
     assert len(captured_problems) == 1
+    assert captured_planner_threads == [scenario_module.SERIAL_HIGHS_THREADS]
     assert captured_problems[0].demand_charges == ()
     row = result["scenarios"][0]
     assert row["selected_monthly_thresholds_kw"] == [None] * 12
@@ -2276,7 +2395,7 @@ def test_physical_scenario_review_dispatches_all_200_solutions(monkeypatch) -> N
     )
     dispatched: list[str] = []
 
-    def fake_run(scenario, *_args):
+    def fake_run(scenario, *_args, **_kwargs):
         dispatched.append(scenario.scenario_id)
         return {
             "scenario_id": scenario.scenario_id,

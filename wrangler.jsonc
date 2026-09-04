@@ -45,8 +45,8 @@
     "LOCAL_OWNER_ID": "e3-ci-internal",
     "LOCAL_ACTOR_ID": "public-web-user",
     "LOCAL_ACTOR_DISPLAY_NAME": "Public web user",
-    // A value above one enables the disposable outer coordinator. The
-    // production coordinator itself keeps HiGHS serial to avoid nested pools.
+    // A value above one enables the disposable outer coordinator. Multi-scenario
+    // solves keep HiGHS single-threaded; one annual planner may use four threads.
     "CI_SCENARIO_PROCESS_WORKERS": "2",
     "CI_SCENARIO_PROCESS_TIMEOUT_SECONDS": "600"
   },

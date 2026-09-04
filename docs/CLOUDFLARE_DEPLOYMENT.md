@@ -64,14 +64,18 @@ checkpoints: Durable Objects can also restart because of platform or Worker
 updates.
 
 Scenario execution uses the `standard-4` container size. Each request runs in
-one disposable coordinator process. A two-solution battery batch runs on at
-most two coordinator threads, while a one-solution batch does not create a
-thread pool. Every coordinator thread owns its mutable tariff-baseline and PV
-caches, and every scenario keeps HiGHS at one solver thread with parallel mode disabled. PV-only rows run
-inline and the assembled response retains the authored scenario order. This
-uses the four container vCPUs at the scenario level without a nested process
-pool or per-model solver oversubscription, while leaving memory headroom for
-the API, interval evidence and result persistence.
+one disposable coordinator process. Battery scenarios run on at most four
+coordinator threads, bounded by the selected battery-scenario count, while a
+one-solution batch does not create a thread pool. Every coordinator thread owns
+its mutable tariff-baseline and PV caches. Multi-battery requests keep every
+HiGHS model at one solver thread with parallel mode disabled, using the four
+container vCPUs at the scenario level without nested oversubscription. When a
+request contains exactly one battery scenario, only its primary annual LP
+planner uses four-thread PAMI; the process-global HiGHS scheduler is reset
+before the authoritative rolling windows return to one thread with parallel
+mode disabled. PV-only rows run inline and the assembled response retains the
+authored scenario order. No nested process pool is created, leaving memory
+headroom for the API, interval evidence and result persistence.
 `CI_SCENARIO_PROCESS_TIMEOUT_SECONDS` is a wall-clock watchdog for the complete
 physical-analysis request (600 seconds in production), including evidence
 parsing, tariff reconstruction, dispatch and result assembly. The optimizer's
