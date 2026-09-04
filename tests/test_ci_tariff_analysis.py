@@ -9,6 +9,7 @@ from solar_battery.ci_tariff_analysis import (
     CiTariffAnalysisError,
     analyze_ci_nem12,
     load_ci_tariff_profile,
+    validated_ci_nem12_evidence,
 )
 from solar_battery.ci_workspace_readiness import ci_workspace_readiness_contract
 from tests.durable_test_helpers import create_test_client, sqlite_url_for_path
@@ -117,6 +118,39 @@ def test_ci_analysis_reconciles_synthetic_aest_and_kva_evidence() -> None:
     assert result["demand_evidence"]["billing_period_max_power_factor"] == pytest.approx(0.8)
     assert result["bill_reconciliation"]["status"] == "pass"
     assert all(check["passed"] for check in result["bill_reconciliation"]["checks"])
+
+
+def test_ci_analysis_reuses_request_local_validated_nem12_without_reparsing(
+    monkeypatch,
+) -> None:
+    nem12 = _nem12_bytes()
+    profile = _profile(nem12)
+    parsed = validated_ci_nem12_evidence(nem12, profile=profile)
+
+    def unexpected_reparse(*_args, **_kwargs):
+        raise AssertionError("validated evidence should not be parsed twice")
+
+    monkeypatch.setattr(
+        "solar_battery.ci_tariff_analysis._parse_ci_nem12",
+        unexpected_reparse,
+    )
+
+    result = analyze_ci_nem12(
+        nem12,
+        profile=profile,
+        _validated_evidence=parsed,
+    )
+
+    assert result["analysis_status"] == "ready"
+    assert result["bill_reconciliation"]["status"] == "pass"
+
+    with pytest.raises(CiTariffAnalysisError) as exc_info:
+        analyze_ci_nem12(
+            nem12 + b"\n",
+            profile=profile,
+            _validated_evidence=parsed,
+        )
+    assert exc_info.value.code == "evidence_identity_mismatch"
 
 
 def test_ci_analysis_still_rejects_e1_only_evidence() -> None:

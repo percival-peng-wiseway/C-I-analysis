@@ -160,12 +160,12 @@ export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }:
   const select = (scenarioId: string) => { setInternalActiveId(scenarioId); onSelect?.(scenarioId); };
   const active = result.solutions.find((item) => item.scenario_id === activeId) ?? result.solutions[0];
   const width = Math.max(1120, result.solutions.length * 50 + 150);
-  const height = 570;
+  const height = 650;
   const left = 104, right = 30;
   const chartWidth = width - left - right;
   const step = chartWidth / result.solutions.length;
   const barWidth = Math.min(36, Math.max(22, step * .62));
-  const npvTop = 64, panelHeight = 170, paybackTop = 326;
+  const npvTop = 64, panelHeight = 170, paybackTop = 376;
   const npvValues = result.solutions.map((item) => item.metrics.net_present_value_aud);
   const npvMin = Math.min(0, ...npvValues);
   const npvMax = Math.max(1, ...npvValues);
@@ -193,10 +193,15 @@ export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }:
         {result.solutions.map((item, index) => {
           const valueY = npvY(item.metrics.net_present_value_aud);
           const barTop = Math.min(npvZero, valueY);
-          return <g aria-label={`Rank ${item.financial_review_rank}, NPV ${aud(item.metrics.net_present_value_aud)}`} className="cursor-pointer outline-none" key={`npv-${item.scenario_id}`} onClick={() => select(item.scenario_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") select(item.scenario_id); }} role="button" tabIndex={0}>
+          const centreX = x(index) + barWidth / 2;
+          const capacity = `${numberLabel(item.pv_capacity_kwp_dc)} kWp + ${numberLabel(item.battery_capacity_kwh)} kWh`;
+          const capacityDescription = `PV ${numberLabel(item.pv_capacity_kwp_dc)} kWp and battery ${numberLabel(item.battery_capacity_kwh)} kWh`;
+          const labelY = npvTop + panelHeight + 18;
+          return <g aria-label={`Rank ${item.financial_review_rank}, ${capacityDescription}, NPV ${aud(item.metrics.net_present_value_aud)}`} className="cursor-pointer outline-none" key={`npv-${item.scenario_id}`} onClick={() => select(item.scenario_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") select(item.scenario_id); }} role="button" tabIndex={0}>
             <title>Solution #{item.financial_review_rank} · NPV {aud(item.metrics.net_present_value_aud)}</title>
             <rect fill={colour(item.financial_review_rank, item.scenario_id)} height={Math.max(2, Math.abs(npvZero-valueY))} rx="4" stroke={item.scenario_id === activeId ? "#38bdf8" : "none"} strokeWidth="3" width={barWidth} x={x(index)} y={barTop} />
-            {item.financial_review_rank <= 3 ? <text fill="#fff" fontSize="14" fontWeight="700" textAnchor="middle" x={x(index)+barWidth/2} y={Math.min(npvZero-8, barTop+19)}>★</text> : null}
+            {item.financial_review_rank <= 3 ? <text fill="#fff" fontSize="14" fontWeight="700" textAnchor="middle" x={centreX} y={Math.min(npvZero-8, barTop+19)}>★</text> : null}
+            <text aria-hidden="true" fill={item.scenario_id === activeId ? "#102a4d" : "#64748b"} fontSize="9.5" fontWeight={item.scenario_id === activeId ? "700" : "500"} textAnchor="end" transform={`rotate(-30 ${centreX} ${labelY})`} x={centreX} y={labelY}>{capacity}</text>
           </g>;
         })}
         <rect fill="#f8fafc" height={panelHeight} rx="10" width={chartWidth} x={left} y={paybackTop} />
@@ -208,10 +213,14 @@ export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }:
         {result.solutions.map((item, index) => {
           const value = item.metrics.payback_period_years ?? maxPayback;
           const valueY = paybackY(value);
-          return <g aria-label={`Rank ${item.financial_review_rank}, payback ${payback(value)}`} className="cursor-pointer outline-none" key={`payback-${item.scenario_id}`} onClick={() => select(item.scenario_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") select(item.scenario_id); }} role="button" tabIndex={0}>
+          const centreX = x(index) + barWidth / 2;
+          const capacity = `${numberLabel(item.pv_capacity_kwp_dc)} kWp + ${numberLabel(item.battery_capacity_kwh)} kWh`;
+          const capacityDescription = `PV ${numberLabel(item.pv_capacity_kwp_dc)} kWp and battery ${numberLabel(item.battery_capacity_kwh)} kWh`;
+          const labelY = paybackTop + panelHeight + 18;
+          return <g aria-label={`Rank ${item.financial_review_rank}, ${capacityDescription}, payback ${payback(value)}`} className="cursor-pointer outline-none" key={`payback-${item.scenario_id}`} onClick={() => select(item.scenario_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") select(item.scenario_id); }} role="button" tabIndex={0}>
             <title>Solution #{item.financial_review_rank} · payback {payback(value)}</title>
             <rect fill={colour(item.financial_review_rank, item.scenario_id)} height={paybackTop+panelHeight-valueY} rx="4" stroke={item.scenario_id === activeId ? "#38bdf8" : "none"} strokeWidth="3" width={barWidth} x={x(index)} y={valueY} />
-            <text fill={item.scenario_id === activeId ? "#102a4d" : "#64748b"} fontSize="9.5" fontWeight={item.scenario_id === activeId ? "700" : "500"} textAnchor="middle" x={x(index)+barWidth/2} y={paybackTop+panelHeight+22}>#{item.financial_review_rank}</text>
+            <text aria-hidden="true" fill={item.scenario_id === activeId ? "#102a4d" : "#64748b"} fontSize="9.5" fontWeight={item.scenario_id === activeId ? "700" : "500"} textAnchor="end" transform={`rotate(-30 ${centreX} ${labelY})`} x={centreX} y={labelY}>{capacity}</text>
           </g>;
         })}
       </svg>

@@ -171,17 +171,10 @@ export function CiScenarioBuilder({
     if (!inverterProfile) return;
     setConnection((current) => {
       const blockSize = formatNumber(inverterProfile.rated_active_power_kw);
-      const reactiveCap = current.reactive_support_enabled
-        ? formatNumber(inverterProfile.maximum_reactive_power_kvar)
-        : "";
-      if (
-        current.inverter_block_size_kw === blockSize &&
-        current.reactive_support_max_kvar === reactiveCap
-      ) return current;
+      if (current.inverter_block_size_kw === blockSize) return current;
       return {
         ...current,
         inverter_block_size_kw: blockSize,
-        reactive_support_max_kvar: reactiveCap,
       };
     });
   }, [inverterProfile]);

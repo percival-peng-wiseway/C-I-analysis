@@ -7,12 +7,14 @@ export function Drawer({
   label,
   onClose,
   open,
+  presentation = "drawer",
 }: {
   children: ReactNode;
   description: string;
   label: string;
   onClose: () => void;
   open: boolean;
+  presentation?: "drawer" | "fullscreen";
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -42,18 +44,22 @@ export function Drawer({
   }, [onClose, open]);
 
   if (!open) return null;
+  const fullscreen = presentation === "fullscreen";
   return (
     <div
       aria-describedby={descriptionId}
       aria-labelledby={titleId}
       aria-modal="true"
-      className="fixed inset-0 z-50 flex justify-end bg-slate-950/45 backdrop-blur-[2px]"
+      className={`fixed inset-0 z-50 flex ${fullscreen ? "bg-white" : "justify-end bg-slate-950/45 backdrop-blur-[2px]"}`}
       onKeyDown={trapFocus}
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      onMouseDown={(event) => { if (!fullscreen && event.target === event.currentTarget) onClose(); }}
       role="dialog"
     >
-      <section className="flex h-full w-full flex-col overflow-hidden bg-white shadow-2xl sm:w-[min(960px,calc(100vw-1.5rem))] sm:border-l sm:border-slate-200">
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-6">
+      <section
+        className={`flex w-full flex-col overflow-hidden bg-white ${fullscreen ? "h-[100dvh]" : "h-full shadow-2xl sm:w-[min(960px,calc(100vw-1.5rem))] sm:border-l sm:border-slate-200"}`}
+        data-presentation={presentation}
+      >
+        <header className={`flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 ${fullscreen ? "sm:px-8" : "sm:px-6"}`}>
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-cyan-700">Project calculation ledger</p>
             <h2 className="mt-1 truncate text-xl font-semibold text-slate-950" id={titleId}>{label}</h2>

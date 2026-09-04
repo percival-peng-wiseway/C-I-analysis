@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -23,8 +23,12 @@ describe("CiHandbookPanel", () => {
     const fetchMock = mockHandbookApi();
     renderPanel();
 
+    expect(await screen.findByRole("heading", { name: "Module overview" })).toBeTruthy();
+    const sectionNavigation = screen.getByRole("navigation", { name: "Handbook sections" });
+    await user.click(within(sectionNavigation).getByRole("button", { name: /Formulas 1/i }));
     expect(await screen.findByText("Evidence formula")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: /Solution Generator/i }));
+    await user.click(within(sectionNavigation).getByRole("button", { name: /Formulas 1/i }));
     expect(await screen.findByText("Solution Generator formula")).toBeTruthy();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -36,13 +40,48 @@ describe("CiHandbookPanel", () => {
     const fetchMock = mockHandbookApi();
     renderPanel();
 
-    expect(await screen.findByText("Evidence formula")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Module overview" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Close Handbook - Test project" }));
     expect(screen.queryByRole("dialog", { name: "Handbook - Test project" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Reopen Handbook" }));
-    expect(await screen.findByText("Evidence formula")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Module overview" })).toBeTruthy();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a full-screen dialog with clear module and section navigation", async () => {
+    const user = userEvent.setup();
+    mockHandbookApi();
+    renderPanel();
+
+    const dialog = await screen.findByRole("dialog", { name: "Handbook - Test project" });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.querySelector('[data-presentation="fullscreen"]')).toBeTruthy();
+    expect(await screen.findByRole("navigation", { name: "Handbook modules" })).toBeTruthy();
+    const sectionNavigation = screen.getByRole("navigation", { name: "Handbook sections" });
+    expect(sectionNavigation).toBeTruthy();
+    expect(screen.queryByText("Evidence formula")).toBeNull();
+
+    await user.click(within(sectionNavigation).getByRole("button", { name: /Formulas 1/i }));
+    expect(await screen.findByText("Evidence formula")).toBeTruthy();
+    expect(screen.getAllByText("result = input").length).toBeGreaterThan(0);
+  });
+
+  it("closes on Escape, restores page scrolling and returns focus to the opener", async () => {
+    const user = userEvent.setup();
+    mockHandbookApi();
+    renderPanel(false);
+
+    const opener = screen.getByRole("button", { name: "Reopen Handbook" });
+    opener.focus();
+    await user.click(opener);
+    expect(await screen.findByRole("dialog", { name: "Handbook - Test project" })).toBeTruthy();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Handbook - Test project" })).toBeNull();
+    expect(document.body.style.overflow).toBe("");
+    expect(document.activeElement).toBe(opener);
   });
 
   it("keeps a calculation disclosure at the user's chosen state after a parent rerender", async () => {
@@ -50,6 +89,8 @@ describe("CiHandbookPanel", () => {
     mockHandbookApi();
     renderPanel();
 
+    const sectionNavigation = await screen.findByRole("navigation", { name: "Handbook sections" });
+    await user.click(within(sectionNavigation).getByRole("button", { name: /Formulas 1/i }));
     const formulaLabel = await screen.findByText("Evidence formula");
     const disclosure = formulaLabel.closest("details") as HTMLDetailsElement;
     const summary = disclosure.querySelector("summary");
@@ -64,7 +105,7 @@ describe("CiHandbookPanel", () => {
   });
 });
 
-function renderPanel() {
+function renderPanel(initiallyOpen = true) {
   window.sessionStorage.setItem("e3-ci-active-workspace-v1", JSON.stringify({
     activeProject: {
       projectId: "project-1",
@@ -76,7 +117,7 @@ function renderPanel() {
   }));
   const queryClient = createCiQueryClient();
   function Harness() {
-    const [open, setOpen] = useState(true);
+    const [open, setOpen] = useState(initiallyOpen);
     return (
       <>
         <button onClick={() => setOpen(true)} type="button">Reopen Handbook</button>

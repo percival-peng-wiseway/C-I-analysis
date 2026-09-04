@@ -124,7 +124,13 @@ describe("analyzeCiPhysicalScenarios", () => {
       expect(init?.body).toBe(JSON.stringify({ scenario_ids: ["b", "a"], persistence_mode: "merge_checkpoint" }));
       return new Response(JSON.stringify({ detail: { message: "Approved tariff evidence is required." } }), { status: 409 });
     };
-    await expect(runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["b", "a"])).rejects.toThrow("Approved tariff evidence is required.");
+    await expect(runCiProjectTariffReplay(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      ["b", "a"],
+      { batchSize: 2 },
+    )).rejects.toThrow("Approved tariff evidence is required.");
   });
 
   it("retries an uncommitted idempotent batch only once and reports an actionable 503", async () => {
@@ -195,7 +201,13 @@ describe("analyzeCiPhysicalScenarios", () => {
     };
 
     await expect(
-      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["b", "a"]),
+      runCiProjectTariffReplay(
+        "project-1",
+        fetcher as typeof fetch,
+        undefined,
+        ["b", "a"],
+        { batchSize: 2 },
+      ),
     ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }, { scenario_id: "b" }] });
     expect(calls).toEqual(["GET", "POST", "GET"]);
   });
@@ -359,6 +371,43 @@ describe("analyzeCiPhysicalScenarios", () => {
       { persistence_mode: "merge_checkpoint", scenario_ids: ["d", "e"] },
     ]);
     expect(progress).toEqual([[1, 5], [3, 5], [5, 5]]);
+  });
+
+  it("checkpoints one tariff scenario per request by default", async () => {
+    const requested = ["a", "b"].map((scenarioId) => ({
+      ...scenarios[0],
+      scenario_id: scenarioId,
+      label: `Scenario ${scenarioId}`,
+    }));
+    const completed = new Set<string>();
+    const postedBatches: string[][] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { scenario_ids: string[] };
+        postedBatches.push(body.scenario_ids);
+        body.scenario_ids.forEach((scenarioId) => completed.add(scenarioId));
+      }
+      const included = requested.filter((scenario) => completed.has(scenario.scenario_id));
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify(physicalResultFor(included)), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "not_saved",
+        saved_at: null,
+        stale_reasons: [],
+        result: null,
+      }), { status: 200 });
+    };
+
+    await runCiProjectTariffReplay(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      requested.map((scenario) => scenario.scenario_id),
+    );
+
+    expect(postedBatches).toEqual([["a"], ["b"]]);
   });
 
   it("uses the same read-only recovery after a non-abort network disconnect", async () => {

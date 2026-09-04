@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
-import { CiAnnualFinancialWorkspace } from "./ci-annual-financial-workspace";
+import { CiAnnualFinancialWorkspace, CiPortfolioReturnChart } from "./ci-annual-financial-workspace";
 
 const fixtures = vi.hoisted(() => {
   const rebateCalculation = (scenarioId: string): CiScenarioRebateCalculation => ({
@@ -107,6 +107,19 @@ const project = { project_id: "project-1", display_name: "Factory", current_stag
 const chefQProject = { ...project, project_id: "chef-q", display_name: "Chef Q" };
 
 afterEach(() => { cleanup(); fixtures.compare.mockClear(); });
+
+it("shows the PV and battery combination diagonally below every portfolio bar", () => {
+  render(<CiPortfolioReturnChart result={fixtures.comparison} />);
+
+  const capacityLabels = screen.getAllByText(/^.* kWp \+ .* kWh$/);
+  expect(capacityLabels).toHaveLength(fixtures.comparison.solutions.length * 2);
+  expect(screen.getAllByText("146.1 kWp + 391 kWh")).toHaveLength(2);
+  capacityLabels.forEach((label) => {
+    expect(label.getAttribute("text-anchor")).toBe("end");
+    expect(label.getAttribute("transform")).toMatch(/^rotate\(-30 /);
+  });
+  expect(screen.getAllByRole("button", { name: /PV 146\.1 kWp and battery 391 kWh/ })).toHaveLength(2);
+});
 
 it("applies the shared Device profile to all tariff scenarios", async () => {
   const user = userEvent.setup();

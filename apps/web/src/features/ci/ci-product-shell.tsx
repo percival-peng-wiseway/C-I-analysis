@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Drawer } from "@/components/ui/drawer";
 import {
   ciProjectsQueryKey,
   createCiProject,
@@ -164,13 +165,15 @@ export function CiProductShell({ children }: { children: ReactNode }) {
 
 function HandbookPanelFallback({ onClose }: { onClose: () => void }) {
   return (
-    <div aria-label="Loading Handbook" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4 backdrop-blur-[2px]" role="dialog">
-      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 text-center shadow-2xl">
-        <BookOpenText className="mx-auto size-7 animate-pulse text-cyan-700 motion-reduce:animate-none" />
-        <p aria-live="polite" className="mt-3 text-sm font-semibold text-slate-900">Loading Handbook…</p>
-        <Button className="mt-4" onClick={onClose} type="button" variant="outline">Cancel</Button>
+    <Drawer description="Loading the saved project calculation ledger." label="Handbook" onClose={onClose} open presentation="fullscreen">
+      <div className="grid h-full place-items-center bg-slate-50 p-6">
+        <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 text-center">
+          <BookOpenText className="mx-auto size-7 animate-pulse text-cyan-700 motion-reduce:animate-none" />
+          <p aria-live="polite" className="mt-3 text-sm font-semibold text-slate-900">Loading Handbook...</p>
+          <Button className="mt-4" onClick={onClose} type="button" variant="outline">Cancel</Button>
+        </div>
       </div>
-    </div>
+    </Drawer>
   );
 }
 

@@ -55,9 +55,13 @@ import { CiRebateProfilePanel, type CiRebateProfilePanelHandle } from "@/feature
 import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
 import { CI_ANALYSIS_MUTATION_KEY, CiTariffReplay } from "@/features/ci/ci-tariff-replay";
 import {
+  ciAnalysisPriceSnapshotMatchesPreview,
+  ciDesignPricePreviewRevision,
   clearCiSolutionWorkspaceDraft,
   loadCiSolutionWorkspaceDraft,
+  restoreCiAnalysisPriceSnapshot,
   saveCiSolutionWorkspaceDraft,
+  type CiAnalysisPriceSnapshot,
 } from "@/features/ci/ci-solution-workspace-storage";
 import { useCiWorkspace, type CiWorkspaceStage } from "@/features/ci/ci-workspace-context";
 import { ModulePrerequisite } from "@/features/ci/ci-workflow-template";
@@ -70,10 +74,10 @@ export function CiReadinessPage() {
   const readiness = useQuery({ queryKey: ciWorkspaceReadinessQueryKey, queryFn: () => fetchCiWorkspaceReadiness() });
   const projects = useQuery({ queryKey: ciProjectsQueryKey, queryFn: () => listCiProjects() });
   const [analysisLaunch, setAnalysisLaunch] = useState<AnalysisLaunch | null>(null);
-  const [analysisSnapshotsByProject, setAnalysisSnapshotsByProject] = useState<Record<string, AnalysisPriceSnapshot>>({});
+  const [analysisSnapshotsByProject, setAnalysisSnapshotsByProject] = useState<Record<string, CiAnalysisPriceSnapshot>>({});
   const analysisLaunchSequence = useRef(0);
   const claimedAnalysisLaunches = useRef(new Set<number>());
-  const setProjectAnalysisSnapshot = useCallback((projectId: string, snapshot: AnalysisPriceSnapshot | null) => {
+  const setProjectAnalysisSnapshot = useCallback((projectId: string, snapshot: CiAnalysisPriceSnapshot | null) => {
     setAnalysisSnapshotsByProject((current) => {
       if (snapshot) return { ...current, [projectId]: snapshot };
       if (!Object.hasOwn(current, projectId)) return current;
@@ -174,11 +178,9 @@ function EvidenceWorkspace({ onReady, project }: { onReady: () => void; project:
   return <CiEvidenceIntake onReady={onReady} projectId={project.project_id} setupReady={project.setup_status === "ready"} />;
 }
 
-type AnalysisPrice = { scenarioId: string; upfrontCostAudExGst: number };
-type AnalysisPriceSnapshot = { previewRevision: string; scenarioIds: string[]; prices: AnalysisPrice[] };
-type AnalysisLaunch = { launchId: number; projectId: string; snapshot: AnalysisPriceSnapshot };
+type AnalysisLaunch = { launchId: number; projectId: string; snapshot: CiAnalysisPriceSnapshot };
 
-function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack, onValidated, project }: { analysisPending: boolean; onAnalysisStart: (snapshot: AnalysisPriceSnapshot) => boolean; onBack: () => void; onValidated: (candidateCount: number) => void; project: CiProject }) {
+function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack, onValidated, project }: { analysisPending: boolean; onAnalysisStart: (snapshot: CiAnalysisPriceSnapshot) => boolean; onBack: () => void; onValidated: (candidateCount: number) => void; project: CiProject }) {
   const queryClient = useQueryClient();
   const stcSettingsRef = useRef<CiRebateProfilePanelHandle>(null);
   const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
@@ -227,7 +229,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
     enabled: Boolean(generatedDesign),
     retry: false,
   });
-  const quoteRevision = pricePreview.data ? pricePreviewRevision(pricePreview.data) : "";
+  const quoteRevision = pricePreview.data ? ciDesignPricePreviewRevision(pricePreview.data) : "";
   const hydrationKey = quoteRevision ? `${generationRevision}:${quoteRevision}` : "";
   useEffect(() => {
     if (!pricePreview.data || !hydrationKey || hydratedQuoteRevision === hydrationKey) return;
@@ -465,11 +467,11 @@ function scenarioRebateStatus(calculation: CiDesignPricePreview["solutions"][num
   return { label: "Applied", title };
 }
 
-type FullAnalysisRequest = { projectId: string; runId: number; snapshot: AnalysisPriceSnapshot };
+type FullAnalysisRequest = { projectId: string; runId: number; snapshot: CiAnalysisPriceSnapshot };
 
 type FullAnalysisResult = {
   projectId: string;
-  snapshot: AnalysisPriceSnapshot;
+  snapshot: CiAnalysisPriceSnapshot;
   feasibilityResult: Awaited<ReturnType<typeof runCiDesignFeasibility>>;
   tariffResult: Awaited<ReturnType<typeof runCiProjectTariffReplay>>;
   financeResult: Awaited<ReturnType<typeof compareCiAnnualFinancialScenarios>>;
@@ -508,7 +510,7 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
       } catch (error) {
         throw new InvalidAnalysisPriceSnapshotError(error instanceof Error ? error.message : "The Net CAPEX snapshot is unavailable.");
       }
-      if (!analysisPriceSnapshotMatchesPreview(snapshot, preview)) {
+      if (!ciAnalysisPriceSnapshotMatchesPreview(snapshot, preview)) {
         throw new InvalidAnalysisPriceSnapshotError("The Net CAPEX snapshot changed. Return to Solution Generator and confirm the current quotations.");
       }
       const [savedFeasibility, savedTariffReplay] = await Promise.all([
@@ -576,7 +578,7 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
       } catch (error) {
         throw new InvalidAnalysisPriceSnapshotError(error instanceof Error ? error.message : "The Net CAPEX snapshot is unavailable.");
       }
-      if (!analysisPriceSnapshotMatchesPreview(snapshot, currentPreview)) {
+      if (!ciAnalysisPriceSnapshotMatchesPreview(snapshot, currentPreview)) {
         throw new InvalidAnalysisPriceSnapshotError("The Net CAPEX snapshot changed while analysis was running. Return to Solution Generator and confirm the current quotations.");
       }
       setProgress({ projectId, percent: 78, label: "Calculating financial comparison" });
@@ -628,56 +630,30 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
 function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, claimAnalysisLaunch, fullAnalysis, onAnalysisSnapshotChange, project }: {
   analysisBusy: boolean;
   analysisLaunch: AnalysisLaunch | null;
-  analysisSnapshot: AnalysisPriceSnapshot | null;
+  analysisSnapshot: CiAnalysisPriceSnapshot | null;
   claimAnalysisLaunch: (launchId: number) => boolean;
   fullAnalysis: FullAnalysisController;
-  onAnalysisSnapshotChange: (projectId: string, snapshot: AnalysisPriceSnapshot | null) => void;
+  onAnalysisSnapshotChange: (projectId: string, snapshot: CiAnalysisPriceSnapshot | null) => void;
   project: CiProject;
 }) {
-  const queryClient = useQueryClient();
   const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
   const savedFeasibility = useQuery({ queryKey: ciSavedFeasibilityQueryKey(project.project_id), queryFn: () => fetchCiSavedFeasibility(project.project_id) });
   const savedTariffReplay = useQuery({ queryKey: ciProjectTariffReplayQueryKey(project.project_id), queryFn: () => fetchCiSavedTariffReplay(project.project_id), retry: false });
   const pricePreview = useQuery({ queryKey: ciDesignPricePreviewQueryKey(project.project_id), queryFn: () => fetchCiDesignPricePreview(project.project_id), retry: false });
   const autoStarted = useRef(false);
-  const [dispatchProgress, setDispatchProgress] = useState<{ percent: number; label: string } | null>(null);
-  const run = useMutation({
-    mutationKey: CI_ANALYSIS_MUTATION_KEY,
-    mutationFn: () => {
-      const scenarioIds = savedDesign.data?.candidates.map((candidate) => candidate.scenario_id) ?? [];
-      if (!scenarioIds.length) throw new Error("Generate at least one solution before running scenario dispatch.");
-      setDispatchProgress({ percent: 0, label: `Running scenario dispatch (0/${scenarioIds.length})` });
-      return runCiDesignFeasibility(project.project_id, fetch, undefined, scenarioIds, {
-        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
-          const fraction = totalScenarioCount > 0 ? completedScenarioCount / totalScenarioCount : 0;
-          setDispatchProgress({
-            percent: Math.round(fraction * 100),
-            label: `Running scenario dispatch (${completedScenarioCount}/${totalScenarioCount})`,
-          });
-        },
-      });
-    },
-    onSuccess: (analysis) => {
-      queryClient.setQueryData<CiSavedFeasibilityState>(ciSavedFeasibilityQueryKey(project.project_id), { contract_version: "ci_project_feasibility_state_v1", status: "ready", saved_at: new Date().toISOString(), stale_reasons: [], result: analysis });
-      void invalidateCiCalculationHandbook(queryClient, project.project_id);
-    },
-    onError: () => {
-      void queryClient.invalidateQueries({ exact: true, queryKey: ciSavedFeasibilityQueryKey(project.project_id) });
-    },
-  });
   const sourceSnapshot = analysisLaunch?.snapshot ?? analysisSnapshot;
   const previewReady = !pricePreview.isPending && !pricePreview.isFetching && !pricePreview.isError && Boolean(pricePreview.data);
-  const validatedSnapshot = sourceSnapshot && previewReady && pricePreview.data && analysisPriceSnapshotMatchesPreview(sourceSnapshot, pricePreview.data)
+  const validatedSnapshot = sourceSnapshot && previewReady && pricePreview.data && ciAnalysisPriceSnapshotMatchesPreview(sourceSnapshot, pricePreview.data)
     ? sourceSnapshot
     : null;
   useEffect(() => {
     if (analysisLaunch || analysisSnapshot || !previewReady || !pricePreview.data) return;
-    const restored = restoredAnalysisSnapshot(project.project_id, pricePreview.data);
+    const restored = restoreCiAnalysisPriceSnapshot(project.project_id, pricePreview.data);
     if (restored) onAnalysisSnapshotChange(project.project_id, restored);
   }, [analysisLaunch, analysisSnapshot, onAnalysisSnapshotChange, previewReady, pricePreview.data, project.project_id]);
   useEffect(() => {
     if (!sourceSnapshot || pricePreview.isPending || pricePreview.isFetching) return;
-    if (pricePreview.isError || !pricePreview.data || !analysisPriceSnapshotMatchesPreview(sourceSnapshot, pricePreview.data)) {
+    if (pricePreview.isError || !pricePreview.data || !ciAnalysisPriceSnapshotMatchesPreview(sourceSnapshot, pricePreview.data)) {
       onAnalysisSnapshotChange(project.project_id, null);
     }
   }, [onAnalysisSnapshotChange, pricePreview.data, pricePreview.isError, pricePreview.isFetching, pricePreview.isPending, project.project_id, sourceSnapshot]);
@@ -727,10 +703,10 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
   const fullRunData = fullAnalysis.data?.projectId === project.project_id ? fullAnalysis.data : null;
   const fullRunError = fullRunForProject ? fullAnalysis.error : null;
   const analysisScenarioIds = validatedSnapshot?.scenarioIds ?? fullRunData?.snapshot.scenarioIds ?? [];
-  const analysis = fullRunData?.feasibilityResult ?? run.data ?? (!savedFeasibility.isError && savedFeasibility.data?.status === "ready" ? savedFeasibility.data.result : null);
+  const analysis = fullRunData?.feasibilityResult ?? (!savedFeasibility.isError && savedFeasibility.data?.status === "ready" ? savedFeasibility.data.result : null);
   const needsRun = !analysis;
   const displayedAnalysis = analysis ? selectedFeasibilityResult(analysis, analysisScenarioIds) : null;
-  const fullAnalysisBlocked = Boolean(sourceSnapshot) && !validatedSnapshot;
+  const fullAnalysisBlocked = !validatedSnapshot;
   return (
     <section aria-labelledby="dispatch-workspace-title" className="space-y-5">
       <header className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
@@ -738,17 +714,16 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
           <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-cyan-50 text-cyan-800"><Activity className="size-5" /></span>
           <h1 className="text-xl font-semibold text-slate-950" id="dispatch-workspace-title">Scenario dispatch analysis</h1>
         </div>
-        <Button disabled={analysisBusy || fullAnalysisBlocked} onClick={() => validatedSnapshot ? fullAnalysis.start({ projectId: project.project_id, snapshot: validatedSnapshot }) : run.mutate()} type="button">
+        <Button disabled={analysisBusy || fullAnalysisBlocked} onClick={() => { if (validatedSnapshot) fullAnalysis.start({ projectId: project.project_id, snapshot: validatedSnapshot }); }} type="button">
           {analysisBusy ? <RefreshCw className="size-4 animate-spin" /> : analysis ? <RefreshCw className="size-4" /> : <Play className="size-4" />}
-          {fullRunPending ? "Full analysis running…" : run.isPending ? `Analysing ${savedDesign.data.candidate_count} solutions…` : analysisBusy ? "Another analysis is running…" : validatedSnapshot ? (analysis ? "Re-run full analysis" : "Run full analysis") : analysis ? "Re-run all solutions" : `Run ${savedDesign.data.candidate_count} solutions`}
+          {fullRunPending ? "Full analysis running…" : analysisBusy ? "Another analysis is running…" : validatedSnapshot ? (analysis ? "Re-run full analysis" : "Run full analysis") : "Select solutions in Solution Generator"}
         </Button>
       </header>
       {fullRunForProject && (fullAnalysis.isPending || fullAnalysis.isSuccess || fullAnalysis.error) && fullAnalysis.progress?.projectId === project.project_id ? <AnalysisProgress progress={fullAnalysis.progress} /> : null}
-      {!fullRunPending && dispatchProgress && (run.isPending || run.isSuccess || run.isError) ? <AnalysisProgress progress={dispatchProgress} /> : null}
       {fullRunError ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{fullRunError.message}</p> : null}
       {pricePreview.isError ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved Net CAPEX snapshot is unavailable or out of date. Return to Solution Generator and refresh the quotations before running full analysis.</p> : null}
-      {run.error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{run.error instanceof Error ? run.error.message : "Dispatch analysis failed."}</p> : null}
-      {savedFeasibility.data?.status === "stale" && !run.data ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved dispatch result is out of date because the design or interval evidence changed. Run all solutions again.</p> : null}
+      {!validatedSnapshot && !pricePreview.isPending && !pricePreview.isFetching ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Return to Solution Generator, select the solutions to analyse and confirm their Net CAPEX quotations.</p> : null}
+      {savedFeasibility.data?.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved dispatch result is out of date because the design or interval evidence changed. Select the required solutions in Solution Generator, then run Analysis again.</p> : null}
       {fullRunPending ? null : needsRun ? <DispatchReadyState design={savedDesign.data} scenarioIds={analysisScenarioIds} /> : displayedAnalysis ? <CiDesignFeasibility projectId={project.project_id} result={displayedAnalysis} /> : null}
     </section>
   );
@@ -756,7 +731,10 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
 
 function DispatchReadyState({ design, scenarioIds }: { design: CiDesignCandidateResult; scenarioIds: string[] }) {
   const selectedIds = new Set(scenarioIds);
-  const candidates = selectedIds.size ? design.candidates.filter((scenario) => selectedIds.has(scenario.scenario_id)) : design.candidates;
+  if (!selectedIds.size) {
+    return <section className="grid min-h-[320px] place-items-center rounded-xl border border-slate-200 bg-white p-8 text-center"><div className="max-w-md"><h2 className="text-xl font-semibold text-slate-950">Select solutions before analysis</h2><p className="mt-2 text-sm text-slate-600">Return to Solution Generator, choose the required solutions and confirm their Net CAPEX quotations.</p></div></section>;
+  }
+  const candidates = design.candidates.filter((scenario) => selectedIds.has(scenario.scenario_id));
   return (
     <section className="grid overflow-hidden rounded-xl border border-slate-200 bg-white xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="border-b border-slate-200 bg-slate-50/70 p-4 xl:border-b-0 xl:border-r">
@@ -765,7 +743,7 @@ function DispatchReadyState({ design, scenarioIds }: { design: CiDesignCandidate
           {candidates.map((scenario, index) => <div className="rounded-lg border border-slate-200 bg-white p-3" key={scenario.scenario_id}><div className="flex items-center justify-between gap-2"><strong className="text-xs text-slate-900">Solution {index + 1}</strong><span className="text-[11px] text-slate-400">Not run</span></div><p className="mt-1 text-xs tabular-nums text-slate-600">{numberLabel(scenario.pv_capacity_kwp_dc)} kWp PV · {numberLabel(scenario.nominal_capacity_kwh)} kWh battery</p><p className="mt-0.5 text-[11px] text-slate-500">{numberLabel(scenario.pv_inverter_capacity_kw_ac)} kW hybrid inverter / PCS</p></div>)}
         </div>
       </aside>
-      <div className="grid min-h-[540px] place-items-center p-8 text-center"><div className="max-w-md"><span className="mx-auto grid size-14 place-items-center rounded-2xl bg-cyan-50 text-cyan-800"><Play className="size-6" /></span><h2 className="mt-5 text-xl font-semibold text-slate-950">Ready to simulate every solution</h2></div></div>
+      <div className="grid min-h-[540px] place-items-center p-8 text-center"><div className="max-w-md"><span className="mx-auto grid size-14 place-items-center rounded-2xl bg-cyan-50 text-cyan-800"><Play className="size-6" /></span><h2 className="mt-5 text-xl font-semibold text-slate-950">Ready to simulate {candidates.length} selected {candidates.length === 1 ? "solution" : "solutions"}</h2></div></div>
     </section>
   );
 }
@@ -826,50 +804,6 @@ function selectedFeasibilityResult(result: NonNullable<CiSavedFeasibilityState["
     },
     scenarios,
   };
-}
-
-function restoredAnalysisSnapshot(projectId: string, preview: CiDesignPricePreview): AnalysisPriceSnapshot | null {
-  const draft = loadCiSolutionWorkspaceDraft(projectId);
-  const previewIds = preview.solutions.map((solution) => solution.scenario_id);
-  if (
-    !draft
-    || draft.previewRevision !== pricePreviewRevision(preview)
-    || Object.keys(draft.selectedSolutions).length !== previewIds.length
-    || previewIds.some((scenarioId) => (
-      !Object.hasOwn(draft.selectedSolutions, scenarioId)
-      || !Object.hasOwn(draft.quotedNetCapex, scenarioId)
-    ))
-  ) return null;
-  const prices = previewIds.flatMap((scenarioId) => {
-    const selected = draft.selectedSolutions[scenarioId];
-    const upfrontCostAudExGst = Number(draft.quotedNetCapex[scenarioId]);
-    return selected && Number.isFinite(upfrontCostAudExGst) && upfrontCostAudExGst > 0
-      ? [{ scenarioId, upfrontCostAudExGst }]
-      : [];
-  });
-  if (!prices.length) return null;
-  return {
-    previewRevision: draft.previewRevision,
-    scenarioIds: prices.map((price) => price.scenarioId),
-    prices,
-  };
-}
-
-function analysisPriceSnapshotMatchesPreview(snapshot: AnalysisPriceSnapshot, preview: CiDesignPricePreview) {
-  if (snapshot.previewRevision !== pricePreviewRevision(preview)) return false;
-  if (!snapshot.scenarioIds.length || snapshot.scenarioIds.length !== snapshot.prices.length) return false;
-  if (new Set(snapshot.scenarioIds).size !== snapshot.scenarioIds.length) return false;
-  const previewIds = new Set(preview.solutions.map((solution) => solution.scenario_id));
-  return snapshot.prices.every((price, index) => (
-    price.scenarioId === snapshot.scenarioIds[index]
-    && previewIds.has(price.scenarioId)
-    && Number.isFinite(price.upfrontCostAudExGst)
-    && price.upfrontCostAudExGst > 0
-  ));
-}
-
-function pricePreviewRevision(preview: CiDesignPricePreview) {
-  return `${preview.design_candidates_sha256}:${preview.device_profile_sha256}:${preview.rebate_profile_sha256 ?? "none"}:${preview.solutions.map((solution) => `${solution.scenario_id}:${solution.net_capex_aud_ex_gst}`).join("|")}`;
 }
 
 function aud(value: number) {

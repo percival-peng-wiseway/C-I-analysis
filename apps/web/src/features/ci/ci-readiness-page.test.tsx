@@ -399,7 +399,7 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("button", { name: "Start analysis" }).hasAttribute("disabled")).toBe(true);
   });
 
-  it("opens generated solutions in the Dispatch left-and-right workspace", async () => {
+  it("does not default Dispatch to every generated solution without a saved selection", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
     mockApi([readyProject], generatedDesign);
@@ -408,10 +408,10 @@ describe("C&I project workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
     expect(await screen.findByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Run 2 solutions" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
-    expect(screen.getByText("Solution 1")).toBeTruthy();
-    expect(screen.getByText("Solution 2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Select solutions in Solution Generator" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("heading", { name: "Select solutions before analysis" })).toBeTruthy();
+    expect(screen.queryByText("Solution 1")).toBeNull();
+    expect(screen.queryByText("Solution 2")).toBeNull();
   });
 
   it("keeps saved module data cached while navigating without an explicit action", async () => {
@@ -693,12 +693,12 @@ describe("C&I project workspace", () => {
         persistence_mode: "merge_checkpoint",
       });
     });
-    expect(await screen.findByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Ready to simulate 1 selected solution" })).toBeTruthy();
     expect(screen.queryByText("Solution 2")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
     await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
-    expect(await screen.findByRole("heading", { name: "Ready to simulate every solution" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Ready to simulate 1 selected solution" })).toBeTruthy();
     expect(screen.queryByText("Solution 2")).toBeNull();
   });
 
@@ -737,7 +737,7 @@ describe("C&I project workspace", () => {
     await screen.findByRole("heading", { name: "Scenario dispatch analysis" });
 
     expect(screen.queryByRole("button", { name: /Run full analysis/i })).toBeNull();
-    expect(screen.getByRole("button", { name: "Run 2 solutions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Select solutions in Solution Generator" }).hasAttribute("disabled")).toBe(true);
     expect(fullAnalysisPosts(fetchMock)).toHaveLength(0);
   });
 
@@ -766,7 +766,7 @@ describe("C&I project workspace", () => {
     expect(await screen.findByText("Equipment, rebate, evidence or solution inputs changed.")).toBeTruthy();
     expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-price-preview") && !init?.method)).toHaveLength(2);
     expect(fullAnalysisPosts(fetchMock)).toHaveLength(0);
-    expect(await screen.findByRole("button", { name: "Run 2 solutions" })).toBeTruthy();
+    expect((await screen.findByRole("button", { name: "Select solutions in Solution Generator" })).hasAttribute("disabled")).toBe(true);
   });
 
   it("opens Scenario Analysis immediately and displays analysis progress", async () => {

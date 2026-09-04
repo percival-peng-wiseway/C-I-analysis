@@ -127,6 +127,31 @@ const financeResult: CiAnnualFinancialComparisonResult = {
 afterEach(cleanup);
 
 describe("Tariff replay result workspace", () => {
+  it("uses the current Solution Generator selection instead of defaulting to every design", () => {
+    expect(resolveCiFinanceAnalysisSelection({
+      candidates: [
+        { scenario_id: "case-1" },
+        { scenario_id: "case-2" },
+      ],
+    } as never, null, {
+      previewRevision: "current-preview",
+      scenarioIds: ["case-2"],
+      prices: [{ scenarioId: "case-2", upfrontCostAudExGst: 195000 }],
+    })).toEqual({
+      scenarioIds: ["case-2"],
+      savedManualPrices: [{ scenarioId: "case-2", upfrontCostAudExGst: 195000 }],
+    });
+  });
+
+  it("fails closed instead of analysing every design when no selection is saved", () => {
+    expect(() => resolveCiFinanceAnalysisSelection({
+      candidates: [
+        { scenario_id: "case-1" },
+        { scenario_id: "case-2" },
+      ],
+    } as never, null)).toThrow("Return to Solution Generator, select the solutions to analyse");
+  });
+
   it("re-runs exactly the saved manual-quotation subset", () => {
     const savedFinance: CiSavedAnnualFinancialState = {
       contract_version: "ci_project_annual_financial_state_v1",

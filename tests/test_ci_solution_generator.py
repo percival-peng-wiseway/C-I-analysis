@@ -349,7 +349,89 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
         "inverter_block_size_kw"
     ] == 125.0
     assert result["design_context"]["technical_options"]["inverter_quantity"] == 2
+    assert result["design_context"]["technical_options"][
+        "reactive_support_max_kvar"
+    ] == 200.0
     assert validate_ci_design_context(result["design_context"]) == result["design_context"]
+
+
+def test_python_generator_uses_site_reactive_cap_as_an_absolute_system_limit() -> None:
+    profile = _device_profile()
+    inverter = profile["solution_profiles"]["inverter_profiles"][0]
+    inverter.update(
+        {
+            "rated_active_power_kw": 100.0,
+            "rated_apparent_power_kva": 110.0,
+            "maximum_reactive_power_kvar": 66.0,
+        }
+    )
+    request = _request(maximum_pv=150.0, headroom=250.0)
+    request["pv_range"]["step_kwp_dc"] = 50.0
+    request["battery_range"] = {
+        "minimum_kwh": 0.0,
+        "maximum_kwh": 0.0,
+        "step_kwh": 1.0,
+    }
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        {
+            "reactive_support_enabled": True,
+            "reactive_support_max_kvar": 60.0,
+        }
+    )
+
+    result = generate_ci_solutions(
+        request,
+        device_profile=profile,
+        device_profile_sha256="f" * 64,
+    )
+
+    by_pv = {
+        candidate["pv_capacity_kwp_dc"]: candidate
+        for candidate in result["candidates"]
+    }
+    assert by_pv[100.0]["pv_inverter_capacity_kw_ac"] == pytest.approx(83.333333333)
+    assert by_pv[100.0]["reactive_support_max_kvar"] == pytest.approx(55.0)
+    assert by_pv[100.0]["shared_inverter_apparent_power_limit_kva"] == pytest.approx(
+        91.666666666
+    )
+    assert by_pv[150.0]["pv_inverter_capacity_kw_ac"] == pytest.approx(125.0)
+    assert by_pv[150.0]["reactive_support_max_kvar"] == pytest.approx(60.0)
+    assert by_pv[150.0]["shared_inverter_apparent_power_limit_kva"] == pytest.approx(
+        137.5
+    )
+    assert result["design_context"]["technical_options"][
+        "reactive_support_max_kvar"
+    ] == 60.0
+
+
+def test_python_generator_includes_reactive_support_in_scenario_identity() -> None:
+    disabled_request = _request(maximum_pv=100.0, headroom=250.0)
+    enabled_request = _request(maximum_pv=100.0, headroom=250.0)
+    enabled_request["connection_options"].update(
+        {
+            "reactive_support_enabled": True,
+            "reactive_support_max_kvar": 40.0,
+        }
+    )
+
+    disabled = generate_ci_solutions(
+        disabled_request,
+        device_profile=_device_profile(),
+        device_profile_sha256="a" * 64,
+    )
+    enabled = generate_ci_solutions(
+        enabled_request,
+        device_profile=_device_profile(),
+        device_profile_sha256="a" * 64,
+    )
+
+    disabled_ids = {candidate["scenario_id"] for candidate in disabled["candidates"]}
+    enabled_ids = {candidate["scenario_id"] for candidate in enabled["candidates"]}
+    assert disabled_ids.isdisjoint(enabled_ids)
+    assert {candidate["battery_system_id"] for candidate in disabled["candidates"]} == {
+        candidate["battery_system_id"] for candidate in enabled["candidates"]
+    }
 
 
 def test_python_generator_treats_inverter_quantity_as_non_binding_reference() -> None:

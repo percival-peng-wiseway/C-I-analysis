@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from functools import lru_cache
 import math
 from typing import Literal
 
@@ -20,6 +21,15 @@ KVA_CUT_BATCH_SIZE = 4
 WEAR_SHADOW_COST_AUD_PER_DISCHARGED_KWH = 0.05
 DEFAULT_SHARED_AC_HEADROOM_KW = 250.0
 PQ_CAPABILITY_SEGMENTS = 16
+PQ_CAPABILITY_ANGLE_STEP = math.pi / PQ_CAPABILITY_SEGMENTS
+PQ_CAPABILITY_RADIUS_FACTOR = math.cos(PQ_CAPABILITY_ANGLE_STEP / 2)
+PQ_CAPABILITY_WEIGHTS = tuple(
+    (
+        math.cos((segment + 0.5) * PQ_CAPABILITY_ANGLE_STEP),
+        math.sin((segment + 0.5) * PQ_CAPABILITY_ANGLE_STEP),
+    )
+    for segment in range(PQ_CAPABILITY_SEGMENTS)
+)
 
 
 class CiOptimizerStatus(str, Enum):
@@ -339,6 +349,16 @@ class _PlannerReferences:
 @dataclass(frozen=True)
 class _PlannerAggregation:
     source_groups: tuple[tuple[int, ...], ...]
+
+
+@dataclass(frozen=True)
+class _RollingWindowTopology:
+    start_interval_index: int
+    source_indexes: tuple[int, ...]
+    wrapped_interval_count: int
+    committed_interval_count: int
+    component_local_indexes: tuple[tuple[str, tuple[int, ...]], ...]
+    period_local_indexes: tuple[tuple[str, tuple[int, ...]], ...]
 
 
 @dataclass(frozen=True)
@@ -680,6 +700,14 @@ def execute_ci_peak_shaving_rolling(
 
     if not isinstance(problem, CiOptimizerProblem):
         raise ValueError("problem must be a CiOptimizerProblem")
+    if (
+        problem.reactive_support.enabled
+        and not any(
+            component.basis == "kva" and component.rate_aud_per_unit > 0.0
+            for component in problem.demand_charges
+        )
+    ):
+        return _execute_unpriced_reactive_support_rolling(problem)
     horizon_count, commit_count, cycle_delta = _rolling_shape(problem)
     planner_problem, planner_aggregation = _annual_planner_problem(problem)
     planner = optimize_ci_peak_shaving(planner_problem)
@@ -739,18 +767,22 @@ def execute_ci_peak_shaving_rolling(
             windows=(),
             corrections=("annual_planner_soc_reference_missing",),
         )
-    component_indexes = {
-        item.component_id: set(item.interval_indexes)
-        for item in problem.demand_charges
-    }
     annual_kva_component_count = sum(
         item.basis == "kva" for item in problem.demand_charges
     )
-    billing_period_by_index = {
-        index: period.period_id
-        for period in problem.billing_periods
-        for index in period.interval_indexes
-    }
+    window_topologies = _rolling_window_topologies(
+        interval_count=len(problem.intervals),
+        horizon_count=horizon_count,
+        commit_count=commit_count,
+        component_memberships=tuple(
+            (component.component_id, component.interval_indexes)
+            for component in problem.demand_charges
+        ),
+        period_memberships=tuple(
+            (period.period_id, period.interval_indexes)
+            for period in problem.billing_periods
+        ),
+    )
     committed_rows: list[CiDispatchInterval] = []
     windows: list[CiRollingWindowAudit] = []
     corrections: list[str] = list(planner_corrections)
@@ -763,13 +795,10 @@ def execute_ci_peak_shaving_rolling(
         problem.battery.nominal_capacity_kwh
         * problem.battery.initial_soc_fraction
     )
-    start = 0
-    while start < len(problem.intervals):
-        source_indexes = tuple(
-            (start + offset) % len(problem.intervals)
-            for offset in range(horizon_count)
-        )
-        wrapped_count = max(0, start + horizon_count - len(problem.intervals))
+    for topology in window_topologies:
+        start = topology.start_interval_index
+        source_indexes = topology.source_indexes
+        wrapped_count = topology.wrapped_interval_count
         window_intervals = tuple(
             _rolling_interval(
                 problem.intervals[source_index],
@@ -780,12 +809,9 @@ def execute_ci_peak_shaving_rolling(
         )
         window_components = []
         fixed_limits: dict[str, float] = {}
+        local_indexes_by_component = dict(topology.component_local_indexes)
         for component in problem.demand_charges:
-            local_indexes = tuple(
-                local_index
-                for local_index, source_index in enumerate(source_indexes)
-                if source_index in component_indexes[component.component_id]
-            )
+            local_indexes = local_indexes_by_component.get(component.component_id, ())
             if not local_indexes:
                 continue
             window_components.append(
@@ -800,23 +826,20 @@ def execute_ci_peak_shaving_rolling(
             fixed_limits[component.component_id] = planned_limits[
                 component.component_id
             ]
-        window_period_indexes: dict[str, list[int]] = {}
-        for local_index, source_index in enumerate(source_indexes):
-            period_id = billing_period_by_index[source_index]
-            window_period_indexes.setdefault(period_id, []).append(local_index)
+        window_period_indexes = dict(topology.period_local_indexes)
         window_problem = CiOptimizerProblem(
             intervals=window_intervals,
             battery=problem.battery,
             demand_charges=tuple(window_components),
             billing_periods=tuple(
-                CiBillingPeriod(period_id, tuple(indexes))
+                CiBillingPeriod(period_id, indexes)
                 for period_id, indexes in window_period_indexes.items()
             ),
             shared_ac_headroom_kw=problem.shared_ac_headroom_kw,
             reactive_support=problem.reactive_support,
             config=problem.config,
         )
-        committed_count = min(commit_count, len(problem.intervals) - start)
+        committed_count = topology.committed_interval_count
         minimum_committed_soc = planner_references.soc_boundaries_kwh[
             start + committed_count
         ]
@@ -925,7 +948,6 @@ def execute_ci_peak_shaving_rolling(
         corrections.extend(outcome.corrections)
         any_milp = any_milp or outcome.solver_mode == "milp"
         any_bounded = any_bounded or outcome.status is CiOptimizerStatus.BOUNDED_OPTIMAL
-        start += committed_count
 
     full_solved = _solved_from_dispatch_rows(problem, tuple(committed_rows))
     demand_results = _exact_demand_results(problem, full_solved)
@@ -1033,6 +1055,96 @@ def execute_ci_peak_shaving_rolling(
         windows=tuple(windows),
         corrections=tuple(corrections),
         disclosures=_rolling_disclosures(),
+    )
+
+
+def _execute_unpriced_reactive_support_rolling(
+    problem: CiOptimizerProblem,
+) -> CiRollingReplayResult:
+    """Separate optional Q support when no billed kVA component can value it.
+
+    Reactive output cannot improve a kW/energy-only objective.  Solving the
+    active dispatch without per-interval P-Q polygon rows is therefore dollar
+    equivalent; the maximum feasible Q is then restored against the same
+    conservative capability polygon for the physical replay and audit fields.
+    """
+
+    apparent_limit = problem.reactive_support.inverter_apparent_power_limit_kva
+    if apparent_limit is None:
+        raise ValueError("reactive apparent-power limit is missing")
+    active_problem = replace(
+        problem,
+        demand_charges=tuple(
+            component
+            for component in problem.demand_charges
+            if component.rate_aud_per_unit > 0.0
+        ),
+        shared_ac_headroom_kw=min(
+            problem.shared_ac_headroom_kw,
+            apparent_limit,
+        ),
+        reactive_support=CiReactiveSupportSpec(),
+    )
+    active_result = execute_ci_peak_shaving_rolling(active_problem)
+    if not active_result.intervals:
+        return replace(
+            active_result,
+            idle_baseline_bill_aud=_money(_idle_bill(problem)),
+            corrections=active_result.corrections
+            + ("unpriced_reactive_support_active_dispatch_failed",),
+        )
+
+    dispatch = tuple(
+        replace(
+            row,
+            inverter_reactive_support_kvar=_clean(support),
+            post_grid_reactive_kvar=_clean(
+                source.reactive_kvar - support
+            ),
+            exact_grid_import_kva=_clean(
+                math.hypot(
+                    row.grid_import_kw,
+                    source.reactive_kvar - support,
+                )
+            ),
+            shared_inverter_apparent_power_kva=_clean(
+                math.hypot(row.shared_ac_port_kw, support)
+            ),
+        )
+        for index, (source, row) in enumerate(
+            zip(problem.intervals, active_result.intervals, strict=True)
+        )
+        for support in (
+            _conservative_reactive_support_bound(
+                problem,
+                index,
+                row.shared_ac_port_kw,
+            ),
+        )
+    )
+    solved = _solved_from_dispatch_rows(problem, dispatch)
+    demand_results = _exact_demand_results(problem, solved)
+    exact_bill = _exact_bill(problem, solved, demand_results)
+    replay_bill = _replay_bill_from_dispatch(problem, dispatch)
+    reconciliation = abs(exact_bill - replay_bill)
+    if reconciliation > problem.config.primary_objective_tolerance_aud:
+        return _rolling_failed_result(
+            CiOptimizerStatus.BILL_RECONCILIATION_FAILED,
+            planner_status=active_result.planner_status,
+            idle_bill=_idle_bill(problem),
+            windows=active_result.windows,
+            corrections=active_result.corrections
+            + ("unpriced_reactive_support_bill_reconciliation_failed",),
+        )
+    return replace(
+        active_result,
+        exact_replay_bill_aud=_money(exact_bill),
+        idle_baseline_bill_aud=_money(_idle_bill(problem)),
+        bill_reconciliation_difference_aud=_money(reconciliation),
+        demand_charges=demand_results,
+        intervals=dispatch,
+        corrections=active_result.corrections
+        + ("reactive_support_post_dispatch_no_priced_kva_demand",),
     )
 
 
@@ -1206,8 +1318,7 @@ def _expand_planner_references(
                 return None
             active_limit = min(
                 active_limit,
-                apparent_limit
-                * math.cos(math.pi / PQ_CAPABILITY_SEGMENTS / 2),
+                apparent_limit * PQ_CAPABILITY_RADIUS_FACTOR,
             )
         pv_to_ac = tuple(
             min(
@@ -1354,15 +1465,11 @@ def _conservative_reactive_support_bound(
     apparent_limit = problem.reactive_support.inverter_apparent_power_limit_kva
     if apparent_limit is None:
         raise ValueError("reactive apparent-power limit is missing")
-    angle_step = math.pi / PQ_CAPABILITY_SEGMENTS
-    conservative_radius = apparent_limit * math.cos(angle_step / 2)
+    conservative_radius = apparent_limit * PQ_CAPABILITY_RADIUS_FACTOR
     polygon_bound = min(
-        (
-            conservative_radius - math.cos(angle) * shared_active_power_kw
-        )
-        / math.sin(angle)
-        for segment in range(PQ_CAPABILITY_SEGMENTS)
-        for angle in ((segment + 0.5) * angle_step,)
+        (conservative_radius - active_weight * shared_active_power_kw)
+        / reactive_weight
+        for active_weight, reactive_weight in PQ_CAPABILITY_WEIGHTS
     )
     return min(exact_bound, max(0.0, polygon_bound))
 
@@ -1409,6 +1516,72 @@ def _rolling_shape(
     if horizon_count > len(problem.intervals):
         raise ValueError("rolling replay horizon exceeds the representative year")
     return horizon_count, commit_count, cycle_delta
+
+
+@lru_cache(maxsize=16)
+def _rolling_window_topologies(
+    *,
+    interval_count: int,
+    horizon_count: int,
+    commit_count: int,
+    component_memberships: tuple[tuple[str, tuple[int, ...]], ...],
+    period_memberships: tuple[tuple[str, tuple[int, ...]], ...],
+) -> tuple[_RollingWindowTopology, ...]:
+    """Prepare immutable rolling-window membership once per annual layout."""
+
+    components_by_source_index: list[list[str]] = [
+        [] for _ in range(interval_count)
+    ]
+    for component_id, indexes in component_memberships:
+        for index in indexes:
+            components_by_source_index[index].append(component_id)
+
+    period_by_source_index: list[str | None] = [None] * interval_count
+    for period_id, indexes in period_memberships:
+        for index in indexes:
+            period_by_source_index[index] = period_id
+    if any(period_id is None for period_id in period_by_source_index):
+        raise ValueError("billing periods must cover every optimizer interval")
+
+    topologies: list[_RollingWindowTopology] = []
+    for start in range(0, interval_count, commit_count):
+        source_indexes = tuple(
+            (start + offset) % interval_count for offset in range(horizon_count)
+        )
+        local_indexes_by_component: dict[str, list[int]] = {}
+        local_indexes_by_period: dict[str, list[int]] = {}
+        for local_index, source_index in enumerate(source_indexes):
+            for component_id in components_by_source_index[source_index]:
+                local_indexes_by_component.setdefault(component_id, []).append(
+                    local_index
+                )
+            period_id = period_by_source_index[source_index]
+            if period_id is None:
+                raise ValueError("billing period mapping is incomplete")
+            local_indexes_by_period.setdefault(period_id, []).append(local_index)
+        topologies.append(
+            _RollingWindowTopology(
+                start_interval_index=start,
+                source_indexes=source_indexes,
+                wrapped_interval_count=max(
+                    0, start + horizon_count - interval_count
+                ),
+                committed_interval_count=min(commit_count, interval_count - start),
+                component_local_indexes=tuple(
+                    (
+                        component_id,
+                        tuple(local_indexes_by_component[component_id]),
+                    )
+                    for component_id, _ in component_memberships
+                    if component_id in local_indexes_by_component
+                ),
+                period_local_indexes=tuple(
+                    (period_id, tuple(indexes))
+                    for period_id, indexes in local_indexes_by_period.items()
+                ),
+            )
+        )
+    return tuple(topologies)
 
 
 def _rolling_interval(
@@ -2007,12 +2180,8 @@ def _build_model(
             )
             if apparent_limit is None:
                 raise ValueError("reactive apparent-power limit is missing")
-            angle_step = math.pi / PQ_CAPABILITY_SEGMENTS
-            conservative_radius = apparent_limit * math.cos(angle_step / 2)
-            for segment in range(PQ_CAPABILITY_SEGMENTS):
-                angle = (segment + 0.5) * angle_step
-                active_weight = math.cos(angle)
-                reactive_weight = math.sin(angle)
+            conservative_radius = apparent_limit * PQ_CAPABILITY_RADIUS_FACTOR
+            for active_weight, reactive_weight in PQ_CAPABILITY_WEIGHTS:
                 add_row(
                     (
                         (pv_to_ac[index], active_weight),

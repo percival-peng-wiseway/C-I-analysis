@@ -119,12 +119,26 @@ def analyze_ci_physical_scenarios(
 ) -> dict[str, object]:
     """Compare analyst-authored batteries using physical evidence only."""
     authored = _validated_scenarios(scenarios)
-    tariff_result = analyze_ci_nem12(upload_bytes, profile=profile)
     parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
+    tariff_result = analyze_ci_nem12(
+        upload_bytes,
+        profile=profile,
+        _validated_evidence=parsed,
+    )
     periods, interval_evidence = _build_periods(parsed["streams"], profile)
+    annual_tariff_baseline_cache: dict[str, object] = {}
+    pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
 
     results = [
-        _run_scenario(item, periods, interval_evidence, parsed["streams"], profile)
+        _run_scenario(
+            item,
+            periods,
+            interval_evidence,
+            parsed["streams"],
+            profile,
+            annual_tariff_baseline_cache,
+            pv_generation_cache,
+        )
         for item in authored
     ]
     return _physical_scenario_result(tariff_result=tariff_result, results=results)
@@ -254,14 +268,32 @@ def analyze_ci_three_case_comparison(
         pv_battery_scenario_id=pv_battery_scenario_id,
     )
 
-    tariff_result = analyze_ci_nem12(upload_bytes, profile=profile)
     parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
+    tariff_result = analyze_ci_nem12(
+        upload_bytes,
+        profile=profile,
+        _validated_evidence=parsed,
+    )
     periods, interval_evidence = _build_periods(parsed["streams"], profile)
+    annual_tariff_baseline_cache: dict[str, object] = {}
+    pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
     pv_only_execution = _execute_scenario(
-        pv_only, periods, interval_evidence, parsed["streams"], profile
+        pv_only,
+        periods,
+        interval_evidence,
+        parsed["streams"],
+        profile,
+        annual_tariff_baseline_cache,
+        pv_generation_cache,
     )
     pv_battery_execution = _execute_scenario(
-        pv_battery, periods, interval_evidence, parsed["streams"], profile
+        pv_battery,
+        periods,
+        interval_evidence,
+        parsed["streams"],
+        profile,
+        annual_tariff_baseline_cache,
+        pv_generation_cache,
     )
     return _three_case_comparison_projection(
         tariff_result=tariff_result,
@@ -286,12 +318,24 @@ def analyze_ci_internal_report_source(
         pv_only_scenario_id=pv_only_scenario_id,
         pv_battery_scenario_id=pv_battery_scenario_id,
     )
-    tariff_result = analyze_ci_nem12(upload_bytes, profile=profile)
     parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
+    tariff_result = analyze_ci_nem12(
+        upload_bytes,
+        profile=profile,
+        _validated_evidence=parsed,
+    )
     periods, interval_evidence = _build_periods(parsed["streams"], profile)
+    annual_tariff_baseline_cache: dict[str, object] = {}
+    pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
     executions = {
         item.scenario_id: _execute_scenario(
-            item, periods, interval_evidence, parsed["streams"], profile
+            item,
+            periods,
+            interval_evidence,
+            parsed["streams"],
+            profile,
+            annual_tariff_baseline_cache,
+            pv_generation_cache,
         )
         for item in authored
     }
@@ -371,9 +415,19 @@ def _run_scenario(
     evidence: dict[datetime, dict[str, object]],
     streams: dict[str, dict[date, list[float]]],
     profile: dict[str, Any],
+    annual_tariff_baseline_cache: dict[str, object] | None = None,
+    pv_generation_cache: (
+        dict[tuple[object, ...], tuple[float, ...]] | None
+    ) = None,
 ) -> dict[str, object]:
     return _execute_scenario(
-        scenario, periods, evidence, streams, profile
+        scenario,
+        periods,
+        evidence,
+        streams,
+        profile,
+        annual_tariff_baseline_cache,
+        pv_generation_cache,
     ).public_result
 
 
@@ -383,23 +437,43 @@ def _execute_scenario(
     evidence: dict[datetime, dict[str, object]],
     streams: dict[str, dict[date, list[float]]],
     profile: dict[str, Any],
+    annual_tariff_baseline_cache: dict[str, object] | None = None,
+    pv_generation_cache: (
+        dict[tuple[object, ...], tuple[float, ...]] | None
+    ) = None,
 ) -> _ScenarioExecution:
     flat_intervals = tuple(
         interval for period in periods for interval in period.intervals
     )
-    pv_per_kw_kwh = build_pv_profile(
-        tuple(interval.timestamp for interval in flat_intervals),
+    pv_cache_key = (
+        scenario.pv_profile_id,
+        scenario.pv_capacity_kwp_dc,
         scenario.pv_annual_specific_yield_kwh_per_kw,
+        scenario.pv_derating_factor,
     )
-    raw_pv_kw = tuple(
-        per_kw_kwh
-        * scenario.pv_capacity_kwp_dc
-        * scenario.pv_derating_factor
-        / (interval.interval_minutes / 60)
-        for interval, per_kw_kwh in zip(
-            flat_intervals, pv_per_kw_kwh, strict=True
+    cached_raw_pv_kw = (
+        pv_generation_cache.get(pv_cache_key)
+        if pv_generation_cache is not None
+        else None
+    )
+    if cached_raw_pv_kw is not None:
+        raw_pv_kw = cached_raw_pv_kw
+    else:
+        pv_per_kw_kwh = build_pv_profile(
+            tuple(interval.timestamp for interval in flat_intervals),
+            scenario.pv_annual_specific_yield_kwh_per_kw,
         )
-    )
+        raw_pv_kw = tuple(
+            per_kw_kwh
+            * scenario.pv_capacity_kwp_dc
+            * scenario.pv_derating_factor
+            / (interval.interval_minutes / 60)
+            for interval, per_kw_kwh in zip(
+                flat_intervals, pv_per_kw_kwh, strict=True
+            )
+        )
+        if pv_generation_cache is not None:
+            pv_generation_cache[pv_cache_key] = raw_pv_kw
     if scenario.nominal_capacity_kwh == 0:
         dispatch_rows = []
         for index, interval in enumerate(flat_intervals):
@@ -628,7 +702,12 @@ def _execute_scenario(
             ),
             optimizer_snapshot=optimizer_snapshot,
         ),
-        "annual_tariff_value": _annual_tariff_value(rows, streams, profile),
+        "annual_tariff_value": _annual_tariff_value(
+            rows,
+            streams,
+            profile,
+            baseline_cache=annual_tariff_baseline_cache,
+        ),
         "selected_monthly_thresholds_kw": selected_monthly_thresholds,
         "optimizer_run_snapshot": optimizer_snapshot,
         "optimizer_audit_projection": optimizer_audit,
@@ -1431,6 +1510,8 @@ def _annual_tariff_value(
     rows: list[dict[str, object]],
     streams: dict[str, dict[date, list[float]]],
     profile: dict[str, Any],
+    *,
+    baseline_cache: dict[str, object] | None = None,
 ) -> dict[str, object]:
     model = profile.get("annual_financial_model")
     if not isinstance(model, dict) or model.get("method") != "representative_year_repeat_v1":
@@ -1455,15 +1536,6 @@ def _annual_tariff_value(
     if not math.isfinite(incentive_rate) or incentive_rate < 0:
         raise CiScenarioAnalysisError("annual_value_unavailable")
 
-    baseline_quantities = _annual_tariff_quantities(
-        rows,
-        streams,
-        profile,
-        demand_key="baseline_kva",
-        import_kw_key="baseline_kw",
-        export_kw_key="baseline_export_kw",
-        incentive_months=set(raw_months),
-    )
     scenario_quantities = _annual_tariff_quantities(
         rows,
         streams,
@@ -1478,13 +1550,31 @@ def _annual_tariff_value(
     rolling_end = date.fromisoformat(analysis_period["end_date"])
     days = (rolling_end - rolling_start).days + 1
     overrides = {"incentive_demand_aud_per_kva_month": incentive_rate}
-    baseline = calculate_ci_tariff_charges(
-        baseline_quantities,
-        profile,
-        days=days,
-        rate_overrides=overrides,
-        include_bill_adjustment=False,
+    cache_key = "annual_tariff_baseline_v1"
+    cached_baseline = (
+        baseline_cache.get(cache_key) if baseline_cache is not None else None
     )
+    if isinstance(cached_baseline, dict):
+        baseline = cached_baseline
+    else:
+        baseline_quantities = _annual_tariff_quantities(
+            rows,
+            streams,
+            profile,
+            demand_key="baseline_kva",
+            import_kw_key="baseline_kw",
+            export_kw_key="baseline_export_kw",
+            incentive_months=set(raw_months),
+        )
+        baseline = calculate_ci_tariff_charges(
+            baseline_quantities,
+            profile,
+            days=days,
+            rate_overrides=overrides,
+            include_bill_adjustment=False,
+        )
+        if baseline_cache is not None:
+            baseline_cache[cache_key] = baseline
     scenario = calculate_ci_tariff_charges(
         scenario_quantities,
         profile,

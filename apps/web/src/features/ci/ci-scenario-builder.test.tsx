@@ -172,8 +172,8 @@ describe("CiScenarioBuilder", () => {
       technical_options: {
         inverter_block_size_kw: 125,
         site_ac_headroom_kw: 250,
-        reactive_support_enabled: false,
-        reactive_support_max_kvar: 0,
+        reactive_support_enabled: true,
+        reactive_support_max_kvar: 57,
         grid_emissions_factor_kg_co2e_per_kwh: 0,
       },
     } as unknown as CiDesignContextV2;
@@ -184,12 +184,40 @@ describe("CiScenarioBuilder", () => {
     const steps = screen.getAllByRole("spinbutton", { name: "Step" }) as HTMLInputElement[];
     expect([minimums[0].value, maximums[0].value, steps[0].value]).toEqual(["100.000000001", "100.000000002", "0.000000001"]);
     expect([minimums[1].value, maximums[1].value, steps[1].value]).toEqual(["350.000000001", "350.000000002", "0.000000001"]);
+    expect((screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement).value).toBe("57");
 
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
     expect(onSubmit.mock.calls[0][0]).toMatchObject({
       pv_range: { minimum_kwp_dc: 100.000000001, maximum_kwp_dc: 100.000000002, step_kwp_dc: 0.000000001 },
       battery_range: { minimum_kwh: 350.000000001, maximum_kwh: 350.000000002, step_kwh: 0.000000001 },
+      connection_options: { reactive_support_enabled: true, reactive_support_max_kvar: 57 },
     });
+  });
+
+  it("preserves a manual reactive cap until the inverter profile is deliberately changed", async () => {
+    const user = userEvent.setup();
+    const profiles: CiDeviceProfile = structuredClone(deviceProfile);
+    profiles.solution_profiles.inverter_profiles.push({
+      ...profiles.solution_profiles.inverter_profiles[0],
+      profile_id: "inverter-100",
+      name: "H3-100-Plus evidence",
+      model: "H3-100-Plus",
+      rated_active_power_kw: 100,
+      rated_apparent_power_kva: 110,
+      maximum_reactive_power_kvar: 66,
+    });
+    const view = render(<CiScenarioBuilder deviceProfile={profiles} error={null} isPending={false} onSubmit={vi.fn()} />);
+
+    await user.click(screen.getByRole("checkbox", { name: "Model inverter reactive support" }));
+    const cap = screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement;
+    await user.type(cap, "57");
+    expect(cap.value).toBe("57");
+
+    view.rerender(<CiScenarioBuilder deviceProfile={structuredClone(profiles)} error={null} isPending={false} onSubmit={vi.fn()} />);
+    expect((screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement).value).toBe("57");
+
+    await user.selectOptions(screen.getByLabelText("Inverter performance profile"), "inverter-100");
+    expect((screen.getByLabelText("Reactive support cap (kvar)") as HTMLInputElement).value).toBe("66");
   });
 
   it("adopts a newly saved published battery profile without remounting", async () => {

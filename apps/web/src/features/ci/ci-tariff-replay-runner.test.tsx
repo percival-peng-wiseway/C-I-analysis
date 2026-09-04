@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchEvidence: vi.fn(),
   fetchFeasibility: vi.fn(),
   fetchFinance: vi.fn(),
+  fetchPricePreview: vi.fn(),
   fetchRebateProfile: vi.fn(),
   fetchTariffProfile: vi.fn(),
   fetchTariffReplay: vi.fn(),
@@ -34,6 +35,10 @@ vi.mock("@/features/ci/api/ci-design-feasibility", () => ({
 vi.mock("@/features/ci/api/ci-projects", () => ({
   ciSavedDesignQueryKey: (projectId: string) => ["design", projectId],
   fetchCiSavedDesign: mocks.fetchDesign,
+}));
+vi.mock("@/features/ci/api/ci-design-price-preview", () => ({
+  ciDesignPricePreviewQueryKey: (projectId: string) => ["price-preview", projectId],
+  fetchCiDesignPricePreview: mocks.fetchPricePreview,
 }));
 vi.mock("@/features/ci/api/ci-scenarios", () => ({
   ciProjectTariffReplayQueryKey: (projectId: string) => ["tariff-replay", projectId],
@@ -62,6 +67,7 @@ vi.mock("@/features/ci/ci-annual-financial-workspace", () => ({
 }));
 
 import { createCiQueryClient } from "./ci-query-client";
+import { ciDesignPricePreviewRevision, saveCiSolutionWorkspaceDraft } from "./ci-solution-workspace-storage";
 import { CiTariffReplay } from "./ci-tariff-replay";
 
 const project = {
@@ -80,6 +86,16 @@ const design = {
   candidates: [
     { scenario_id: "case-1", label: "Case 1" },
     { scenario_id: "case-2", label: "Case 2" },
+  ],
+};
+
+const pricePreview = {
+  design_candidates_sha256: "b".repeat(64),
+  device_profile_sha256: "a".repeat(64),
+  rebate_profile_sha256: null,
+  solutions: [
+    { scenario_id: "case-1", net_capex_aud_ex_gst: 200000 },
+    { scenario_id: "case-2", net_capex_aud_ex_gst: 210000 },
   ],
 };
 
@@ -138,6 +154,7 @@ beforeEach(() => {
     },
   });
   mocks.fetchDesign.mockResolvedValue(design);
+  mocks.fetchPricePreview.mockResolvedValue(pricePreview);
   mocks.fetchFeasibility.mockResolvedValue(notSavedFeasibility);
   mocks.fetchTariffReplay.mockResolvedValue(notSavedTariffReplay);
   mocks.fetchFinance.mockResolvedValue(notSavedFinance);
@@ -174,11 +191,54 @@ beforeEach(() => {
   });
   mocks.runTariffReplay.mockResolvedValue(null);
   mocks.compareFinance.mockResolvedValue(null);
+  saveCiSolutionWorkspaceDraft(project.project_id, {
+    previewRevision: ciDesignPricePreviewRevision(pricePreview as never),
+    quotedNetCapex: { "case-1": "200000", "case-2": "210000" },
+    selectedSolutions: { "case-1": true, "case-2": true },
+  });
 });
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); window.sessionStorage.clear(); });
 
 describe("Finance analysis runner", () => {
+  it("runs only the Solution Generator selection when Finance has no prior result", async () => {
+    const user = userEvent.setup();
+    saveCiSolutionWorkspaceDraft(project.project_id, {
+      previewRevision: ciDesignPricePreviewRevision(pricePreview as never),
+      quotedNetCapex: { "case-1": "200000", "case-2": "210000" },
+      selectedSolutions: { "case-1": true, "case-2": false },
+    });
+    mocks.runFeasibility.mockResolvedValue({});
+    mocks.runTariffReplay.mockResolvedValue({});
+    mocks.compareFinance.mockResolvedValue(null);
+    renderReplay();
+
+    const start = await screen.findByRole("button", { name: "Start analysis" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    await user.click(start);
+
+    await waitFor(() => expect(mocks.compareFinance).toHaveBeenCalledTimes(1));
+    expect(mocks.runFeasibility.mock.calls[0]?.[3]).toEqual(["case-1"]);
+    expect(mocks.runTariffReplay.mock.calls[0]?.[3]).toEqual(["case-1"]);
+    expect(mocks.compareFinance).toHaveBeenCalledWith({
+      projectId: "project-1",
+      pricingMode: "manual_quotes",
+      prices: [{ scenarioId: "case-1", upfrontCostAudExGst: 200000 }],
+    });
+  });
+
+  it("does not default to all designs when no solution selection is saved", async () => {
+    window.sessionStorage.clear();
+    renderReplay();
+
+    const start = await screen.findByRole("button", { name: "Start analysis" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(true));
+    expect(screen.getAllByText(/Return to Solution Generator, select the solutions to analyse/).length).toBeGreaterThan(0);
+    expect(mocks.runFeasibility).not.toHaveBeenCalled();
+    expect(mocks.runTariffReplay).not.toHaveBeenCalled();
+    expect(mocks.compareFinance).not.toHaveBeenCalled();
+  });
+
   it("keeps the shared analysis lock after Finance unmounts and disables equipment inputs", async () => {
     const user = userEvent.setup();
     const gate = deferred<never>();

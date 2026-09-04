@@ -495,6 +495,49 @@ def test_rolling_replay_carries_reactive_support_through_exact_reconciliation():
     )
 
 
+def test_unpriced_kva_reactive_support_is_applied_after_active_dispatch(
+    monkeypatch,
+):
+    base = _calendar_year_problem(demand_basis="kva", reactive_kvar=8.0)
+    problem = replace(
+        base,
+        demand_charges=tuple(
+            replace(component, rate_aud_per_unit=0.0)
+            for component in base.demand_charges
+        ),
+        reactive_support=CiReactiveSupportSpec(
+            enabled=True,
+            max_reactive_support_kvar=5.0,
+            inverter_apparent_power_limit_kva=250.0,
+        ),
+    )
+    built_reactive_models: list[bool] = []
+    real_build_model = optimizer_module._build_model
+
+    def tracked_build_model(*args, **kwargs):
+        built_reactive_models.append(args[0].reactive_support.enabled)
+        return real_build_model(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer_module, "_build_model", tracked_build_model)
+
+    result = execute_ci_peak_shaving_rolling(problem)
+
+    assert result.status in {
+        CiOptimizerStatus.OPTIMAL_LP_EXACT,
+        CiOptimizerStatus.OPTIMAL_MILP,
+        CiOptimizerStatus.BOUNDED_OPTIMAL,
+    }
+    assert built_reactive_models and not any(built_reactive_models)
+    assert len(result.demand_charges) == len(problem.demand_charges)
+    assert max(
+        row.inverter_reactive_support_kvar for row in result.intervals
+    ) == pytest.approx(5.0)
+    assert result.bill_reconciliation_difference_aud == 0.0
+    assert "reactive_support_post_dispatch_no_priced_kva_demand" in (
+        result.corrections
+    )
+
+
 def test_fixed_kva_limit_uses_exact_interval_active_import_cap_without_cuts():
     problem = _problem(
         intervals=_intervals(

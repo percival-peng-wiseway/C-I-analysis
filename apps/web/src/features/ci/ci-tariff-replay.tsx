@@ -37,6 +37,10 @@ import {
   type CiProject,
 } from "@/features/ci/api/ci-projects";
 import {
+  ciDesignPricePreviewQueryKey,
+  fetchCiDesignPricePreview,
+} from "@/features/ci/api/ci-design-price-preview";
+import {
   ciProjectTariffReplayQueryKey,
   fetchCiSavedTariffReplay,
   runCiProjectTariffReplay,
@@ -65,6 +69,10 @@ import {
   type CiProjectRebateProfileState,
 } from "@/features/ci/api/ci-rebate-profile";
 import { CiPortfolioReturnChart } from "@/features/ci/ci-annual-financial-workspace";
+import {
+  restoreCiAnalysisPriceSnapshot,
+  type CiAnalysisPriceSnapshot,
+} from "@/features/ci/ci-solution-workspace-storage";
 
 type ReplayTab = "summary" | "bills" | "financial" | "demand" | "interval" | "assumptions";
 type FinanceAnalysisProgress = { percent: number; label: string };
@@ -76,10 +84,29 @@ type FinanceManualPrice = { scenarioId: string; upfrontCostAudExGst: number };
 export function resolveCiFinanceAnalysisSelection(
   design: Pick<CiDesignCandidateResult, "candidates"> | null | undefined,
   savedFinance: CiSavedAnnualFinancialState | null | undefined,
-): { scenarioIds: string[]; savedManualPrices: FinanceManualPrice[] | null } {
+  workspaceSnapshot: CiAnalysisPriceSnapshot | null = null,
+): { scenarioIds: string[]; savedManualPrices: FinanceManualPrice[] } {
   const designScenarioIds = design?.candidates.map((candidate) => candidate.scenario_id) ?? [];
   if (!designScenarioIds.length) {
     throw new Error("Generate at least one solution before calculating.");
+  }
+  const designIds = new Set(designScenarioIds);
+  if (workspaceSnapshot) {
+    const snapshotIds = workspaceSnapshot.scenarioIds;
+    if (
+      snapshotIds.length < 1
+      || snapshotIds.length !== workspaceSnapshot.prices.length
+      || new Set(snapshotIds).size !== snapshotIds.length
+      || workspaceSnapshot.prices.some((price, index) => (
+        price.scenarioId !== snapshotIds[index]
+        || !designIds.has(price.scenarioId)
+        || !Number.isFinite(price.upfrontCostAudExGst)
+        || price.upfrontCostAudExGst <= 0
+      ))
+    ) {
+      throw new Error("The saved solution selection no longer matches the current design. Return to Solution Generator and confirm the selected quotations.");
+    }
+    return { scenarioIds: snapshotIds, savedManualPrices: workspaceSnapshot.prices };
   }
   const savedManualPrices = savedFinance?.status === "ready"
     && savedFinance.result?.assumptions.price_source === "analyst_entered_total_solution_price"
@@ -88,10 +115,7 @@ export function resolveCiFinanceAnalysisSelection(
       upfrontCostAudExGst: solution.upfront_cost_aud_ex_gst,
     }))
     : null;
-  if (!savedManualPrices) {
-    return { scenarioIds: designScenarioIds, savedManualPrices: null };
-  }
-  const designIds = new Set(designScenarioIds);
+  if (!savedManualPrices) throw new Error("Return to Solution Generator, select the solutions to analyse and confirm their Net CAPEX quotations.");
   const manualIds = savedManualPrices.map((price) => price.scenarioId);
   if (
     manualIds.length < 1
@@ -130,6 +154,12 @@ export function CiTariffReplay({
     queryKey: ciSavedDesignQueryKey(project.project_id),
     queryFn: () => fetchCiSavedDesign(project.project_id),
   });
+  const pricePreview = useQuery({
+    queryKey: ciDesignPricePreviewQueryKey(project.project_id),
+    queryFn: () => fetchCiDesignPricePreview(project.project_id),
+    enabled: Boolean(design.data),
+    retry: false,
+  });
   const dispatch = useQuery({
     queryKey: ciSavedFeasibilityQueryKey(project.project_id),
     queryFn: () => fetchCiSavedFeasibility(project.project_id),
@@ -160,6 +190,9 @@ export function CiTariffReplay({
   const localRunInFlight = useRef(false);
   const activeAnalysisCount = useIsMutating({ mutationKey: CI_ANALYSIS_MUTATION_KEY });
   const analysisBusy = activeAnalysisCount > 0;
+  const workspaceSnapshot = pricePreview.data
+    ? restoreCiAnalysisPriceSnapshot(project.project_id, pricePreview.data)
+    : null;
 
   useEffect(() => {
     if (deviceProfile.data?.status === "ready" && deviceProfile.data.profile) {
@@ -176,8 +209,7 @@ export function CiTariffReplay({
     },
     mutationFn: async () => {
       if (tariffProfile.data?.status !== "approved") throw new Error("Approve this project's tariff profile before calculating.");
-      const { savedManualPrices, scenarioIds } = resolveCiFinanceAnalysisSelection(design.data, finance.data);
-      if (!savedManualPrices && !equipmentSelection) throw new Error("Select the supported PV, battery and hybrid inverter / PCS before calculating.");
+      const { savedManualPrices, scenarioIds } = resolveCiFinanceAnalysisSelection(design.data, finance.data, workspaceSnapshot);
       setAnalysisProgress({ percent: 12, label: `Running scenario dispatch (0/${scenarioIds.length})` });
       const feasibilityResult = await runCiDesignFeasibility(project.project_id, fetch, undefined, scenarioIds, {
         onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
@@ -215,9 +247,8 @@ export function CiTariffReplay({
       setAnalysisProgress({ percent: 78, label: `Calculating financial comparison (${scenarioIds.length}/${scenarioIds.length} scenarios complete)` });
       const financeResult = await compareCiAnnualFinancialScenarios({
         projectId: project.project_id,
-        pricingMode: savedManualPrices ? "manual_quotes" : "device_profile",
-        prices: savedManualPrices ?? undefined,
-        equipmentSelection: savedManualPrices ? undefined : equipmentSelection ?? undefined,
+        pricingMode: "manual_quotes",
+        prices: savedManualPrices,
       });
       setAnalysisProgress({ percent: 100, label: "Analysis complete" });
       return { feasibilityResult, tariffResult, financeResult };
@@ -255,7 +286,7 @@ export function CiTariffReplay({
     },
   });
 
-  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending || rebateProfile.isPending) {
+  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending || rebateProfile.isPending || (Boolean(design.data) && pricePreview.isPending)) {
     return <section aria-labelledby="tariff-replay-title" className="space-y-5"><FinanceRunHeader canRun={false} count={project.design_candidate_count} hasResult={false} onRun={() => undefined} pending={false} /><ReplayLoading /></section>;
   }
   if (evidence.isError || design.isError || dispatch.isError || replay.isError || finance.isError || deviceProfile.isError || tariffProfile.isError || rebateProfile.isError) {
@@ -269,7 +300,7 @@ export function CiTariffReplay({
       tariffProfile.isError ? "tariff profile" : null,
       rebateProfile.isError ? "rebate profile" : null,
     ].filter((value): value is string => value !== null);
-    const retry = () => { void Promise.all([evidence.refetch(), design.refetch(), dispatch.refetch(), replay.refetch(), finance.refetch(), deviceProfile.refetch(), tariffProfile.refetch(), rebateProfile.refetch()]); };
+    const retry = () => { void Promise.all([evidence.refetch(), design.refetch(), dispatch.refetch(), replay.refetch(), finance.refetch(), deviceProfile.refetch(), tariffProfile.refetch(), rebateProfile.refetch(), pricePreview.refetch()]); };
     return <section aria-labelledby="tariff-replay-title" className="space-y-5"><FinanceRunHeader canRun={false} count={project.design_candidate_count} hasResult={false} onRun={() => undefined} pending={false} /><ReplayError failed={failed} onRetry={retry} /></section>;
   }
 
@@ -283,7 +314,13 @@ export function CiTariffReplay({
   const dispatchReady = dispatch.data.status === "ready";
   const designReady = Boolean(design.data && design.data.candidate_count > 0);
   const savedDeviceProfile = deviceProfile.data.status === "ready" ? deviceProfile.data.profile : null;
-  const hasSavedManualQuotes = finance.data.status === "ready" && finance.data.result?.assumptions.price_source === "analyst_entered_total_solution_price";
+  let resolvedSelection: ReturnType<typeof resolveCiFinanceAnalysisSelection> | null = null;
+  let selectionError: string | null = null;
+  try {
+    resolvedSelection = resolveCiFinanceAnalysisSelection(design.data, finance.data, workspaceSnapshot);
+  } catch (error) {
+    selectionError = error instanceof Error ? error.message : "Return to Solution Generator and select the solutions to analyse.";
+  }
   const tariffApproved = tariffProfile.data?.status === "approved";
   const enabledRebateCount = countEnabledRebates(rebateProfile.data);
   const rebateReady = enabledRebateCount === 0 || rebateProfile.data.status === "approved";
@@ -312,7 +349,7 @@ export function CiTariffReplay({
     { detail: tariffDetail, label: "Project tariff profile approved", ready: tariffApproved },
     { detail: rebateDetail, label: "Rebate plan resolved", ready: rebateReady },
     { label: "Equipment & finance profile saved", ready: Boolean(savedDeviceProfile) },
-    { detail: hasSavedManualQuotes ? "The saved custom Net CAPEX quotations will be reused." : undefined, label: "Equipment selected or quotations saved", ready: Boolean(equipmentSelection) || hasSavedManualQuotes },
+    { detail: resolvedSelection ? `${resolvedSelection.scenarioIds.length} selected ${resolvedSelection.scenarioIds.length === 1 ? "solution" : "solutions"} will be analysed.` : selectionError ?? undefined, label: "Solution selection saved", ready: Boolean(resolvedSelection) },
   ];
   const canRun = checks.every((item) => item.ready);
   const savedResult = runReplay.data?.tariffResult ?? replay.data.result;
@@ -320,9 +357,7 @@ export function CiTariffReplay({
   const result = tariffApproved ? savedResult : null;
   const financeResult = tariffApproved ? savedFinanceResult : null;
   const error = runReplay.error instanceof Error ? runReplay.error.message : null;
-  const analysisScenarioCount = hasSavedManualQuotes
-    ? finance.data.result?.solutions.length ?? 0
-    : design.data?.candidate_count ?? 0;
+  const analysisScenarioCount = resolvedSelection?.scenarioIds.length ?? 0;
   const startAnalysis = () => {
     if (analysisBusy || localRunInFlight.current) return;
     localRunInFlight.current = true;

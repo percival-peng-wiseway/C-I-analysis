@@ -325,6 +325,73 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     )
 
 
+def test_physical_scenario_review_prices_annual_baseline_once_per_request(
+    monkeypatch,
+) -> None:
+    baseline = {
+        "profile": {"profile_id": "synthetic"},
+        "demand_evidence": {
+            "rolling_demand_kva": 15.0,
+            "chargeable_rolling_demand_kva": 15.0,
+            "incentive_demand_kva": 15.0,
+            "billing_period_max_kva": 15.0,
+            "billing_period_max_kw": 12.0,
+        },
+    }
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.analyze_ci_nem12",
+        lambda *_args, **_kwargs: baseline,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.validated_ci_nem12_evidence",
+        lambda *_args, **_kwargs: {"streams": _streams()},
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.execute_ci_peak_shaving_rolling",
+        _stub_rolling,
+    )
+    from solar_battery import ci_scenario_analysis
+
+    real_calculate = ci_scenario_analysis.calculate_ci_tariff_charges
+    real_build_pv_profile = ci_scenario_analysis.build_pv_profile
+    charge_calls = 0
+    pv_profile_calls = 0
+
+    def count_calculate(*args, **kwargs):
+        nonlocal charge_calls
+        charge_calls += 1
+        return real_calculate(*args, **kwargs)
+
+    def count_build_pv_profile(*args, **kwargs):
+        nonlocal pv_profile_calls
+        pv_profile_calls += 1
+        return real_build_pv_profile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.calculate_ci_tariff_charges",
+        count_calculate,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.build_pv_profile",
+        count_build_pv_profile,
+    )
+
+    scenarios = [
+        _scenario("small", 10.0, 5.0),
+        _scenario("medium", 15.0, 7.5),
+        _scenario("large", 20.0, 10.0),
+    ]
+    result = analyze_ci_physical_scenarios(
+        b"synthetic",
+        profile=_profile(),
+        scenarios=scenarios,
+    )
+
+    assert len(result["scenarios"]) == 3
+    assert charge_calls == 4  # one shared baseline plus one price per scenario
+    assert pv_profile_calls == 1
+
+
 def test_reactive_scenario_contract_is_explicit_and_fail_closed() -> None:
     enabled = {
         **_scenario("reactive", 20.0, 10.0),

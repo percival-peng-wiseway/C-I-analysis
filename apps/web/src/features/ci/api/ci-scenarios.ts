@@ -178,7 +178,7 @@ export interface CiTariffReplayRunOptions {
   onProgress?: (progress: CiTariffReplayProgress) => void;
 }
 
-const DEFAULT_TARIFF_REPLAY_BATCH_SIZE = 3;
+const DEFAULT_TARIFF_REPLAY_BATCH_SIZE = 1;
 
 export type CiThreeCaseId = "no_system" | "pv_only" | "pv_battery";
 

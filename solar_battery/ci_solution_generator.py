@@ -602,6 +602,41 @@ def _scenario(
     connection: dict[str, Any],
     inverter_performance: dict[str, Any] | None,
 ) -> dict[str, object]:
+    inverter_performance_scale = (
+        inverter_capacity_kw_ac
+        / float(inverter_performance["rated_active_power_kw"])
+        if inverter_performance is not None
+        else 0.0
+    )
+    reactive_enabled = connection["reactive_support_enabled"]
+    # The authored cap is an absolute whole-system ceiling. The selected
+    # inverter profile contributes a separate capability ceiling that scales
+    # continuously with each candidate's configured PCS capacity.
+    reactive_cap = float(connection["reactive_support_max_kvar"])
+    if inverter_performance is not None and reactive_enabled:
+        reactive_cap = min(
+            reactive_cap,
+            inverter_performance_scale
+            * float(inverter_performance["maximum_reactive_power_kvar"]),
+        )
+    apparent_limit = (
+        (
+            inverter_performance_scale
+            * float(inverter_performance["rated_apparent_power_kva"])
+            if inverter_performance is not None
+            else math.hypot(inverter_capacity_kw_ac, reactive_cap)
+        )
+        if reactive_enabled
+        else None
+    )
+    reactive_signature = {
+        "reactive_support_enabled": reactive_enabled,
+        "reactive_support_max_kvar": reactive_cap if reactive_enabled else 0.0,
+        "shared_inverter_apparent_power_limit_kva": apparent_limit,
+        "reactive_capability_curve": "circular_pq",
+        "reactive_capability_provenance": "analyst_assumption",
+        "reactive_overcompensation_permitted": False,
+    }
     solar_key = {
         "profile_id": _profile_id(solar),
         "version": _integer(solar.get("version"), 1, 10_000),
@@ -615,6 +650,10 @@ def _scenario(
             inverter.get("version"), 1, 10_000
         )
         solar_key["inverter_profile_sha256"] = _snapshot_sha256(inverter)
+    if reactive_enabled:
+        # Preserve legacy IDs for disabled support while giving every enabled
+        # physical capability a distinct system identity.
+        solar_key["reactive_support"] = reactive_signature
     battery_key = {
         "profile_id": _profile_id(battery),
         "version": _integer(battery.get("version"), 1, 10_000),
@@ -628,29 +667,6 @@ def _scenario(
         _stable_id("battery", battery_key)
         if battery_capacity_kwh > 0
         else "battery-none"
-    )
-    inverter_performance_scale = (
-        inverter_capacity_kw_ac
-        / float(inverter_performance["rated_active_power_kw"])
-        if inverter_performance is not None
-        else 0.0
-    )
-    reactive_cap = float(connection["reactive_support_max_kvar"])
-    if inverter_performance is not None and connection["reactive_support_enabled"]:
-        reactive_cap = min(
-            reactive_cap,
-            inverter_performance_scale
-            * float(inverter_performance["maximum_reactive_power_kvar"]),
-        )
-    apparent_limit = (
-        (
-            inverter_performance_scale
-            * float(inverter_performance["rated_apparent_power_kva"])
-            if inverter_performance is not None
-            else math.hypot(inverter_capacity_kw_ac, reactive_cap)
-        )
-        if connection["reactive_support_enabled"]
-        else None
     )
     return {
         "scenario_id": f"{pv_system_id}__{battery_system_id}",
@@ -667,16 +683,7 @@ def _scenario(
         "pv_capacity_kwp_dc": pv_capacity_kwp_dc,
         "pv_inverter_capacity_kw_ac": inverter_capacity_kw_ac,
         "shared_ac_headroom_kw": inverter_capacity_kw_ac,
-        "reactive_support_enabled": connection["reactive_support_enabled"],
-        "reactive_support_max_kvar": (
-            reactive_cap
-            if connection["reactive_support_enabled"]
-            else 0.0
-        ),
-        "shared_inverter_apparent_power_limit_kva": apparent_limit,
-        "reactive_capability_curve": "circular_pq",
-        "reactive_capability_provenance": "analyst_assumption",
-        "reactive_overcompensation_permitted": False,
+        **reactive_signature,
         "pv_annual_specific_yield_kwh_per_kw": annual_specific_yield,
         "pv_derating_factor": derating,
         "nominal_capacity_kwh": battery_capacity_kwh,

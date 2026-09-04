@@ -92,8 +92,17 @@ def analyze_ci_nem12(
     upload_bytes: bytes,
     *,
     profile: dict[str, Any],
+    _validated_evidence: dict[str, Any] | None = None,
 ) -> dict[str, object]:
-    parsed = validated_ci_nem12_evidence(upload_bytes, profile=profile)
+    parsed = (
+        validated_ci_nem12_evidence(upload_bytes, profile=profile)
+        if _validated_evidence is None
+        else _revalidate_ci_nem12_evidence(
+            upload_bytes,
+            profile=profile,
+            parsed=_validated_evidence,
+        )
+    )
     facts = _ci_tariff_metered_facts(parsed, profile)
     streams = facts["streams"]
     bill_start = facts["bill_start"]
@@ -302,9 +311,45 @@ def validated_ci_nem12_evidence(
     if not upload_bytes or len(upload_bytes) > MAX_CI_NEM12_UPLOAD_BYTES:
         raise CiTariffAnalysisError("upload_invalid")
     parsed = _parse_ci_nem12(upload_bytes)
+    return _revalidate_ci_nem12_evidence(
+        upload_bytes,
+        profile=profile,
+        parsed=parsed,
+        upload_identity_already_proven=True,
+    )
+
+
+def _revalidate_ci_nem12_evidence(
+    upload_bytes: bytes,
+    *,
+    profile: dict[str, Any],
+    parsed: dict[str, Any],
+    upload_identity_already_proven: bool = False,
+) -> dict[str, Any]:
+    """Cheaply re-check an already parsed payload before request-local reuse."""
+
+    import hashlib
+
+    _validate_profile(profile)
+    if not upload_bytes or len(upload_bytes) > MAX_CI_NEM12_UPLOAD_BYTES:
+        raise CiTariffAnalysisError("upload_invalid")
+    if (
+        not isinstance(parsed, dict)
+        or (
+            not upload_identity_already_proven
+            and parsed.get("identity_sha256")
+            != hashlib.sha256(upload_bytes).hexdigest()
+        )
+    ):
+        raise CiTariffAnalysisError("evidence_identity_mismatch")
     if parsed["identity_sha256"] != profile["expected_nem12_sha256"]:
         raise CiTariffAnalysisError("evidence_identity_mismatch")
-    streams: dict[str, dict[date, list[float]]] = parsed["streams"]
+    try:
+        streams: dict[str, dict[date, list[float]]] = parsed["streams"]
+        if set(streams) != set(_REQUIRED_STREAMS):
+            raise CiTariffAnalysisError("stream_contract_mismatch")
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise CiTariffAnalysisError("stream_contract_mismatch") from exc
     rolling_start = date.fromisoformat(profile["rolling_period"]["start_date"])
     rolling_end = date.fromisoformat(profile["rolling_period"]["end_date"])
     required_dates = _date_range(rolling_start, rolling_end)
