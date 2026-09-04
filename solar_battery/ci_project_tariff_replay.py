@@ -34,6 +34,79 @@ def tariff_profile_sha256(profile: dict[str, object]) -> str:
     return canonical_sha256(profile)
 
 
+def reusable_ci_tariff_replay_result(
+    session,
+    *,
+    project_id: UUID,
+    actor: LocalActorContext,
+    expected_interval_sha256: str,
+    expected_design_candidates_sha256: str,
+    expected_tariff_profile_sha256: str,
+    expected_scenario_ids: list[str],
+) -> dict[str, object] | None:
+    """Return an exact current checkpoint, otherwise require fresh analysis.
+
+    Reuse is deliberately stricter than the normal saved-state projection. A
+    result must be bound to every current project input and cover exactly the
+    requested scenarios. Any missing, malformed or stale provenance falls
+    through to the authoritative calculation path.
+    """
+
+    project = require_ci_project(session, project_id=project_id, actor=actor)
+    candidates = project.design_candidates_json
+    evidence = _evidence_row(session, project_id=project_id, actor=actor)
+    row = session.scalar(
+        select(CiProjectTariffReplayResultModel).where(
+            CiProjectTariffReplayResultModel.project_id == project_id,
+            CiProjectTariffReplayResultModel.workspace_id == actor.workspace_id,
+            CiProjectTariffReplayResultModel.owner_id == actor.owner_id,
+        )
+    )
+    try:
+        current_design_candidates_sha256 = (
+            design_candidates_sha256(list(candidates))
+            if candidates is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        candidates is None
+        or evidence is None
+        or evidence.interval_sha256 != expected_interval_sha256
+        or current_design_candidates_sha256
+        != expected_design_candidates_sha256
+        or row is None
+        or not expected_scenario_ids
+        or len(set(expected_scenario_ids)) != len(expected_scenario_ids)
+        or any(
+            not isinstance(scenario_id, str) or not scenario_id
+            for scenario_id in expected_scenario_ids
+        )
+    ):
+        return None
+    try:
+        if not _row_matches_checkpoint_snapshot(
+            row,
+            expected_interval_sha256=expected_interval_sha256,
+            expected_design_candidates_sha256=(
+                expected_design_candidates_sha256
+            ),
+            expected_tariff_profile_sha256=expected_tariff_profile_sha256,
+        ):
+            return None
+        if canonical_sha256(row.result_json) != row.result_sha256:
+            return None
+        _validate_result_for_storage(
+            row.result_json,
+            candidates=list(candidates),
+            expected_scenario_ids=expected_scenario_ids,
+        )
+        return _json_copy(row.result_json)
+    except (AttributeError, CiProjectError, TypeError, ValueError):
+        return None
+
+
 def record_ci_tariff_replay_result(
     session,
     *,

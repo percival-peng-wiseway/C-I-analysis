@@ -109,6 +109,7 @@ from solar_battery.ci_project_annual_financial import (
 from solar_battery.ci_project_tariff_replay import (
     ci_tariff_replay_state,
     record_ci_tariff_replay_result,
+    reusable_ci_tariff_replay_result,
     tariff_profile_sha256,
 )
 from solar_battery.ci_pricing_catalog import (
@@ -1347,18 +1348,39 @@ def post_ci_project_tariff_replay(
             )
             expected_interval_sha256 = hashlib.sha256(interval.data).hexdigest()
             expected_design_sha256 = design_candidates_sha256(candidates)
+        selected_scenario_ids_in_candidate_order = [
+            str(candidate["scenario_id"])
+            for candidate in selected_candidates
+        ]
+        reusable_result = None
         with session_factory() as session:
             profile = approved_ci_project_tariff_calculation_profile(
                 session,
                 project_id=project_id,
                 actor=actor,
             )
-        if profile is None:
-            raise CiProjectError(
-                "ci_project_tariff_profile_required",
-                "Review and approve the project tariff table before running Finance Analysis.",
+            if profile is None:
+                raise CiProjectError(
+                    "ci_project_tariff_profile_required",
+                    "Review and approve the project tariff table before running Finance Analysis.",
+                )
+            expected_profile_sha256 = tariff_profile_sha256(profile)
+            reusable_result = reusable_ci_tariff_replay_result(
+                session,
+                project_id=project_id,
+                actor=actor,
+                expected_interval_sha256=expected_interval_sha256,
+                expected_design_candidates_sha256=expected_design_sha256,
+                expected_tariff_profile_sha256=expected_profile_sha256,
+                expected_scenario_ids=selected_scenario_ids_in_candidate_order,
             )
-        expected_profile_sha256 = tariff_profile_sha256(profile)
+        if reusable_result is not None:
+            _LOGGER.info(
+                "ci_tariff_replay stage=reused scenarios=%d elapsed_s=%.3f",
+                selected_scenario_count,
+                time.perf_counter() - started_at,
+            )
+            return reusable_result
         _LOGGER.info(
             "ci_tariff_replay stage=analysis_start scenarios=%d elapsed_s=%.3f",
             selected_scenario_count,
@@ -1396,10 +1418,9 @@ def post_ci_project_tariff_replay(
                     expected_interval_sha256=expected_interval_sha256,
                     expected_design_candidates_sha256=expected_design_sha256,
                     expected_tariff_profile_sha256=expected_profile_sha256,
-                    expected_scenario_ids=[
-                        str(candidate["scenario_id"])
-                        for candidate in selected_candidates
-                    ],
+                    expected_scenario_ids=(
+                        selected_scenario_ids_in_candidate_order
+                    ),
                     active_tariff_profile=current_profile,
                     result=result,
                     merge_checkpoint=(

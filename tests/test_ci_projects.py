@@ -1067,20 +1067,40 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
             "saved_at"
         ] == checkpoint_saved_at
 
+        checkpoint_tariff_call_count = len(captured_tariff)
         selected_tariff = client.post(
             f"{project_url}/tariff-replay",
             json={"scenario_ids": selection},
         )
         assert selected_tariff.status_code == 200
-        assert captured_tariff[-1] == ["scenario-a", "scenario-c"]
+        assert len(captured_tariff) == checkpoint_tariff_call_count
         assert [
             scenario["scenario_id"]
             for scenario in selected_tariff.json()["scenarios"]
-        ] == ["scenario-a", "scenario-c"]
+        ] == ["scenario-c", "scenario-a"]
         assert client.get(f"{project_url}/tariff-replay").json()["status"] == (
             "ready"
         )
 
+        tariff_call_count = len(captured_tariff)
+        reused_tariff = client.post(
+            f"{project_url}/tariff-replay",
+            json={"scenario_ids": selection},
+        )
+        assert reused_tariff.status_code == 200
+        assert reused_tariff.json() == selected_tariff.json()
+        assert len(captured_tariff) == tariff_call_count
+
+        feasibility_b = client.post(
+            f"{project_url}/design-feasibility",
+            json={
+                "scenario_ids": ["scenario-b"],
+                "persistence_mode": "merge_checkpoint",
+            },
+        )
+        assert feasibility_b.status_code == 200
+
+        tariff_calls_before_changed_selections = len(captured_tariff)
         for invalid_result_mode in (
             "duplicate",
             "unknown",
@@ -1090,12 +1110,14 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
             tariff_mode["value"] = invalid_result_mode
             rejected_result = client.post(
                 f"{project_url}/tariff-replay",
-                json={"scenario_ids": selection},
+                json={"scenario_ids": ["scenario-a", "scenario-b"]},
             )
             assert rejected_result.status_code == 422
             assert rejected_result.json()["detail"]["code"] == (
                 "ci_project_tariff_replay_result_invalid"
             )
+            tariff_calls_before_changed_selections += 1
+            assert len(captured_tariff) == tariff_calls_before_changed_selections
 
 
 def test_replacing_project_evidence_replaces_private_objects_and_resets_setup(

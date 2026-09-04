@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from threading import Barrier, Event, Lock as ThreadLock, get_ident
 
 import pytest
 
@@ -670,63 +671,49 @@ def test_one_worker_keeps_complete_analysis_inline(monkeypatch) -> None:
 def test_complete_analysis_timeout_terminates_coordinator_and_releases_lock(
     monkeypatch,
 ) -> None:
-    result_timeouts: list[float] = []
-    shutdown_calls: list[tuple[bool, bool]] = []
-    initializers = []
+    communicate_timeouts: list[float] = []
 
     class StubbornProcess:
+        args = ["python", "coordinator"]
+        pid = 4321
+        returncode = None
+
         def __init__(self):
-            self.alive = True
             self.terminate_calls = 0
             self.kill_calls = 0
-            self.join_calls: list[float] = []
+            self.wait_calls: list[float] = []
 
-        def is_alive(self):
-            return self.alive
+        def communicate(self, *, input, timeout):
+            assert scenario_module._decode_coordinator_frame(
+                input,
+                max_payload_bytes=scenario_module._MAX_COORDINATOR_REQUEST_BYTES,
+            )[0] == scenario_module._COORDINATOR_REQUEST_VERSION
+            communicate_timeouts.append(timeout)
+            raise scenario_module.subprocess.TimeoutExpired(self.args, timeout)
+
+        def poll(self):
+            return None
 
         def terminate(self):
             self.terminate_calls += 1
 
         def kill(self):
             self.kill_calls += 1
-            self.alive = False
 
-        def join(self, timeout):
-            self.join_calls.append(timeout)
-
-    class TimeoutFuture:
-        def __init__(self):
-            self.cancel_calls = 0
-
-        def result(self, timeout):
-            result_timeouts.append(timeout)
-            raise scenario_module.FutureTimeoutError()
-
-        def cancel(self):
-            self.cancel_calls += 1
-            return False
+        def wait(self, timeout):
+            self.wait_calls.append(timeout)
+            if len(self.wait_calls) == 1:
+                raise scenario_module.subprocess.TimeoutExpired(self.args, timeout)
+            return -9
 
     process = StubbornProcess()
-    future = TimeoutFuture()
-
-    class TimeoutCoordinatorPool:
-        def __init__(self, *, max_workers, initializer, **_kwargs):
-            assert max_workers == 1
-            initializers.append(initializer)
-            self._processes = {1: process}
-
-        def submit(self, *_args, **_kwargs):
-            return future
-
-        def shutdown(self, *, wait, cancel_futures=False):
-            shutdown_calls.append((wait, cancel_futures))
 
     monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
     monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
     monkeypatch.setattr(
         scenario_module,
-        "ProcessPoolExecutor",
-        TimeoutCoordinatorPool,
+        "_start_analysis_coordinator_subprocess",
+        lambda: process,
     )
 
     with pytest.raises(CiScenarioAnalysisError) as exc_info:
@@ -737,15 +724,11 @@ def test_complete_analysis_timeout_terminates_coordinator_and_releases_lock(
         )
 
     assert exc_info.value.code == "scenario_execution_failed"
-    assert initializers == [scenario_module._start_analysis_process_group]
-    assert len(result_timeouts) == 1
-    assert 0 < result_timeouts[0] <= 30
-    assert future.cancel_calls == 1
-    assert shutdown_calls == [(False, True)]
+    assert len(communicate_timeouts) == 1
+    assert 0 < communicate_timeouts[0] <= 30
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
-    assert len(process.join_calls) == 2
-    assert all(0 <= timeout <= 2 for timeout in process.join_calls)
+    assert process.wait_calls == [2.0, 2.0]
     assert scenario_module._SCENARIO_ANALYSIS_PROCESS_LOCK.acquire(
         blocking=False
     )
@@ -754,33 +737,34 @@ def test_complete_analysis_timeout_terminates_coordinator_and_releases_lock(
 
 def test_complete_analysis_success_returns_coordinator_result(monkeypatch) -> None:
     expected = {"contract_version": "coordinated"}
-    submissions = []
-    result_timeouts: list[float] = []
-    shutdown_calls: list[tuple[bool, bool]] = []
+    received = []
 
-    class ImmediateFuture:
-        def result(self, timeout):
-            result_timeouts.append(timeout)
-            return (scenario_module._COORDINATOR_RESULT_READY, expected)
+    class ImmediateCoordinator:
+        args = ["python", "coordinator"]
+        returncode = 0
 
-    class ImmediateCoordinatorPool:
-        def __init__(self, *, max_workers, initializer, **_kwargs):
-            assert max_workers == 1
-            assert initializer is scenario_module._start_analysis_process_group
-
-        def submit(self, function, *args, **kwargs):
-            submissions.append((function, args, kwargs))
-            return ImmediateFuture()
-
-        def shutdown(self, *, wait, cancel_futures=False):
-            shutdown_calls.append((wait, cancel_futures))
+        def communicate(self, *, input, timeout):
+            received.append(
+                scenario_module._decode_coordinator_frame(
+                    input,
+                    max_payload_bytes=scenario_module._MAX_COORDINATOR_REQUEST_BYTES,
+                )
+            )
+            assert 0 < timeout <= 30
+            return (
+                scenario_module._encode_coordinator_frame(
+                    (scenario_module._COORDINATOR_RESULT_READY, expected),
+                    max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+                ),
+                None,
+            )
 
     monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
     monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
     monkeypatch.setattr(
         scenario_module,
-        "ProcessPoolExecutor",
-        ImmediateCoordinatorPool,
+        "_start_analysis_coordinator_subprocess",
+        ImmediateCoordinator,
     )
 
     result = analyze_ci_physical_scenarios(
@@ -789,19 +773,122 @@ def test_complete_analysis_success_returns_coordinator_result(monkeypatch) -> No
         scenarios=[{"scenario_id": "one"}],
     )
 
-    assert result is expected
-    assert len(submissions) == 1
-    assert submissions[0] == (
-        scenario_module._run_physical_analysis_coordinator,
-        (b"evidence",),
-        {
-            "profile": {"profile_id": "profile"},
-            "scenarios": [{"scenario_id": "one"}],
-        },
+    assert result == expected
+    assert received == [
+        (
+            scenario_module._COORDINATOR_REQUEST_VERSION,
+            b"evidence",
+            {"profile_id": "profile"},
+            [{"scenario_id": "one"}],
+        )
+    ]
+
+
+def test_nonzero_coordinator_exit_fails_closed(monkeypatch) -> None:
+    class FailedCoordinator:
+        args = ["python", "coordinator"]
+        returncode = 23
+
+        def communicate(self, *, input, timeout):
+            assert input
+            assert timeout > 0
+            return (b"", None)
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(
+        scenario_module,
+        "_start_analysis_coordinator_subprocess",
+        FailedCoordinator,
     )
-    assert len(result_timeouts) == 1
-    assert 0 < result_timeouts[0] <= 30
-    assert shutdown_calls == [(False, False)]
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        analyze_ci_physical_scenarios(
+            b"evidence",
+            profile={"profile_id": "profile"},
+            scenarios=[{"scenario_id": "one"}],
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
+
+
+def test_coordinator_result_frame_rejects_stdout_noise() -> None:
+    frame = scenario_module._encode_coordinator_frame(
+        (scenario_module._COORDINATOR_RESULT_READY, {}),
+        max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+    )
+
+    with pytest.raises((EOFError, ValueError)):
+        scenario_module._decode_coordinator_frame(
+            b"unexpected output\n" + frame,
+            max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+        )
+
+
+def test_coordinator_frame_writer_retries_short_writes() -> None:
+    received = bytearray()
+
+    class ShortWriter:
+        def write(self, value):
+            chunk = bytes(value[:7])
+            received.extend(chunk)
+            return len(chunk)
+
+    frame = b"coordinator-result" * 100
+    scenario_module._write_coordinator_frame(ShortWriter(), frame)
+
+    assert bytes(received) == frame
+
+
+@pytest.mark.parametrize("write_result", [0, None])
+def test_coordinator_frame_writer_rejects_stalled_pipe(write_result) -> None:
+    class StalledWriter:
+        def write(self, _value):
+            return write_result
+
+    with pytest.raises(OSError):
+        scenario_module._write_coordinator_frame(StalledWriter(), b"result")
+
+
+def test_large_coordinator_frame_round_trips_through_real_subprocess() -> None:
+    payload = ("echo", "x" * (128 * 1024))
+    request = scenario_module._encode_coordinator_frame(
+        payload,
+        max_payload_bytes=scenario_module._MAX_COORDINATOR_REQUEST_BYTES,
+    )
+    script = (
+        "import sys\n"
+        "from solar_battery.ci_scenario_analysis import "
+        "_decode_coordinator_frame, _encode_coordinator_frame, "
+        "_write_coordinator_frame, _MAX_COORDINATOR_REQUEST_BYTES, "
+        "_MAX_COORDINATOR_RESULT_BYTES\n"
+        "request = _decode_coordinator_frame("
+        "sys.stdin.buffer.read(), max_payload_bytes="
+        "_MAX_COORDINATOR_REQUEST_BYTES)\n"
+        "response = _encode_coordinator_frame("
+        "request, max_payload_bytes=_MAX_COORDINATOR_RESULT_BYTES)\n"
+        "_write_coordinator_frame(sys.stdout.buffer, response)\n"
+        "sys.stdout.buffer.flush()\n"
+    )
+    process = scenario_module.subprocess.Popen(
+        [scenario_module.sys.executable, "-c", script],
+        stdin=scenario_module.subprocess.PIPE,
+        stdout=scenario_module.subprocess.PIPE,
+        stderr=scenario_module.subprocess.PIPE,
+    )
+
+    stdout, stderr = process.communicate(input=request, timeout=30)
+
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert len(request) > 64 * 1024
+    assert len(stdout) > 64 * 1024
+    assert scenario_module._decode_coordinator_frame(
+        stdout,
+        max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+    ) == payload
 
 
 def test_real_coordinator_process_propagates_safe_validation_error(
@@ -826,30 +913,33 @@ def test_transient_coordinator_capability_failure_is_reprobed_safely(
     expected = {"contract_version": "recovered"}
     attempts = 0
 
-    class ImmediateFuture:
-        def result(self, timeout):
+    class RecoveredCoordinator:
+        args = ["python", "coordinator"]
+        returncode = 0
+
+        def communicate(self, *, input, timeout):
+            assert input
             assert timeout > 0
-            return (scenario_module._COORDINATOR_RESULT_READY, expected)
+            return (
+                scenario_module._encode_coordinator_frame(
+                    (scenario_module._COORDINATOR_RESULT_READY, expected),
+                    max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+                ),
+                None,
+            )
 
-    class ReprobedCoordinatorPool:
-        def __init__(self, **_kwargs):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise OSError("temporarily unavailable")
-
-        def submit(self, *_args, **_kwargs):
-            return ImmediateFuture()
-
-        def shutdown(self, *, wait, cancel_futures=False):
-            assert wait is False
-            assert cancel_futures is False
+    def start_coordinator():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporarily unavailable")
+        return RecoveredCoordinator()
 
     monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
     monkeypatch.setattr(
         scenario_module,
-        "ProcessPoolExecutor",
-        ReprobedCoordinatorPool,
+        "_start_analysis_coordinator_subprocess",
+        start_coordinator,
     )
     monkeypatch.setattr(
         scenario_module,
@@ -871,38 +961,36 @@ def test_transient_coordinator_capability_failure_is_reprobed_safely(
         b"evidence",
         profile={"profile_id": "profile"},
         scenarios=[{"scenario_id": "one"}],
-    ) is expected
+    ) == expected
     assert attempts == 2
 
 
 def test_coordinator_preserves_tariff_error_code_without_pickling_exception(
     monkeypatch,
 ) -> None:
-    class TariffErrorFuture:
-        def result(self, timeout):
+    class TariffErrorCoordinator:
+        args = ["python", "coordinator"]
+        returncode = 0
+
+        def communicate(self, *, input, timeout):
+            assert input
             assert timeout > 0
             return (
-                scenario_module._COORDINATOR_RESULT_TARIFF_ERROR,
-                "profile_invalid",
+                scenario_module._encode_coordinator_frame(
+                    (
+                        scenario_module._COORDINATOR_RESULT_TARIFF_ERROR,
+                        "profile_invalid",
+                    ),
+                    max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+                ),
+                None,
             )
-
-    class TariffErrorCoordinatorPool:
-        def __init__(self, **_kwargs):
-            pass
-
-        def submit(self, function, *_args, **_kwargs):
-            assert function is scenario_module._run_physical_analysis_coordinator
-            return TariffErrorFuture()
-
-        def shutdown(self, *, wait, cancel_futures=False):
-            assert wait is False
-            assert cancel_futures is False
 
     monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
     monkeypatch.setattr(
         scenario_module,
-        "ProcessPoolExecutor",
-        TariffErrorCoordinatorPool,
+        "_start_analysis_coordinator_subprocess",
+        TariffErrorCoordinator,
     )
 
     with pytest.raises(CiTariffAnalysisError) as exc_info:
@@ -938,8 +1026,10 @@ def test_coordinator_wraps_expected_errors_in_pickle_safe_values(
     )
 
 
-def test_coordinator_runs_core_without_a_nested_process_pool(monkeypatch) -> None:
-    observed_worker_counts: list[int | None] = []
+def test_coordinator_runs_core_with_two_threads_and_no_nested_process_pool(
+    monkeypatch,
+) -> None:
+    observed_worker_counts: list[tuple[int | None, int]] = []
 
     def execute_core(
         _upload_bytes,
@@ -947,11 +1037,14 @@ def test_coordinator_runs_core_without_a_nested_process_pool(monkeypatch) -> Non
         profile,
         scenarios,
         scenario_process_workers=None,
+        coordinator_thread_workers=1,
     ):
         assert profile == {"profile_id": "profile"}
         assert scenarios == [{"scenario_id": "one"}]
-        observed_worker_counts.append(scenario_process_workers)
-        return {"contract_version": "serial-coordinator"}
+        observed_worker_counts.append(
+            (scenario_process_workers, coordinator_thread_workers)
+        )
+        return {"contract_version": "threaded-coordinator"}
 
     monkeypatch.setattr(
         scenario_module,
@@ -967,12 +1060,12 @@ def test_coordinator_runs_core_without_a_nested_process_pool(monkeypatch) -> Non
 
     assert outcome == (
         scenario_module._COORDINATOR_RESULT_READY,
-        {"contract_version": "serial-coordinator"},
+        {"contract_version": "threaded-coordinator"},
     )
-    assert observed_worker_counts == [1]
+    assert observed_worker_counts == [(1, 2)]
 
 
-def test_explicit_serial_worker_count_never_creates_nested_pool(
+def test_one_selected_scenario_never_creates_a_thread_or_process_pool(
     monkeypatch,
 ) -> None:
     authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
@@ -982,6 +1075,13 @@ def test_explicit_serial_worker_count_never_creates_nested_pool(
         "_execute_battery_scenarios_in_processes",
         lambda *_args, **_kwargs: pytest.fail(
             "the production coordinator must not create a nested process pool"
+        ),
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "ThreadPoolExecutor",
+        lambda *_args, **_kwargs: pytest.fail(
+            "one selected scenario must not create a thread pool"
         ),
     )
     monkeypatch.setattr(
@@ -999,9 +1099,114 @@ def test_explicit_serial_worker_count_never_creates_nested_pool(
         {},
         {},
         worker_count=1,
+        coordinator_thread_workers=2,
     )
 
     assert result == [{"scenario_id": "battery-a"}]
+
+
+def test_coordinator_threads_preserve_order_and_keep_caches_private(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios(
+        [
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("pv-only", 0.0, 0.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ]
+    )
+    battery_barrier = Barrier(2)
+    battery_b_complete = Event()
+    observation_lock = ThreadLock()
+    thread_ids: dict[str, int] = {}
+    cache_ids: dict[str, tuple[int, int]] = {}
+    completion_order: list[str] = []
+
+    def run_scenario(scenario, *_args):
+        baseline_cache, pv_cache = _args[-2:]
+        if scenario.nominal_capacity_kwh > 0.0:
+            with observation_lock:
+                thread_ids[scenario.scenario_id] = get_ident()
+                cache_ids[scenario.scenario_id] = (
+                    id(baseline_cache),
+                    id(pv_cache),
+                )
+            battery_barrier.wait(timeout=3)
+            if scenario.scenario_id == "battery-a":
+                assert battery_b_complete.wait(timeout=3)
+            else:
+                with observation_lock:
+                    completion_order.append(scenario.scenario_id)
+                battery_b_complete.set()
+        with observation_lock:
+            completion_order.append(scenario.scenario_id)
+        return {"scenario_id": scenario.scenario_id}
+
+    monkeypatch.setattr(scenario_module, "_run_scenario", run_scenario)
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the coordinator must not create a nested process pool"
+        ),
+    )
+
+    result = scenario_module._execute_authored_scenarios(
+        authored,
+        (),
+        {},
+        {},
+        {},
+        {},
+        {},
+        worker_count=1,
+        coordinator_thread_workers=2,
+    )
+
+    assert [row["scenario_id"] for row in result] == [
+        "battery-a",
+        "pv-only",
+        "battery-b",
+    ]
+    assert thread_ids["battery-a"] != thread_ids["battery-b"]
+    assert cache_ids["battery-a"][0] != cache_ids["battery-b"][0]
+    assert cache_ids["battery-a"][1] != cache_ids["battery-b"][1]
+    assert completion_order.index("battery-b") < completion_order.index(
+        "battery-a"
+    )
+
+
+def test_coordinator_thread_failure_discards_partial_results(monkeypatch) -> None:
+    authored = _validated_scenarios(
+        [
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ]
+    )
+    battery_barrier = Barrier(2)
+
+    def run_scenario(scenario, *_args):
+        battery_barrier.wait(timeout=3)
+        if scenario.scenario_id == "battery-b":
+            raise RuntimeError("synthetic solver failure")
+        return {"scenario_id": scenario.scenario_id}
+
+    monkeypatch.setattr(scenario_module, "_run_scenario", run_scenario)
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        scenario_module._execute_authored_scenarios(
+            authored,
+            (),
+            {},
+            {},
+            {},
+            {},
+            {},
+            worker_count=1,
+            coordinator_thread_workers=2,
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
 
 
 def test_posix_process_group_failure_uses_direct_termination_fallback(
@@ -1029,13 +1234,15 @@ def test_coordinator_abort_kills_the_posix_coordinator_process_group(
 
     class GroupLeaderProcess:
         pid = 4321
+        args = ["python", "coordinator"]
 
         def __init__(self):
             self.terminate_calls = 0
             self.kill_calls = 0
+            self.wait_calls = 0
 
-        def is_alive(self):
-            return True
+        def poll(self):
+            return None
 
         def terminate(self):
             self.terminate_calls += 1
@@ -1043,16 +1250,11 @@ def test_coordinator_abort_kills_the_posix_coordinator_process_group(
         def kill(self):
             self.kill_calls += 1
 
-        def join(self, timeout):
-            pass
-
-    class CoordinatorPool:
-        def __init__(self, process):
-            self._processes = {1: process}
-
-        def shutdown(self, *, wait, cancel_futures=False):
-            assert wait is False
-            assert cancel_futures is True
+        def wait(self, timeout):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise scenario_module.subprocess.TimeoutExpired(self.args, timeout)
+            return -9
 
     class FakePosixOs:
         name = "posix"
@@ -1073,10 +1275,7 @@ def test_coordinator_abort_kills_the_posix_coordinator_process_group(
     monkeypatch.setattr(scenario_module, "os", FakePosixOs)
     monkeypatch.setattr(scenario_module, "signal", FakePosixSignal)
 
-    scenario_module._abort_analysis_coordinator(
-        CoordinatorPool(process),
-        [],
-    )
+    scenario_module._abort_analysis_coordinator(process)
 
     assert signals == [
         (4321, FakePosixSignal.SIGTERM),

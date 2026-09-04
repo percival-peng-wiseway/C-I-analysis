@@ -12,6 +12,7 @@ from solar_battery.ci_project_feasibility import (
 from solar_battery.ci_project_tariff_replay import (
     ci_tariff_replay_state,
     record_ci_tariff_replay_result,
+    reusable_ci_tariff_replay_result,
     tariff_profile_sha256,
 )
 from solar_battery.ci_projects import CiProjectError, create_ci_project
@@ -234,6 +235,85 @@ def test_checkpoint_batches_merge_idempotently_without_adding_currency_values(
         )
         assert state["status"] == "ready"
         assert state["result"] == second["result"]
+
+
+@pytest.mark.parametrize(
+    "stale_input",
+    ["selection", "interval_hash", "design_hash", "tariff_hash", "revision"],
+)
+def test_reusable_tariff_checkpoint_requires_exact_current_provenance(
+    tmp_path,
+    stale_input,
+) -> None:
+    session_factory = create_sqlite_session_factory(
+        sqlite_url_for_path(tmp_path / f"tariff-reuse-{stale_input}.sqlite3")
+    )
+    scenario_a = _scenario_result(
+        "scenario-a",
+        raw_demand_kva=210.0,
+        pv_kwp=100.0,
+        battery_kwh=200.0,
+        scenario_cost_aud=800.0,
+    )
+    with session_factory.begin() as session:
+        project_id = _seed_project(session)
+        stored = _record(
+            session,
+            project_id=project_id,
+            result=_result(scenario_a),
+            scenario_ids=["scenario-a"],
+        )
+
+    expected_interval_sha256 = INTERVAL_SHA256
+    expected_design_sha256 = design_candidates_sha256(_candidates())
+    expected_tariff_sha256 = tariff_profile_sha256(TARIFF_PROFILE)
+    expected_scenario_ids = ["scenario-a"]
+    if stale_input == "selection":
+        expected_scenario_ids = ["scenario-b"]
+    elif stale_input == "interval_hash":
+        expected_interval_sha256 = "3" * 64
+    elif stale_input == "design_hash":
+        expected_design_sha256 = "4" * 64
+    elif stale_input == "tariff_hash":
+        expected_tariff_sha256 = "5" * 64
+    elif stale_input == "revision":
+        with session_factory.begin() as session:
+            row = session.get(CiProjectTariffReplayResultModel, project_id)
+            assert row is not None
+            old_result = dict(row.result_json)
+            old_result["calculation_revision"] = "old-revision"
+            row.result_json = old_result
+            row.result_sha256 = canonical_sha256(old_result)
+
+    with session_factory() as session:
+        reusable = reusable_ci_tariff_replay_result(
+            session,
+            project_id=project_id,
+            actor=local_actor(),
+            expected_interval_sha256=expected_interval_sha256,
+            expected_design_candidates_sha256=expected_design_sha256,
+            expected_tariff_profile_sha256=expected_tariff_sha256,
+            expected_scenario_ids=expected_scenario_ids,
+        )
+
+    assert reusable is None
+
+    if stale_input != "revision":
+        with session_factory() as session:
+            exact = reusable_ci_tariff_replay_result(
+                session,
+                project_id=project_id,
+                actor=local_actor(),
+                expected_interval_sha256=INTERVAL_SHA256,
+                expected_design_candidates_sha256=design_candidates_sha256(
+                    _candidates()
+                ),
+                expected_tariff_profile_sha256=tariff_profile_sha256(
+                    TARIFF_PROFILE
+                ),
+                expected_scenario_ids=["scenario-a"],
+            )
+        assert exact == stored["result"]
 
 
 def test_checkpoint_merge_resets_old_snapshot_but_rejects_inflight_change_and_conflict(

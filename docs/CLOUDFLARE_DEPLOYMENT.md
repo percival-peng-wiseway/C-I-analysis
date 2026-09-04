@@ -64,11 +64,14 @@ checkpoints: Durable Objects can also restart because of platform or Worker
 updates.
 
 Scenario execution uses the `standard-4` container size. Each request runs in
-one disposable coordinator process and keeps HiGHS single-threaded. Selected
-solutions are checkpointed in batches of at most two, but execute sequentially
-inside that coordinator so the production runtime never needs a nested process
-pool. This avoids solver oversubscription and leaves memory headroom for the
-API, interval evidence and result persistence.
+one disposable coordinator process. A two-solution battery batch runs on at
+most two coordinator threads, while a one-solution batch does not create a
+thread pool. Every coordinator thread owns its mutable tariff-baseline and PV
+caches, and every scenario keeps HiGHS at one solver thread with parallel mode disabled. PV-only rows run
+inline and the assembled response retains the authored scenario order. This
+uses the four container vCPUs at the scenario level without a nested process
+pool or per-model solver oversubscription, while leaving memory headroom for
+the API, interval evidence and result persistence.
 `CI_SCENARIO_PROCESS_TIMEOUT_SECONDS` is a wall-clock watchdog for the complete
 physical-analysis request (600 seconds in production), including evidence
 parsing, tariff reconstruction, dispatch and result assembly. The optimizer's
@@ -76,8 +79,10 @@ parsing, tariff reconstruction, dispatch and result assembly. The optimizer's
 run in a disposable coordinator process; a watchdog expiry terminates that
 process (or its process group when the runtime supports one) and fails closed
 so a later request cannot wait forever behind an abandoned calculation lock.
-The serial execution occurs only inside this bounded coordinator, never in the
-long-lived API process.
+Scenario threading occurs only inside this bounded coordinator, never in the
+long-lived API process. Any thread error discards the request result and fails
+closed; the parent watchdog remains authoritative for stopping all coordinator
+threads on expiry.
 
 The production Worker starts the API container in the background on an HTML
 navigation and keeps the single instance available for two hours after its
