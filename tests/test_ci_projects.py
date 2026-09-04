@@ -421,6 +421,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         )
         return {
             "contract_version": "ci_physical_scenario_review_v6",
+            "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
             "analysis_status": "ready",
             "analysis_mode": "evidence_limited_internal_review",
             "customer_facing_permission": False,
@@ -793,6 +794,7 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
             result_ids = scenario_ids[:1]
         return {
             "contract_version": "ci_physical_scenario_review_v6",
+            "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
             "analysis_status": "ready",
             "analysis_mode": "evidence_limited_internal_review",
             "customer_facing_permission": False,

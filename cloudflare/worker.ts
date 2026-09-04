@@ -15,6 +15,7 @@ interface Env {
   LOCAL_OWNER_ID: string;
   LOCAL_ACTOR_ID: string;
   LOCAL_ACTOR_DISPLAY_NAME: string;
+  CI_SCENARIO_PROCESS_WORKERS: string;
 }
 
 const accessJwks = new Map<
@@ -191,6 +192,7 @@ export class E3ApiContainer extends Container<Env> {
         LOCAL_OWNER_ID: env.LOCAL_OWNER_ID,
         LOCAL_ACTOR_ID: env.LOCAL_ACTOR_ID,
         LOCAL_ACTOR_DISPLAY_NAME: env.LOCAL_ACTOR_DISPLAY_NAME,
+        CI_SCENARIO_PROCESS_WORKERS: env.CI_SCENARIO_PROCESS_WORKERS,
       },
     });
   }

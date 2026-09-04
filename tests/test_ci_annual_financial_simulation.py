@@ -1,9 +1,27 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
+import pytest
+
+from solar_battery.ci_annual_financial_comparison import (
+    compare_ci_annual_financial_scenarios,
+)
+from solar_battery.ci_project_annual_financial import (
+    ci_annual_financial_state,
+    record_ci_annual_financial_result,
+)
+from solar_battery.ci_project_feasibility import canonical_sha256
+from solar_battery.ci_projects import CiProjectError, create_ci_project
 from solar_battery.ci_rebate_rules import ci_rebate_ruleset_sha256
-from tests.durable_test_helpers import create_test_client, sqlite_url_for_path
+from solar_battery.durable_cockpit.orm import CiProjectAnnualFinancialResultModel
+from tests.durable_test_helpers import (
+    create_sqlite_session_factory,
+    create_test_client,
+    local_actor,
+    sqlite_url_for_path,
+)
 
 
 def _scenario() -> dict[str, object]:
@@ -106,6 +124,7 @@ def _physical_result(_upload, *, profile, scenarios):
         )
     return {
         "contract_version": "ci_physical_scenario_review_v6",
+        "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,
@@ -143,6 +162,122 @@ def _feasibility_result(scenarios: list[dict[str, object]]) -> dict[str, object]
             for index, item in enumerate(scenarios, start=1)
         ],
     }
+
+
+def _persistable_finance_result(
+    *, project_id: UUID, tariff_replay_result: dict[str, object]
+) -> dict[str, object]:
+    result = compare_ci_annual_financial_scenarios(
+        tariff_replay_result=tariff_replay_result,
+        request={
+            "pricing_mode": "manual_quotes",
+            "prices": [
+                {
+                    "scenario_id": "pv-001__battery-001",
+                    "upfront_cost_aud_ex_gst": 90_000.0,
+                }
+            ],
+        },
+    )
+    result["project_id"] = str(project_id)
+    return result
+
+
+def test_annual_finance_rejects_result_bound_to_another_tariff_replay(
+    tmp_path,
+) -> None:
+    session_factory = create_sqlite_session_factory(
+        sqlite_url_for_path(tmp_path / "finance-result-binding.sqlite3")
+    )
+    actor = local_actor()
+    with session_factory.begin() as session:
+        project = create_ci_project(
+            session,
+            display_name="Finance result binding",
+            actor=actor,
+        )
+        project_id = UUID(str(project["project_id"]))
+
+    tariff_replay_result = _physical_result(
+        None,
+        profile={},
+        scenarios=[_scenario()],
+    )
+    expected_sha256 = canonical_sha256(tariff_replay_result)
+    result = _persistable_finance_result(
+        project_id=project_id,
+        tariff_replay_result=tariff_replay_result,
+    )
+    result["source_tariff_replay_sha256"] = "f" * 64
+
+    with session_factory.begin() as session:
+        with pytest.raises(CiProjectError) as error:
+            record_ci_annual_financial_result(
+                session,
+                project_id=project_id,
+                actor=actor,
+                expected_tariff_replay_result_sha256=expected_sha256,
+                expected_rebate_profile_sha256=None,
+                active_tariff_replay_result=tariff_replay_result,
+                result=result,
+            )
+    assert error.value.code == "ci_project_annual_financial_result_invalid"
+
+
+def test_annual_finance_restore_rejects_tampered_tariff_replay_binding(
+    tmp_path,
+) -> None:
+    session_factory = create_sqlite_session_factory(
+        sqlite_url_for_path(tmp_path / "finance-restore-binding.sqlite3")
+    )
+    actor = local_actor()
+    with session_factory.begin() as session:
+        project = create_ci_project(
+            session,
+            display_name="Finance restore binding",
+            actor=actor,
+        )
+        project_id = UUID(str(project["project_id"]))
+
+    tariff_replay_result = _physical_result(
+        None,
+        profile={},
+        scenarios=[_scenario()],
+    )
+    expected_sha256 = canonical_sha256(tariff_replay_result)
+    result = _persistable_finance_result(
+        project_id=project_id,
+        tariff_replay_result=tariff_replay_result,
+    )
+    with session_factory.begin() as session:
+        saved = record_ci_annual_financial_result(
+            session,
+            project_id=project_id,
+            actor=actor,
+            expected_tariff_replay_result_sha256=expected_sha256,
+            expected_rebate_profile_sha256=None,
+            active_tariff_replay_result=tariff_replay_result,
+            result=result,
+        )
+    assert saved["status"] == "ready"
+
+    with session_factory.begin() as session:
+        row = session.get(CiProjectAnnualFinancialResultModel, project_id)
+        assert row is not None
+        tampered = dict(row.result_json)
+        tampered["source_tariff_replay_sha256"] = "f" * 64
+        row.result_json = tampered
+        row.result_sha256 = canonical_sha256(tampered)
+
+    with session_factory() as session:
+        with pytest.raises(CiProjectError) as error:
+            ci_annual_financial_state(
+                session,
+                project_id=project_id,
+                actor=actor,
+                active_tariff_replay_result=tariff_replay_result,
+            )
+    assert error.value.code == "ci_project_annual_financial_result_invalid"
 
 
 def test_project_annual_finance_compares_pv_only_with_battery_and_projects_cashflow(

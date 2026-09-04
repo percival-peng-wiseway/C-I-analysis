@@ -658,3 +658,80 @@ def test_handbook_projects_profile_operands_and_optimizer_snapshot() -> None:
     assert values["pv_charge"] == 12000.0
     assert values["exact_bill"] == 80000.0
     assert values["customer_facing_permission"] is False
+
+
+def test_handbook_explains_peak_dispatch_and_finance_provenance() -> None:
+    source_tariff_replay_sha256 = "e" * 64
+    payload = _direct_handbook(
+        feasibility_state={"status": "ready", "result": {"coverage": {}}},
+        tariff_replay_state={"status": "ready", "result": {"scenarios": []}},
+        annual_financial_state={
+            "status": "ready",
+            "result": {
+                "source_tariff_replay_sha256": source_tariff_replay_sha256,
+                "assumptions": {},
+                "solutions": [],
+            },
+        },
+    )
+    modules = {item["module_id"]: item for item in payload["modules"]}
+    scenario = modules["scenario_analysis"]
+    finance = modules["finance_analysis"]
+
+    scenario_calculations = {
+        item["calculation_id"]: item for item in scenario["calculations"]
+    }
+    technical_target = scenario_calculations[
+        "scenario.pre_tariff_peak_target"
+    ]
+    assert "active-power stress test" in technical_target["description"]
+    assert "upper bound, not an equality" in technical_target["description"]
+    assert "approved_demand_rate[d] > 0" in scenario_calculations[
+        "scenario.optimizer_objective"
+    ]["formula"]
+    assert "zero-rate demand component is omitted" in scenario_calculations[
+        "scenario.optimizer_objective"
+    ]["description"]
+    assert "does not require every interval to equal the ceiling" in (
+        scenario_calculations["scenario.demand_peak"]["description"]
+    )
+    assert any(
+        "technical active-kW envelope" in boundary
+        for boundary in scenario["boundaries"]
+    )
+
+    finance_parameters = {
+        item["parameter_id"]: item for item in finance["parameters"]
+    }
+    provenance = finance_parameters[
+        "finance.provenance.source_tariff_replay_sha256"
+    ]
+    assert provenance["value"] == source_tariff_replay_sha256
+    assert provenance["editable"] is False
+    assert provenance["active_in_current_model"] is True
+
+    finance_calculations = {
+        item["calculation_id"]: item for item in finance["calculations"]
+    }
+    provenance_calculation = finance_calculations[
+        "finance.tariff_replay_provenance"
+    ]
+    assert "strictly consumes" in provenance_calculation["description"]
+    assert "source_tariff_replay_sha256" in provenance_calculation["formula"]
+    first_year_value = finance_calculations["finance.first_year_value"]
+    assert "optimized_post_dispatch_annual_cost" in first_year_value["formula"]
+    assert "pre-tariff technical peak-day result" in first_year_value[
+        "description"
+    ]
+    tariff_model = next(
+        item for item in finance["models"]
+        if item["model_id"] == "finance.tariff_replay"
+    )
+    assert any(
+        "zero rate produces zero demand-charge saving" in constraint
+        for constraint in tariff_model["constraints"]
+    )
+    assert any(
+        "bound to the exact saved tariff replay" in boundary
+        for boundary in finance["boundaries"]
+    )

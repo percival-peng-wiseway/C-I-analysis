@@ -130,12 +130,13 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
-function renderReplay(client = createCiQueryClient()) {
+function renderReplay(client = createCiQueryClient(), onConfigureTariff = vi.fn()) {
   return {
     client,
+    onConfigureTariff,
     ...render(
       <QueryClientProvider client={client}>
-        <CiTariffReplay onConfigureRebates={vi.fn()} onConfigureTariff={vi.fn()} project={project as never} />
+        <CiTariffReplay onConfigureRebates={vi.fn()} onConfigureTariff={onConfigureTariff} project={project as never} />
       </QueryClientProvider>,
     ),
   };
@@ -201,6 +202,68 @@ beforeEach(() => {
 afterEach(() => { cleanup(); window.sessionStorage.clear(); });
 
 describe("Finance analysis runner", () => {
+  it("explains zero kVA demand-rate impact when a saved solution has battery or reactive control", async () => {
+    const user = userEvent.setup();
+    const onConfigureTariff = vi.fn();
+    mocks.fetchDesign.mockResolvedValue({
+      ...design,
+      candidates: design.candidates.map((candidate, index) => ({
+        ...candidate,
+        reactive_support_enabled: index === 0,
+        reactive_support_max_kvar: index === 0 ? 82.5 : 0,
+      })),
+    });
+    mocks.fetchTariffProfile.mockResolvedValue({
+      status: "approved",
+      profile: {
+        display_label: "Approved zero-demand tariff",
+        rates: {
+          rolling_demand_aud_per_kva_month: 0,
+          incentive_demand_aud_per_kva_month: 0,
+        },
+      },
+      suggested_profile: null,
+      blockers: [],
+    });
+
+    renderReplay(createCiQueryClient(), onConfigureTariff);
+
+    const notice = await screen.findByRole("region", { name: "Demand optimisation tariff impact" });
+    expect(notice.textContent).toContain("technical Scenario Analysis may still show a battery peak-shaving plateau");
+    expect(notice.textContent).toContain("neither effect changes the modelled bill or NPV");
+    await user.click(screen.getByRole("button", { name: "Review demand rates in Evidence" }));
+    expect(onConfigureTariff).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show the zero demand-rate warning for PV-only solutions without reactive support", async () => {
+    mocks.fetchDesign.mockResolvedValue({
+      ...design,
+      candidates: design.candidates.map((candidate) => ({
+        ...candidate,
+        nominal_capacity_kwh: 0,
+        reactive_support_enabled: false,
+        reactive_support_max_kvar: 0,
+      })),
+    });
+    mocks.fetchTariffProfile.mockResolvedValue({
+      status: "approved",
+      profile: {
+        display_label: "Approved zero-demand tariff",
+        rates: {
+          rolling_demand_aud_per_kva_month: 0,
+          incentive_demand_aud_per_kva_month: 0,
+        },
+      },
+      suggested_profile: null,
+      blockers: [],
+    });
+
+    renderReplay();
+
+    await screen.findByRole("button", { name: "Start analysis" });
+    expect(screen.queryByRole("region", { name: "Demand optimisation tariff impact" })).toBeNull();
+  });
+
   it("runs only the Solution Generator selection when Finance has no prior result", async () => {
     const user = userEvent.setup();
     saveCiSolutionWorkspaceDraft(project.project_id, {
@@ -268,6 +331,46 @@ describe("Finance analysis runner", () => {
     await Promise.resolve();
   });
 
+  it("removes an older Finance result before caching a replacement tariff replay", async () => {
+    const user = userEvent.setup();
+    const financeGate = deferred<never>();
+    const previousFinance = {
+      contract_version: "ci_project_annual_financial_state_v1",
+      status: "ready",
+      saved_at: "2026-09-04T00:00:00Z",
+      stale_reasons: [],
+      result: {
+        assumptions: { price_source: "analyst_entered_total_solution_price" },
+        solutions: [
+          { scenario_id: "case-1", upfront_cost_aud_ex_gst: 200000 },
+          { scenario_id: "case-2", upfront_cost_aud_ex_gst: 210000 },
+        ],
+      },
+    };
+    mocks.fetchFinance.mockResolvedValue(previousFinance);
+    mocks.runFeasibility.mockResolvedValue({});
+    mocks.runTariffReplay.mockResolvedValue({
+      scenarios: [{ scenario_id: "case-1", authored_inputs: { reactive_support_enabled: false } }],
+    });
+    mocks.compareFinance.mockReturnValue(financeGate.promise);
+    const view = renderReplay();
+
+    const start = await screen.findByRole("button", { name: "Start analysis" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    await user.click(start);
+    await waitFor(() => expect(mocks.compareFinance).toHaveBeenCalledTimes(1));
+
+    expect(view.client.getQueryData(["finance", "project-1"])).toEqual(notSavedFinance);
+    expect(view.client.getQueryData(["tariff-replay", "project-1"])).toMatchObject({
+      status: "ready",
+      result: { scenarios: [{ scenario_id: "case-1", authored_inputs: { reactive_support_enabled: false } }] },
+    });
+
+    view.unmount();
+    financeGate.reject(new Error("Synthetic stop."));
+    await Promise.resolve();
+  });
+
   it("keeps checkpoint progress visible after failure and refreshes persisted checkpoint queries", async () => {
     const user = userEvent.setup();
     mocks.runFeasibility.mockImplementation(async (_projectId, _fetcher, _signal, _scenarioIds, options) => {
@@ -285,6 +388,7 @@ describe("Finance analysis runner", () => {
     await waitFor(() => {
       expect(mocks.fetchFeasibility.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(mocks.fetchTariffReplay.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(mocks.fetchFinance.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
   });
 

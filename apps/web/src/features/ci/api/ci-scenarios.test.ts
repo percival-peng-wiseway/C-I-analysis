@@ -52,6 +52,7 @@ const reviewProjection = (battery: boolean, index = 0) => ({
 
 const physicalResultFor = (inputs: CiScenarioInput[]) => ({
   contract_version: "ci_physical_scenario_review_v6",
+  calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
   analysis_status: "ready",
   analysis_mode: "evidence_limited_internal_review",
   customer_facing_permission: false,
@@ -83,9 +84,11 @@ const physicalResultFor = (inputs: CiScenarioInput[]) => ({
       first_year_value_inc_gst_aud: 1100,
       customer_facing_permission: false,
     },
+    planned_demand_limits_kva: [{ component_id: "annual_rolling_kva", billing_period_id: null, rate_aud_per_kva: 12, planner_limit_kva: 1 }],
     selected_monthly_thresholds_kw: Array(12).fill(1),
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2",
+      calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1",
       snapshot_sha256: `${index}`.padStart(64, "0"),
       algorithm_id: "ci_peak_shaving_rolling_replay_v2",
       customer_facing_permission: false,
@@ -373,7 +376,7 @@ describe("analyzeCiPhysicalScenarios", () => {
     expect(progress).toEqual([[1, 5], [3, 5], [5, 5]]);
   });
 
-  it("checkpoints one tariff scenario per request by default", async () => {
+  it("checkpoints up to three tariff scenarios per request by default", async () => {
     const requested = ["a", "b"].map((scenarioId) => ({
       ...scenarios[0],
       scenario_id: scenarioId,
@@ -407,7 +410,7 @@ describe("analyzeCiPhysicalScenarios", () => {
       requested.map((scenario) => scenario.scenario_id),
     );
 
-    expect(postedBatches).toEqual([["a"], ["b"]]);
+    expect(postedBatches).toEqual([["a", "b"]]);
   });
 
   it("uses the same read-only recovery after a non-abort network disconnect", async () => {
@@ -516,6 +519,7 @@ describe("analyzeCiPhysicalScenarios", () => {
   it("rejects a contract that grants recommendation permission", async () => {
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_physical_scenario_review_v6",
+      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
       analysis_status: "ready",
       analysis_mode: "evidence_limited_internal_review",
       customer_facing_permission: false,
@@ -538,6 +542,7 @@ describe("analyzeCiPhysicalScenarios", () => {
     };
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_physical_scenario_review_v6",
+      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
       analysis_status: "ready",
       analysis_mode: "evidence_limited_internal_review",
       customer_facing_permission: false,
@@ -566,6 +571,7 @@ describe("analyzeCiPhysicalScenarios", () => {
           first_year_value_inc_gst_aud: 1.1,
           customer_facing_permission: false,
         },
+        planned_demand_limits_kva: [],
         selected_monthly_thresholds_kw: Array(12).fill(null),
         optimizer_run_snapshot: null,
         optimizer_audit_projection: null,

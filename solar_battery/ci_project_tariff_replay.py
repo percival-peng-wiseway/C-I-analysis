@@ -12,7 +12,10 @@ from solar_battery.ci_project_feasibility import (
     design_candidates_sha256,
 )
 from solar_battery.ci_projects import CiProjectError, require_ci_project
-from solar_battery.ci_scenario_analysis import rank_ci_physical_scenario_results
+from solar_battery.ci_scenario_analysis import (
+    CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
+    rank_ci_physical_scenario_results,
+)
 from solar_battery.durable_cockpit.identity import LocalActorContext
 from solar_battery.durable_cockpit.orm import (
     CiProjectEvidenceModel,
@@ -246,7 +249,10 @@ def _row_matches_checkpoint_snapshot(
     expected_tariff_profile_sha256: str,
 ) -> bool:
     return (
-        row.interval_sha256 == expected_interval_sha256
+        row.result_contract_version == CI_TARIFF_REPLAY_RESULT_CONTRACT_VERSION
+        and row.result_json.get("calculation_revision")
+        == CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
+        and row.interval_sha256 == expected_interval_sha256
         and row.design_candidates_sha256 == expected_design_candidates_sha256
         and row.tariff_profile_sha256 == expected_tariff_profile_sha256
     )
@@ -337,6 +343,11 @@ def ci_tariff_replay_state(
         != CI_TARIFF_REPLAY_RESULT_CONTRACT_VERSION
     ):
         stale_reasons.append("result_contract_unsupported")
+    if (
+        row.result_json.get("calculation_revision")
+        != CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
+    ):
+        stale_reasons.append("result_calculation_revision_unsupported")
     try:
         result_integrity_ok = canonical_sha256(row.result_json) == row.result_sha256
     except (TypeError, ValueError):
@@ -396,6 +407,8 @@ def _validate_result_for_storage(
     )
     if (
         result.get("contract_version") != CI_TARIFF_REPLAY_RESULT_CONTRACT_VERSION
+        or result.get("calculation_revision")
+        != CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
         or result.get("analysis_status") != "ready"
         or result.get("analysis_mode") != "evidence_limited_internal_review"
         or result.get("customer_facing_permission") is not False

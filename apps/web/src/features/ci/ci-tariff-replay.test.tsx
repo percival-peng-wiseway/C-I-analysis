@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CiPhysicalScenarioResult } from "./api/ci-scenarios";
+import type { CiDesignFeasibilityResult } from "./api/ci-design-feasibility";
 import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiSavedAnnualFinancialState, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
 import { CiTariffReplayResult, resolveCiFinanceAnalysisSelection } from "./ci-tariff-replay";
 
@@ -15,7 +16,14 @@ const result = {
     scenario_id: "case-1",
     label: "Case 1",
     physical_review_rank: 1,
-    authored_inputs: { pv_capacity_kwp_dc: 141.123456789, nominal_capacity_kwh: 300.987654321, pv_inverter_capacity_kw_ac: 250.111222333 },
+    authored_inputs: {
+      pv_capacity_kwp_dc: 141.123456789,
+      nominal_capacity_kwh: 300.987654321,
+      pv_inverter_capacity_kw_ac: 250.111222333,
+      reactive_support_enabled: true,
+      reactive_support_max_kvar: 82.5,
+      shared_inverter_apparent_power_limit_kva: 275,
+    },
     annual_tariff_value: {
       period_start: "2025-01-01", period_end: "2025-12-31",
       rate_basis: "active_bill_rates_with_evidence_bound_seasonal_incentive",
@@ -26,13 +34,22 @@ const result = {
       scenario_categories_ex_gst_aud: { energy_charges: 48000, demand_charges: 35000 },
       category_savings_ex_gst_aud: { energy_charges: 22000, demand_charges: 15000 },
     },
-    post_dispatch: { raw_rolling_demand_kva: 250, chargeable_rolling_demand_kva: 250, billing_period_max_kva: 238, billing_period_max_kw: 220, billing_period_peak_effect: "reduction", billing_period_peak_change_kw: 55 },
+    post_dispatch: {
+      raw_rolling_demand_kva: 250,
+      chargeable_rolling_demand_kva: 250,
+      billing_period_max_kva: 238,
+      billing_period_max_kw: 220,
+      billing_period_peak_effect: "reduction",
+      billing_period_peak_change_kw: 55,
+      maximum_reactive_support_kvar: 47.625,
+      maximum_post_grid_reactive_kvar: 31.375,
+    },
     selected_monthly_thresholds_kw: [210, 205, 208, 200, 195, 190, 188, 192, 198, 202, 207, 211],
     dispatch_review_projection: {
       peak_local_date: "2025-02-17",
       points: [
-        { local_time_label: "16:00", baseline_kva: 250, post_dispatch_kva: 220 },
-        { local_time_label: "16:15", baseline_kva: 300, post_dispatch_kva: 238 },
+        { local_time_label: "16:00", baseline_kva: 250, post_dispatch_kva: 220, site_reactive_import_kvar: 65, inverter_reactive_support_kvar: 33.625, post_grid_reactive_kvar: 31.375 },
+        { local_time_label: "16:15", baseline_kva: 300, post_dispatch_kva: 238, site_reactive_import_kvar: 80, inverter_reactive_support_kvar: 47.625, post_grid_reactive_kvar: 32.375 },
       ],
     },
   }],
@@ -47,19 +64,42 @@ const comparisonResult = {
       scenario_id: "case-2",
       label: "Case 2",
       physical_review_rank: 2,
-      authored_inputs: { pv_capacity_kwp_dc: 130, nominal_capacity_kwh: 250, pv_inverter_capacity_kw_ac: 200 },
+      authored_inputs: {
+        pv_capacity_kwp_dc: 130,
+        nominal_capacity_kwh: 250,
+        pv_inverter_capacity_kw_ac: 200,
+        reactive_support_enabled: false,
+        reactive_support_max_kvar: 0,
+        shared_inverter_apparent_power_limit_kva: null,
+      },
       annual_tariff_value: {
         ...result.scenarios[0]!.annual_tariff_value,
-        scenario_cost_ex_gst_aud: 89000,
-        first_year_value_ex_gst_aud: 31000,
+        scenario_cost_ex_gst_aud: 88999.75,
+        first_year_value_ex_gst_aud: 31000.25,
       },
       post_dispatch: {
         ...result.scenarios[0]!.post_dispatch,
-        raw_rolling_demand_kva: 270,
+        raw_rolling_demand_kva: 270.125,
+        maximum_reactive_support_kvar: 0,
+        maximum_post_grid_reactive_kvar: 80.125,
       },
     },
   ],
 } as CiPhysicalScenarioResult;
+
+const feasibilityResult = {
+  scenarios: comparisonResult.scenarios.map((scenario) => ({
+    scenario_id: scenario.scenario_id,
+    peak_day: {
+      date: "2024-12-16",
+      sampled_target_kw: 200,
+      points: [
+        { time_label: "16:00", baseline_kw: 300, pv_only_import_kw: 250, pv_battery_import_kw: 200, battery_discharge_kw: 50 },
+        { time_label: "16:15", baseline_kw: 305, pv_only_import_kw: 255, pv_battery_import_kw: 200, battery_discharge_kw: 55 },
+      ],
+    },
+  })),
+} as unknown as CiDesignFeasibilityResult;
 
 function rebateCalculation(scenarioId: string): CiScenarioRebateCalculation {
   return {
@@ -213,24 +253,72 @@ describe("Tariff replay result workspace", () => {
     } as never, savedFinance)).toThrow("saved quotation selection no longer matches the current solution design");
   });
 
+  it("fails closed when Finance and tariff replay contain different scenario IDs", () => {
+    render(<CiTariffReplayResult
+      evidenceCode="LLVTOU"
+      financeResult={{
+        ...financeResult,
+        solutions: financeResult.solutions.map((solution, index) => (
+          index === 0 ? { ...solution, scenario_id: "stale-case" } : solution
+        )),
+      }}
+      profileLabel="Approved LLVT profile"
+      result={comparisonResult}
+    />);
+
+    expect(screen.getByRole("alert").textContent).toContain("does not match the current tariff replay");
+    expect(screen.queryByRole("heading", { name: "Open a solution to inspect the full analysis" })).toBeNull();
+  });
+
+  it("fails closed when paired Finance values came from an older tariff replay", () => {
+    render(<CiTariffReplayResult
+      evidenceCode="LLVTOU"
+      financeResult={{
+        ...financeResult,
+        solutions: financeResult.solutions.map((solution, index) => (
+          index === 0
+            ? { ...solution, first_year_value_aud_ex_gst: solution.first_year_value_aud_ex_gst + 1 }
+            : solution
+        )),
+      }}
+      profileLabel="Approved LLVT profile"
+      result={comparisonResult}
+    />);
+
+    expect(screen.getByRole("alert").textContent).toContain("Finance values do not match");
+    expect(screen.queryByRole("heading", { name: "Open a solution to inspect the full analysis" })).toBeNull();
+  });
+
   it("shows selectable evidence-bound bill, charge, demand and interval analysis", async () => {
     const user = userEvent.setup();
-    render(<CiTariffReplayResult evidenceCode="LLVTOU" financeResult={financeResult} profileLabel="Approved LLVT profile" result={comparisonResult} />);
+    render(<CiTariffReplayResult evidenceCode="LLVTOU" feasibilityResult={feasibilityResult} financeResult={financeResult} profileLabel="Approved LLVT profile" result={comparisonResult} />);
 
     expect(screen.getByRole("heading", { name: "NPV and payback across all solutions" })).toBeTruthy();
     expect(screen.queryByLabelText("Comparison metric")).toBeNull();
     expect(screen.getByRole("heading", { name: "Open a solution to inspect the full analysis" })).toBeTruthy();
+    expect(screen.getByText("Reactive On · 82.5 kvar cap")).toBeTruthy();
+    expect(screen.getByText("Reactive Off")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /^View details for solution 1:/ }));
     expect(screen.getByRole("heading", { name: "141.123456789 kWp PV · 300.987654321 kWh battery · 250.111222333 kW hybrid inverter / PCS" })).toBeTruthy();
     expect(screen.getAllByText("$83,000").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("$37,000").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("$37,000.00").length).toBeGreaterThan(0);
     expect(screen.getByText("Solar PV")).toBeTruthy();
     expect(screen.getByText("Hybrid inverter / PCS")).toBeTruthy();
+    const reactiveDiagnostics = screen.getByRole("region", { name: "Reactive support diagnostics" });
+    expect(within(reactiveDiagnostics).getByText("On")).toBeTruthy();
+    expect(within(reactiveDiagnostics).getByText("82.5 kvar")).toBeTruthy();
+    expect(within(reactiveDiagnostics).getByText("47.625 kvar")).toBeTruthy();
+    expect(within(reactiveDiagnostics).getByText("31.375 kvar")).toBeTruthy();
 
     await user.selectOptions(screen.getByRole("combobox", { name: "Select solution analysis" }), "case-2");
     expect(screen.getByRole("heading", { name: "130 kWp PV · 250 kWh battery · 200 kW hybrid inverter / PCS" })).toBeTruthy();
-    expect(screen.getAllByText("$31,000").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("$31,000.25").length).toBeGreaterThan(0);
+    const disabledReactiveDiagnostics = screen.getByRole("region", { name: "Reactive support diagnostics" });
+    expect(within(disabledReactiveDiagnostics).getByText("Off")).toBeTruthy();
+    expect(within(disabledReactiveDiagnostics).getAllByText("0 kvar")).toHaveLength(2);
+    expect(within(disabledReactiveDiagnostics).getByText("80.125 kvar")).toBeTruthy();
+    expect(screen.getByText("49.875 kVA")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /^Financial$/ }));
     expect(screen.getByRole("heading", { name: "Cost composition" })).toBeTruthy();
@@ -249,13 +337,17 @@ describe("Tariff replay result workspace", () => {
     await user.click(screen.getByRole("button", { name: "Bills" }));
     expect(screen.getByRole("heading", { name: "Bill before & after" })).toBeTruthy();
     expect(screen.getByText("Demand charges")).toBeTruthy();
-    expect(screen.getByText("$15,000 saved")).toBeTruthy();
+    expect(screen.getByText("$15,000.00 saved")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Demand" }));
-    expect(screen.getByRole("heading", { name: "Selected monthly demand thresholds" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Optimized monthly demand ceilings" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Intervals" }));
+    expect(screen.getByRole("img", { name: "Scenario Analysis active-power peak shaving replay" })).toBeTruthy();
+    expect(screen.getByText("2 intervals at target")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Tariff peak · kVA" }));
     expect(screen.getByRole("img", { name: "Tariff interval demand replay" })).toBeTruthy();
+    expect(screen.getByText("Battery idle on this day")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Assumptions" }));
     expect(screen.getByText("LLVTOU")).toBeTruthy();

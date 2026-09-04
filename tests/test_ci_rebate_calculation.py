@@ -377,6 +377,7 @@ def test_no_approved_profile_is_zero_and_manual_quote_is_never_reduced() -> None
     }
     tariff_result = {
         "contract_version": "ci_physical_scenario_review_v6",
+        "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
         "analysis_status": "ready",
         "customer_facing_permission": False,
         "recommendation_permitted": False,

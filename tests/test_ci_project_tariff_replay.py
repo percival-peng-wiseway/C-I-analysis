@@ -5,7 +5,10 @@ from uuid import UUID
 
 import pytest
 
-from solar_battery.ci_project_feasibility import design_candidates_sha256
+from solar_battery.ci_project_feasibility import (
+    canonical_sha256,
+    design_candidates_sha256,
+)
 from solar_battery.ci_project_tariff_replay import (
     ci_tariff_replay_state,
     record_ci_tariff_replay_result,
@@ -67,6 +70,7 @@ def _scenario_result(
 def _result(*scenarios: dict[str, object]) -> dict[str, object]:
     return {
         "contract_version": "ci_physical_scenario_review_v6",
+        "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,
@@ -326,3 +330,70 @@ def test_checkpoint_merge_resets_old_snapshot_but_rejects_inflight_change_and_co
         assert row.design_candidates_sha256 == design_candidates_sha256(
             changed_candidates
         )
+
+
+def test_saved_replay_without_current_calculation_revision_is_stale(
+    tmp_path,
+) -> None:
+    session_factory = create_sqlite_session_factory(
+        sqlite_url_for_path(tmp_path / "tariff-old-calculation.sqlite3")
+    )
+    with session_factory.begin() as session:
+        project_id = _seed_project(session)
+        _record(
+            session,
+            project_id=project_id,
+            result=_result(
+                _scenario_result(
+                    "scenario-a",
+                    raw_demand_kva=210.0,
+                    pv_kwp=100.0,
+                    battery_kwh=200.0,
+                    scenario_cost_aud=800.0,
+                )
+            ),
+            scenario_ids=["scenario-a"],
+        )
+        row = session.get(CiProjectTariffReplayResultModel, project_id)
+        assert row is not None
+        old_result = dict(row.result_json)
+        old_result.pop("calculation_revision")
+        row.result_json = old_result
+        row.result_sha256 = canonical_sha256(old_result)
+
+    with session_factory() as session:
+        state = ci_tariff_replay_state(
+            session,
+            project_id=project_id,
+            actor=local_actor(),
+            active_tariff_profile=TARIFF_PROFILE,
+        )
+
+    assert state["status"] == "stale"
+    assert state["result"] is None
+    assert state["stale_reasons"] == [
+        "result_calculation_revision_unsupported"
+    ]
+
+    replacement = _scenario_result(
+        "scenario-b",
+        raw_demand_kva=180.0,
+        pv_kwp=120.0,
+        battery_kwh=300.0,
+        scenario_cost_aud=700.0,
+    )
+    with session_factory.begin() as session:
+        refreshed = _record(
+            session,
+            project_id=project_id,
+            result=_result(replacement),
+            scenario_ids=["scenario-b"],
+        )
+
+    assert refreshed["status"] == "ready"
+    assert refreshed["result"]["calculation_revision"] == (
+        "ci_physical_scenario_planner_limits_primal_simplex_v1"
+    )
+    assert [
+        item["scenario_id"] for item in refreshed["result"]["scenarios"]
+    ] == ["scenario-b"]

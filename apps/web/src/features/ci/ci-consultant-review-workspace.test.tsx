@@ -75,6 +75,7 @@ const analysis: CiAnalysisResult = {
 
 const scenarioResult: CiPhysicalScenarioResult = {
   contract_version: "ci_physical_scenario_review_v6",
+  calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
   analysis_status: "ready",
   analysis_mode: "evidence_limited_internal_review",
   customer_facing_permission: false,
@@ -170,9 +171,11 @@ const scenarioResult: CiPhysicalScenarioResult = {
       category_savings_ex_gst_aud: { energy: 40000 },
       customer_facing_permission: false,
     },
+    planned_demand_limits_kva: [{ component_id: "annual_rolling_kva", billing_period_id: null, rate_aud_per_kva: 12, planner_limit_kva: 175 }],
     selected_monthly_thresholds_kw: Array(12).fill(175),
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2",
+      calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1",
       snapshot_sha256: "a".repeat(64),
       algorithm_id: "ci_peak_shaving_rolling_replay_v2",
       customer_facing_permission: false,

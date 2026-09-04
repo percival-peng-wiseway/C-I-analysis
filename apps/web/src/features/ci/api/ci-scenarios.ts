@@ -31,6 +31,7 @@ export interface CiScenarioInput {
 
 export interface CiPhysicalScenarioResult {
   contract_version: "ci_physical_scenario_review_v6";
+  calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1";
   analysis_status: "ready";
   analysis_mode: "evidence_limited_internal_review";
   customer_facing_permission: false;
@@ -83,9 +84,16 @@ export interface CiPhysicalScenarioResult {
       category_savings_ex_gst_aud: Record<string, number>;
       customer_facing_permission: false;
     };
+    planned_demand_limits_kva: Array<{
+      component_id: string;
+      billing_period_id: string | null;
+      rate_aud_per_kva: number;
+      planner_limit_kva: number | null;
+    }>;
     selected_monthly_thresholds_kw: Array<number | null>;
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2";
+      calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1";
       snapshot_sha256: string;
       algorithm_id: "ci_peak_shaving_rolling_replay_v2";
       customer_facing_permission: false;
@@ -163,6 +171,7 @@ export interface CiSavedTariffReplayState {
     | "interval_evidence_changed"
     | "tariff_profile_changed"
     | "result_contract_unsupported"
+    | "result_calculation_revision_unsupported"
     | "result_integrity_failed"
   >;
   result: CiPhysicalScenarioResult | null;
@@ -178,7 +187,7 @@ export interface CiTariffReplayRunOptions {
   onProgress?: (progress: CiTariffReplayProgress) => void;
 }
 
-const DEFAULT_TARIFF_REPLAY_BATCH_SIZE = 1;
+const DEFAULT_TARIFF_REPLAY_BATCH_SIZE = 3;
 
 export type CiThreeCaseId = "no_system" | "pv_only" | "pv_battery";
 
@@ -566,6 +575,7 @@ export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenar
   const payload = value as CiPhysicalScenarioResult;
   if (
     payload.contract_version !== "ci_physical_scenario_review_v6" ||
+    payload.calculation_revision !== "ci_physical_scenario_planner_limits_primal_simplex_v1" ||
     payload.analysis_status !== "ready" ||
     payload.analysis_mode !== "evidence_limited_internal_review" ||
     payload.customer_facing_permission !== false ||
@@ -577,6 +587,19 @@ export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenar
     payload.scenarios.length > 200 ||
     payload.scenarios.some((item) =>
       item.selected_monthly_thresholds_kw.length !== 12 ||
+      item.selected_monthly_thresholds_kw.some((threshold) =>
+        threshold !== null && (!Number.isFinite(threshold) || threshold < 0)
+      ) ||
+      !Array.isArray(item.planned_demand_limits_kva) ||
+      item.planned_demand_limits_kva.some((limit) =>
+        !limit.component_id ||
+        (limit.billing_period_id !== null && !limit.billing_period_id) ||
+        !Number.isFinite(limit.rate_aud_per_kva) ||
+        limit.rate_aud_per_kva < 0 ||
+        (limit.planner_limit_kva !== null &&
+          (!Number.isFinite(limit.planner_limit_kva) || limit.planner_limit_kva < 0)) ||
+        (limit.rate_aud_per_kva === 0 && limit.planner_limit_kva !== null)
+      ) ||
       !hasSafeScenarioAuthority(item) ||
       !hasSafeDispatchReviewProjection(item) ||
       !hasSafeBillingProjection(item) ||
@@ -781,6 +804,7 @@ function hasSafeScenarioAuthority(
   }
   return item.post_dispatch?.authority_source === "ci_peak_shaving_rolling_replay_v2" &&
     item.optimizer_run_snapshot?.contract_version === "ci_optimizer_run_snapshot_v2" &&
+    item.optimizer_run_snapshot.calculation_revision === "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1" &&
     item.optimizer_run_snapshot.customer_facing_permission === false &&
     item.optimizer_run_snapshot.recommendation_permitted === false &&
     item.optimizer_audit_projection?.contract_version === "ci_optimizer_audit_projection_v2" &&

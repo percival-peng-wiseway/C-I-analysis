@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
+import logging
 import math
+import multiprocessing
+import os
+import pickle
+from threading import Lock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -33,17 +40,29 @@ from solar_battery.solar_profile import build_pv_profile
 
 
 CI_PHYSICAL_SCENARIO_CONTRACT_VERSION = "ci_physical_scenario_review_v6"
+CI_PHYSICAL_SCENARIO_CALCULATION_REVISION = (
+    "ci_physical_scenario_planner_limits_primal_simplex_v1"
+)
 CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
     "ci_dispatch_review_projection_v2"
 )
 CI_THREE_CASE_COMPARISON_CONTRACT_VERSION = "ci_three_case_peak_day_comparison_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CONTRACT_VERSION = "ci_optimizer_run_snapshot_v2"
+CI_OPTIMIZER_RUN_SNAPSHOT_CALCULATION_REVISION = (
+    "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1"
+)
 CI_OPTIMIZER_AUDIT_PROJECTION_CONTRACT_VERSION = "ci_optimizer_audit_projection_v2"
 CI_PV_ONLY_EXACT_ID = "ci_pv_only_shared_pq_v1"
 MIN_SOLUTIONS = 1
 MAX_SOLUTIONS = 200
 MAX_BATTERY_SYSTEMS = 15
 MAX_PV_SYSTEMS = 20
+DEFAULT_SCENARIO_PROCESS_WORKERS = 1
+MAX_SCENARIO_PROCESS_WORKERS = 3
+
+_LOGGER = logging.getLogger(__name__)
+_SCENARIO_PROCESS_POOL_LOCK = Lock()
+_SCENARIO_PROCESS_POOL_DISABLED = False
 
 _SAFE_MESSAGES = {
     "scenario_contract_invalid": (
@@ -69,6 +88,21 @@ class CiScenarioAnalysisError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(_SAFE_MESSAGES[code])
         self.code = code
+
+    def __reduce__(self):
+        return (self.__class__, (self.code,))
+
+
+class _ScenarioProcessPoolUnavailable(RuntimeError):
+    pass
+
+
+class _ScenarioProcessPoolBroken(RuntimeError):
+    pass
+
+
+class _ScenarioProcessExecutionFailed(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -129,19 +163,297 @@ def analyze_ci_physical_scenarios(
     annual_tariff_baseline_cache: dict[str, object] = {}
     pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
 
-    results = [
-        _run_scenario(
-            item,
+    results = _execute_authored_scenarios(
+        authored,
+        periods,
+        interval_evidence,
+        parsed["streams"],
+        profile,
+        annual_tariff_baseline_cache,
+        pv_generation_cache,
+    )
+    return _physical_scenario_result(tariff_result=tariff_result, results=results)
+
+
+def _execute_authored_scenarios(
+    authored: tuple[_Scenario, ...],
+    periods: tuple[PeakShavingPeriodInput, ...],
+    interval_evidence: dict[datetime, dict[str, object]],
+    streams: dict[str, dict[date, list[float]]],
+    profile: dict[str, Any],
+    annual_tariff_baseline_cache: dict[str, object],
+    pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]],
+) -> list[dict[str, object]]:
+    """Run only the requested scenarios, with bounded process isolation.
+
+    HiGHS has a process-global scheduler.  Independent spawned processes keep
+    one deterministic solver thread per process while allowing standard-4 to
+    solve up to three battery scenarios concurrently.  PV-only rows remain in
+    the coordinator because they do not invoke HiGHS.
+    """
+
+    workers = _configured_scenario_process_workers()
+    indexed_battery = tuple(
+        (index, scenario)
+        for index, scenario in enumerate(authored)
+        if scenario.nominal_capacity_kwh > 0.0
+    )
+    if (
+        workers <= 1
+        or len(indexed_battery) <= 1
+        or _scenario_process_pool_disabled()
+    ):
+        return [
+            _run_scenario(
+                item,
+                periods,
+                interval_evidence,
+                streams,
+                profile,
+                annual_tariff_baseline_cache,
+                pv_generation_cache,
+            )
+            for item in authored
+        ]
+
+    results_by_index: dict[int, dict[str, object]] = {}
+    for index, scenario in enumerate(authored):
+        if scenario.nominal_capacity_kwh == 0.0:
+            results_by_index[index] = _run_scenario(
+                scenario,
+                periods,
+                interval_evidence,
+                streams,
+                profile,
+                annual_tariff_baseline_cache,
+                pv_generation_cache,
+            )
+
+    try:
+        parallel_results = _execute_battery_scenarios_in_processes(
+            indexed_battery,
             periods,
             interval_evidence,
-            parsed["streams"],
+            streams,
             profile,
-            annual_tariff_baseline_cache,
-            pv_generation_cache,
+            worker_count=min(workers, len(indexed_battery)),
         )
-        for item in authored
+    except _ScenarioProcessPoolUnavailable as exc:
+        # Some container runtimes can disallow process creation. Preserve the
+        # exact legacy serial calculation and keep the container useful after
+        # the capability failure instead of returning 5xx for every batch.
+        _LOGGER.warning(
+            "C&I scenario process pool unavailable; using serial execution",
+            exc_info=True,
+        )
+        parallel_results = _execute_battery_scenarios_serially(
+            indexed_battery,
+            periods,
+            interval_evidence,
+            streams,
+            profile,
+        )
+    except _ScenarioProcessPoolBroken as exc:
+        # A native solver failure must not take down the API process. Discard
+        # every partial result and retry exactly once in a fresh isolated
+        # single-worker process before failing closed.
+        _LOGGER.warning(
+            "C&I scenario process pool unavailable; retrying in isolation",
+            exc_info=True,
+        )
+        try:
+            parallel_results = _execute_battery_scenarios_in_processes(
+                indexed_battery,
+                periods,
+                interval_evidence,
+                streams,
+                profile,
+                worker_count=1,
+            )
+        except _ScenarioProcessPoolUnavailable:
+            parallel_results = _execute_battery_scenarios_serially(
+                indexed_battery,
+                periods,
+                interval_evidence,
+                streams,
+                profile,
+            )
+        except (_ScenarioProcessPoolBroken, _ScenarioProcessExecutionFailed) as retry_exc:
+            raise CiScenarioAnalysisError("scenario_execution_failed") from retry_exc
+    except _ScenarioProcessExecutionFailed as exc:
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
+
+    expected_indexes = {index for index, _scenario in indexed_battery}
+    if set(parallel_results) != expected_indexes:
+        raise CiScenarioAnalysisError("scenario_execution_failed")
+    results_by_index.update(parallel_results)
+
+    return [results_by_index[index] for index in range(len(authored))]
+
+
+def _configured_scenario_process_workers() -> int:
+    value = os.getenv(
+        "CI_SCENARIO_PROCESS_WORKERS",
+        str(DEFAULT_SCENARIO_PROCESS_WORKERS),
+    )
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SCENARIO_PROCESS_WORKERS
+    if not 1 <= workers <= MAX_SCENARIO_PROCESS_WORKERS:
+        return DEFAULT_SCENARIO_PROCESS_WORKERS
+    return workers
+
+
+def _scenario_process_pool_disabled() -> bool:
+    with _SCENARIO_PROCESS_POOL_LOCK:
+        return _SCENARIO_PROCESS_POOL_DISABLED
+
+
+def _execute_battery_scenarios_serially(
+    indexed_scenarios: tuple[tuple[int, _Scenario], ...],
+    periods: tuple[PeakShavingPeriodInput, ...],
+    interval_evidence: dict[datetime, dict[str, object]],
+    streams: dict[str, dict[date, list[float]]],
+    profile: dict[str, Any],
+) -> dict[int, dict[str, object]]:
+    try:
+        return dict(
+            _execute_scenario_chunk(
+                indexed_scenarios,
+                periods,
+                interval_evidence,
+                streams,
+                profile,
+            )
+        )
+    except CiScenarioAnalysisError:
+        raise
+    except Exception as exc:
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
+
+
+def _execute_battery_scenarios_in_processes(
+    indexed_scenarios: tuple[tuple[int, _Scenario], ...],
+    periods: tuple[PeakShavingPeriodInput, ...],
+    interval_evidence: dict[datetime, dict[str, object]],
+    streams: dict[str, dict[date, list[float]]],
+    profile: dict[str, Any],
+    *,
+    worker_count: int,
+) -> dict[int, dict[str, object]]:
+    global _SCENARIO_PROCESS_POOL_DISABLED
+
+    chunks: list[list[tuple[int, _Scenario]]] = [
+        [] for _ in range(worker_count)
     ]
-    return _physical_scenario_result(tariff_result=tariff_result, results=results)
+    for offset, item in enumerate(indexed_scenarios):
+        chunks[offset % worker_count].append(item)
+
+    # ProcessPoolExecutor is created under one lock so concurrent API requests
+    # cannot multiply the configured CPU and memory ceiling inside one
+    # Cloudflare container.  Spawn avoids inheriting open DB/R2 connections.
+    with _SCENARIO_PROCESS_POOL_LOCK:
+        if _SCENARIO_PROCESS_POOL_DISABLED:
+            raise _ScenarioProcessPoolUnavailable(
+                "process execution was disabled after an earlier capability failure"
+            )
+        try:
+            executor = ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+        except (OSError, RuntimeError) as exc:
+            _SCENARIO_PROCESS_POOL_DISABLED = True
+            raise _ScenarioProcessPoolUnavailable(
+                "the process pool could not be created"
+            ) from exc
+
+        try:
+            with executor:
+                futures = []
+                for chunk in chunks:
+                    if not chunk:
+                        continue
+                    try:
+                        futures.append(
+                            executor.submit(
+                                _execute_scenario_chunk,
+                                tuple(chunk),
+                                periods,
+                                interval_evidence,
+                                streams,
+                                profile,
+                            )
+                        )
+                    except BrokenProcessPool as exc:
+                        raise _ScenarioProcessPoolBroken(
+                            "the process pool broke while scheduling work"
+                        ) from exc
+                    except (OSError, RuntimeError) as exc:
+                        _SCENARIO_PROCESS_POOL_DISABLED = True
+                        raise _ScenarioProcessPoolUnavailable(
+                            "the process pool could not schedule work"
+                        ) from exc
+
+                results: dict[int, dict[str, object]] = {}
+                for future in futures:
+                    try:
+                        rows = future.result()
+                    except CiScenarioAnalysisError:
+                        raise
+                    except BrokenProcessPool as exc:
+                        raise _ScenarioProcessPoolBroken(
+                            "a scenario process terminated unexpectedly"
+                        ) from exc
+                    except (pickle.PicklingError, EOFError, OSError) as exc:
+                        _SCENARIO_PROCESS_POOL_DISABLED = True
+                        raise _ScenarioProcessPoolUnavailable(
+                            "scenario inputs or outputs could not cross the process boundary"
+                        ) from exc
+                    except Exception as exc:
+                        raise _ScenarioProcessExecutionFailed(
+                            "a scenario process returned an unexpected failure"
+                        ) from exc
+                    results.update(rows)
+                return results
+        except (
+            CiScenarioAnalysisError,
+            _ScenarioProcessPoolUnavailable,
+            _ScenarioProcessPoolBroken,
+            _ScenarioProcessExecutionFailed,
+        ):
+            raise
+        except Exception as exc:
+            raise _ScenarioProcessExecutionFailed(
+                "the scenario process pool could not close cleanly"
+            ) from exc
+
+
+def _execute_scenario_chunk(
+    indexed_scenarios: tuple[tuple[int, _Scenario], ...],
+    periods: tuple[PeakShavingPeriodInput, ...],
+    interval_evidence: dict[datetime, dict[str, object]],
+    streams: dict[str, dict[date, list[float]]],
+    profile: dict[str, Any],
+) -> list[tuple[int, dict[str, object]]]:
+    annual_tariff_baseline_cache: dict[str, object] = {}
+    pv_generation_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
+    return [
+        (
+            index,
+            _run_scenario(
+                scenario,
+                periods,
+                interval_evidence,
+                streams,
+                profile,
+                annual_tariff_baseline_cache,
+                pv_generation_cache,
+            ),
+        )
+        for index, scenario in indexed_scenarios
+    ]
 
 
 def validate_ci_design_candidates(scenarios: object) -> dict[str, object]:
@@ -176,6 +488,7 @@ def _physical_scenario_result(
 
     return {
         "contract_version": CI_PHYSICAL_SCENARIO_CONTRACT_VERSION,
+        "calculation_revision": CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,
@@ -516,6 +829,7 @@ def _execute_scenario(
         dispatch = tuple(dispatch_rows)
         optimizer_snapshot = None
         optimizer_audit = None
+        planned_demand_limits_kva: list[dict[str, object]] = []
         selected_monthly_thresholds = [None] * len(periods)
     else:
         problem = _optimizer_problem(
@@ -566,7 +880,20 @@ def _execute_scenario(
             scenario,
             profile,
         )
-        selected_monthly_thresholds = [None] * len(periods)
+        planned_demand_limits_kva = _planned_demand_limits_kva(
+            problem,
+            rolling,
+            profile,
+        )
+        planner_limits_by_component = dict(
+            rolling.annual_planner_demand_limits
+        )
+        selected_monthly_thresholds = [
+            planner_limits_by_component.get(
+                f"incentive_kva:{period.period_id}"
+            )
+            for period in periods
+        ]
 
     rows: list[dict[str, object]] = []
     for row in dispatch:
@@ -708,6 +1035,7 @@ def _execute_scenario(
             profile,
             baseline_cache=annual_tariff_baseline_cache,
         ),
+        "planned_demand_limits_kva": planned_demand_limits_kva,
         "selected_monthly_thresholds_kw": selected_monthly_thresholds,
         "optimizer_run_snapshot": optimizer_snapshot,
         "optimizer_audit_projection": optimizer_audit,
@@ -1190,15 +1518,21 @@ def _optimizer_problem(
         for index, interval in enumerate(flat_intervals)
         if bool(evidence[interval.timestamp]["rolling_window"])
     )
-    demand_charges.append(
-        CiDemandCharge(
-            "annual_rolling_kva",
-            float(rates["rolling_demand_aud_per_kva_month"]) * 12,
-            rolling_indexes,
-            basis="kva",
-            minimum_chargeable=float(profile["minimum_chargeable_rolling_kva"]),
-        )
+    annual_rolling_rate = (
+        float(rates["rolling_demand_aud_per_kva_month"]) * 12
     )
+    if annual_rolling_rate > 0.0:
+        demand_charges.append(
+            CiDemandCharge(
+                "annual_rolling_kva",
+                annual_rolling_rate,
+                rolling_indexes,
+                basis="kva",
+                minimum_chargeable=float(
+                    profile["minimum_chargeable_rolling_kva"]
+                ),
+            )
+        )
     annual_model = profile.get("annual_financial_model")
     if not isinstance(annual_model, dict):
         raise CiScenarioAnalysisError("annual_value_unavailable")
@@ -1217,7 +1551,7 @@ def _optimizer_problem(
                 profile["incentive_demand_window"],
             )
         )
-        if selected:
+        if selected and incentive_rate > 0.0:
             demand_charges.append(
                 CiDemandCharge(
                     f"incentive_kva:{period.period_id}",
@@ -1409,6 +1743,9 @@ def _optimizer_snapshot(
     }
     snapshot_without_hash = {
         "contract_version": CI_OPTIMIZER_RUN_SNAPSHOT_CONTRACT_VERSION,
+        "calculation_revision": (
+            CI_OPTIMIZER_RUN_SNAPSHOT_CALCULATION_REVISION
+        ),
         "algorithm_id": rolling.algorithm_id,
         "solver_version": rolling.solver_version,
         "status": rolling.status.value,
@@ -1437,6 +1774,11 @@ def _optimizer_snapshot(
                 rolling.bill_reconciliation_difference_aud
             ),
             "demand_charges": [asdict(row) for row in rolling.demand_charges],
+            "planned_demand_limits_kva": _planned_demand_limits_kva(
+                problem,
+                rolling,
+                profile,
+            ),
             "billing_periods": [asdict(row) for row in rolling.billing_periods],
             "dispatch_totals": dispatch_totals,
             "minimum_soc_kwh": min(row.soc_end_kwh for row in rolling.intervals),
@@ -1493,6 +1835,46 @@ def _optimizer_snapshot(
         "recommendation_permitted": False,
     }
     return snapshot, audit
+
+
+def _planned_demand_limits_kva(
+    problem: CiOptimizerProblem,
+    rolling,
+    profile: dict[str, Any],
+) -> list[dict[str, object]]:
+    """Project annual-planner ceilings without substituting replay peaks."""
+
+    planner_limits = dict(rolling.annual_planner_demand_limits)
+    rates = profile["rates"]
+    annual_model = profile["annual_financial_model"]
+    annual_rate = float(rates["rolling_demand_aud_per_kva_month"]) * 12
+    incentive_rate = float(
+        annual_model["incentive_demand_aud_per_kva_month"]
+    )
+    incentive_months = set(annual_model["incentive_demand_months"])
+    expected_components = [
+        ("annual_rolling_kva", None, annual_rate),
+        *[
+            (
+                f"incentive_kva:{period.period_id}",
+                period.period_id,
+                incentive_rate,
+            )
+            for period in problem.billing_periods
+            if int(period.period_id.split("-")[1]) in incentive_months
+        ],
+    ]
+    return [
+        {
+            "component_id": component_id,
+            "billing_period_id": billing_period_id,
+            "rate_aud_per_kva": rate,
+            "planner_limit_kva": (
+                planner_limits.get(component_id) if rate > 0.0 else None
+            ),
+        }
+        for component_id, billing_period_id, rate in expected_components
+    ]
 
 
 def _canonical_sha256(value: object) -> str:

@@ -81,9 +81,11 @@ const scenario = {
     category_savings_ex_gst_aud: { energy_charges: 25000 },
     customer_facing_permission: false as const,
   },
+  planned_demand_limits_kva: [{ component_id: "annual_rolling_kva", billing_period_id: null, rate_aud_per_kva: 12, planner_limit_kva: 350 }],
   selected_monthly_thresholds_kw: Array(12).fill(350),
   optimizer_run_snapshot: {
     contract_version: "ci_optimizer_run_snapshot_v2" as const,
+    calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1" as const,
     snapshot_sha256: "a".repeat(64),
     algorithm_id: "ci_peak_shaving_rolling_replay_v2" as const,
     customer_facing_permission: false as const,

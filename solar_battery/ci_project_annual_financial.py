@@ -46,7 +46,13 @@ def record_ci_annual_financial_result(
             "ci_project_annual_financial_inputs_changed",
             "Tariff replay changed while finance was running. Run finance again.",
         )
-    _validate_result(result, project_id=project_id)
+    _validate_result(
+        result,
+        project_id=project_id,
+        expected_tariff_replay_result_sha256=(
+            expected_tariff_replay_result_sha256
+        ),
+    )
     assumptions = result.get("assumptions")
     if (
         not isinstance(assumptions, dict)
@@ -166,11 +172,22 @@ def ci_annual_financial_state(
         return _state_contract(
             status="stale", row=row, result=None, stale_reasons=stale_reasons
         )
-    _validate_result(row.result_json, project_id=project_id)
+    _validate_result(
+        row.result_json,
+        project_id=project_id,
+        expected_tariff_replay_result_sha256=(
+            row.tariff_replay_result_sha256
+        ),
+    )
     return _state_contract(status="ready", row=row, result=dict(row.result_json))
 
 
-def _validate_result(result: dict[str, object], *, project_id: UUID) -> None:
+def _validate_result(
+    result: dict[str, object],
+    *,
+    project_id: UUID,
+    expected_tariff_replay_result_sha256: str,
+) -> None:
     solutions = result.get("solutions")
     order = result.get("financial_review_order")
     assumptions = result.get("assumptions")
@@ -204,6 +221,9 @@ def _validate_result(result: dict[str, object], *, project_id: UUID) -> None:
         or result.get("analysis_mode")
         != "evidence_limited_internal_financial_comparison"
         or result.get("project_id") != str(project_id)
+        or not _sha256(result.get("source_tariff_replay_sha256"))
+        or result.get("source_tariff_replay_sha256")
+        != expected_tariff_replay_result_sha256
         or result.get("customer_facing_permission") is not False
         or result.get("recommendation_permitted") is not False
         or result.get("currency_values_permitted") is not True

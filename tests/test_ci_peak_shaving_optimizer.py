@@ -12,6 +12,7 @@ from solar_battery.ci_peak_shaving_optimizer import (
     CiBatterySpec,
     CiBillingPeriod,
     CiDemandCharge,
+    CiDemandChargeResult,
     CiOptimizerConfig,
     CiOptimizerInterval,
     CiOptimizerProblem,
@@ -536,6 +537,9 @@ def test_unpriced_kva_reactive_support_is_applied_after_active_dispatch(
     assert "reactive_support_post_dispatch_no_priced_kva_demand" in (
         result.corrections
     )
+    assert dict(result.annual_planner_demand_limits) == {
+        component.component_id: None for component in problem.demand_charges
+    }
 
 
 def test_fixed_kva_limit_uses_exact_interval_active_import_cap_without_cuts():
@@ -840,6 +844,63 @@ def test_dynamic_reserve_does_not_assume_disabled_grid_charging():
     assert result.intervals[2].pv_charge_kw > 0
 
 
+@pytest.mark.parametrize("interval_count", [48, 60])
+def test_dynamic_reserve_matches_the_suffix_scan_reference(interval_count):
+    loads = tuple(9.0 if index % 7 == 0 else 3.0 for index in range(interval_count))
+    pv = tuple(7.0 if index % 11 == 0 else 0.0 for index in range(interval_count))
+    problem = _problem(
+        intervals=_intervals(loads, pv=pv),
+        battery=_battery(),
+        demand_charges=(
+            CiDemandCharge("control", 20.0, tuple(range(interval_count))),
+        ),
+    )
+    demand_results = (
+        CiDemandChargeResult("control", "kw", 5.0, 5.0, 100.0),
+    )
+    solved = optimizer_module._idle_dispatch(problem)
+
+    actual = optimizer_module._dynamic_reserve(
+        problem,
+        solved,
+        demand_results,
+    )
+
+    min_soc = problem.battery.nominal_capacity_kwh * problem.battery.min_soc_fraction
+    max_soc = problem.battery.nominal_capacity_kwh * problem.battery.max_soc_fraction
+    efficiency = problem.battery.symmetric_efficiency
+    expected = []
+    for start in range(interval_count):
+        duration = 0.0
+        end = start
+        while end < interval_count and duration < 48.0:
+            duration += problem.intervals[end].duration_hours
+            end += 1
+        required = min_soc
+        for index in range(end - 1, start - 1, -1):
+            row = problem.intervals[index]
+            net_load = max(0.0, row.load_kw - row.pv_kw)
+            required_discharge = min(
+                problem.battery.max_discharge_kw,
+                max(0.0, net_load - 5.0),
+            )
+            pv_surplus = max(0.0, row.pv_kw - row.load_kw)
+            grid_charge_headroom = max(0.0, 5.0 - net_load)
+            charge_headroom = min(
+                problem.battery.max_charge_kw,
+                pv_surplus + grid_charge_headroom,
+            )
+            required = max(
+                min_soc,
+                required
+                + required_discharge * row.duration_hours / efficiency
+                - charge_headroom * row.duration_hours * efficiency,
+            )
+        expected.append(min(max_soc, required))
+
+    assert actual == pytest.approx(expected)
+
+
 def test_pv_export_is_not_created_by_battery_discharge():
     problem = _problem(
         intervals=_intervals(
@@ -1041,6 +1102,12 @@ def test_rolling_replay_commits_24_hours_wraps_january_and_reconciles():
     assert result.exact_replay_bill_aud < result.idle_baseline_bill_aud
     assert result.optimization_exactness_gap_aud <= 5.0
     assert result.bill_reconciliation_difference_aud == 0.0
+    planner_limits = dict(result.annual_planner_demand_limits)
+    assert planner_limits["month_01"] is None
+    assert all(
+        planner_limits[f"month_{month:02}"] is not None
+        for month in range(2, 13)
+    )
     assert "not a forecast-error model" in result.disclosures[-4]
     assert "physical viability condition" in result.disclosures[-3]
     assert "not billed twice" in result.disclosures[-2]
@@ -1265,7 +1332,7 @@ def test_primary_lp_timeout_cannot_be_relabelled_exact(monkeypatch):
     assert result.model_status is highspy.HighsModelStatus.kTimeLimit
 
 
-def test_two_stage_lp_uses_deterministic_simplex_then_ipm_by_default():
+def test_two_stage_lp_uses_deterministic_simplex_then_ipm_for_small_models():
     problem = _problem(
         intervals=_intervals((2.0, 8.0, 2.0)),
         battery=_battery(),
@@ -1274,6 +1341,8 @@ def test_two_stage_lp_uses_deterministic_simplex_then_ipm_by_default():
     model = optimizer_module._build_model(problem, cuts={}, binary=False)
 
     assert model.highs.getOptionValue("solver")[1] == "simplex"
+    assert model.highs.getOptionValue("threads")[1] == 1
+    assert model.highs.getOptionValue("parallel")[1] == "off"
 
     secondary = optimizer_module._prepare_secondary_model(
         model,
@@ -1309,6 +1378,28 @@ def test_reactive_two_stage_reuses_deterministic_simplex_basis_for_secondary():
 
     assert secondary is model
     assert secondary.highs.getOptionValue("solver")[1] == "simplex"
+    assert secondary.highs.getOptionValue("simplex_strategy")[1] == int(
+        highspy.simplex_constants.kSimplexStrategyPrimal
+    )
+
+
+def test_annual_size_lp_routes_the_secondary_solve_to_primal_simplex():
+    class LargeProblem:
+        intervals = (None,) * optimizer_module.PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS
+        reactive_support = CiReactiveSupportSpec()
+
+    class SmallProblem:
+        intervals = (None,) * (
+            optimizer_module.PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS - 1
+        )
+        reactive_support = CiReactiveSupportSpec()
+
+    assert optimizer_module._warm_start_secondary_with_primal_simplex(
+        LargeProblem()
+    )
+    assert not optimizer_module._warm_start_secondary_with_primal_simplex(
+        SmallProblem()
+    )
 
 
 def test_two_stage_defers_secondary_until_primary_exact_kva_is_material(

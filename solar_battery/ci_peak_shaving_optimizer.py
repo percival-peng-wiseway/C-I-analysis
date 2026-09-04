@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -17,6 +18,7 @@ PRIMARY_OBJECTIVE_TOLERANCE_AUD = 0.01
 MATERIALITY_TOLERANCE_AUD = 5.0
 SIMULTANEOUS_FLOW_TOLERANCE_KW = 1e-7
 PRIMARY_COST_BOUND_BLOCK_NONZEROS = 384
+PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS = 1024
 KVA_CUT_BATCH_SIZE = 4
 WEAR_SHADOW_COST_AUD_PER_DISCHARGED_KWH = 0.05
 DEFAULT_SHARED_AC_HEADROOM_KW = 250.0
@@ -421,6 +423,12 @@ class CiRollingReplayResult:
     windows: tuple[CiRollingWindowAudit, ...]
     corrections: tuple[str, ...]
     disclosures: tuple[str, ...]
+    # These are the annual planner ceilings carried into rolling replay, not
+    # peaks measured from the final exact replay. A null value means that the
+    # component was not priced/planned and therefore had no authored ceiling.
+    annual_planner_demand_limits: tuple[
+        tuple[str, float | None], ...
+    ] = ()
 
 
 @dataclass
@@ -1055,6 +1063,17 @@ def execute_ci_peak_shaving_rolling(
         windows=tuple(windows),
         corrections=tuple(corrections),
         disclosures=_rolling_disclosures(),
+        annual_planner_demand_limits=tuple(
+            (
+                component.component_id,
+                (
+                    _clean(planned_limits[component.component_id])
+                    if component.rate_aud_per_unit > 0.0
+                    else None
+                ),
+            )
+            for component in problem.demand_charges
+        ),
     )
 
 
@@ -1145,6 +1164,19 @@ def _execute_unpriced_reactive_support_rolling(
         intervals=dispatch,
         corrections=active_result.corrections
         + ("reactive_support_post_dispatch_no_priced_kva_demand",),
+        annual_planner_demand_limits=tuple(
+            (
+                component.component_id,
+                (
+                    dict(active_result.annual_planner_demand_limits).get(
+                        component.component_id
+                    )
+                    if component.rate_aud_per_unit > 0.0
+                    else None
+                ),
+            )
+            for component in problem.demand_charges
+        ),
     )
 
 
@@ -1879,7 +1911,7 @@ def _solve_two_stage(
             primary.objective + problem.config.primary_objective_tolerance_aud
         ),
         binary=binary,
-        warm_start_simplex=problem.reactive_support.enabled,
+        warm_start_simplex=_warm_start_secondary_with_primal_simplex(problem),
     )
     secondary = _run_model(secondary_model, binary=binary)
     if secondary.objective is None or secondary.model_status not in {
@@ -1933,6 +1965,7 @@ def _build_model(
     highs = highspy.Highs()
     highs.setOptionValue("output_flag", False)
     highs.setOptionValue("threads", 1)
+    highs.setOptionValue("parallel", "off")
     highs.setOptionValue("random_seed", 0)
     highs.setOptionValue("time_limit", problem.config.time_limit_seconds)
     if not binary:
@@ -2411,11 +2444,32 @@ def _prepare_secondary_model(
         raise RuntimeError("HiGHS rejected the secondary objective")
     if model.highs.changeObjectiveOffset(0.0) != highspy.HighsStatus.kOk:
         raise RuntimeError("HiGHS rejected the secondary objective offset")
-    if not binary and not warm_start_simplex:
-        model.highs.setOptionValue("solver", "ipm")
+    if not binary:
+        if warm_start_simplex:
+            # The primary optimum remains primal-feasible after adding its
+            # AUD tolerance bound; only the replacement objective invalidates
+            # dual feasibility. Reusing that basis with primal simplex avoids
+            # an expensive cold IPM solve while preserving both lexicographic
+            # objective bounds and deterministic single-thread execution.
+            model.highs.setOptionValue("solver", "simplex")
+            model.highs.setOptionValue(
+                "simplex_strategy",
+                int(highspy.simplex_constants.kSimplexStrategyPrimal),
+            )
+        else:
+            model.highs.setOptionValue("solver", "ipm")
     model.highs.setOptionValue("mip_abs_gap", 0.0)
     model.secondary_objective = True
     return model
+
+
+def _warm_start_secondary_with_primal_simplex(
+    problem: CiOptimizerProblem,
+) -> bool:
+    return (
+        problem.reactive_support.enabled
+        or len(problem.intervals) >= PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS
+    )
 
 
 def _run_model(model: _ModelArtifacts, *, binary: bool) -> _SolvedDispatch:
@@ -2994,6 +3048,91 @@ def _dynamic_reserve(
     min_soc = problem.battery.nominal_capacity_kwh * problem.battery.min_soc_fraction
     max_soc = problem.battery.nominal_capacity_kwh * problem.battery.max_soc_fraction
     efficiency = problem.battery.symmetric_efficiency
+    reserve_deltas = []
+    for index, row in enumerate(problem.intervals):
+        active_limits = kw_limits_by_index[index]
+        limit = min(active_limits) if active_limits else math.inf
+        net_load = max(0.0, row.load_kw - row.pv_kw)
+        required_discharge = min(
+            problem.battery.max_discharge_kw,
+            max(0.0, net_load - limit),
+        )
+        pv_surplus = max(0.0, row.pv_kw - row.load_kw)
+        grid_charge_headroom = (
+            (
+                problem.battery.max_charge_kw
+                if not math.isfinite(limit)
+                else max(0.0, limit - net_load)
+            )
+            if problem.config.allow_grid_charging
+            else 0.0
+        )
+        charge_headroom = min(
+            problem.battery.max_charge_kw,
+            pv_surplus + grid_charge_headroom,
+        )
+        reserve_deltas.append(
+            required_discharge * row.duration_hours / efficiency
+            - charge_headroom * row.duration_hours * efficiency
+        )
+
+    # Rolling replay calls this diagnostic once per window. Every suffix of a
+    # window whose complete duration is at most 48 hours has the same terminal
+    # boundary, so one reverse pass is exactly equivalent to rescanning every
+    # suffix independently.
+    if sum(row.duration_hours for row in problem.intervals) <= 48.0:
+        required = min_soc
+        reserves = [min_soc] * len(problem.intervals)
+        for index in range(len(problem.intervals) - 1, -1, -1):
+            required = max(min_soc, required + reserve_deltas[index])
+            reserves[index] = min(max_soc, required)
+        return tuple(reserves)
+
+    first_duration = problem.intervals[0].duration_hours
+    if all(
+        row.duration_hours == first_duration
+        for row in problem.intervals
+    ):
+        # With uniform intervals, the reverse recurrence equals min_SOC plus
+        # the greatest non-negative prefix sum inside the 48-hour look-ahead.
+        # A monotonic deque supplies every sliding prefix maximum in O(N),
+        # instead of rescanning up to 192 intervals for every annual row.
+        horizon_count = 0
+        horizon_duration = 0.0
+        while (
+            horizon_count < len(problem.intervals)
+            and horizon_duration < 48.0
+        ):
+            horizon_duration += first_duration
+            horizon_count += 1
+
+        prefix_sums = [0.0]
+        for delta in reserve_deltas:
+            prefix_sums.append(prefix_sums[-1] + delta)
+
+        candidates: deque[int] = deque()
+        next_prefix_index = 0
+        reserves = []
+        for start in range(len(problem.intervals)):
+            end = min(len(problem.intervals), start + horizon_count)
+            while next_prefix_index <= end:
+                while (
+                    candidates
+                    and prefix_sums[candidates[-1]]
+                    <= prefix_sums[next_prefix_index]
+                ):
+                    candidates.pop()
+                candidates.append(next_prefix_index)
+                next_prefix_index += 1
+            while candidates[0] < start:
+                candidates.popleft()
+            required = min_soc + max(
+                0.0,
+                prefix_sums[candidates[0]] - prefix_sums[start],
+            )
+            reserves.append(min(max_soc, required))
+        return tuple(reserves)
+
     reserves = []
     for start in range(len(problem.intervals)):
         duration = 0.0
@@ -3003,33 +3142,9 @@ def _dynamic_reserve(
             end += 1
         required = min_soc
         for index in range(end - 1, start - 1, -1):
-            row = problem.intervals[index]
-            active_limits = kw_limits_by_index[index]
-            limit = min(active_limits) if active_limits else math.inf
-            net_load = max(0.0, row.load_kw - row.pv_kw)
-            required_discharge = min(
-                problem.battery.max_discharge_kw,
-                max(0.0, net_load - limit),
-            )
-            pv_surplus = max(0.0, row.pv_kw - row.load_kw)
-            grid_charge_headroom = (
-                (
-                    problem.battery.max_charge_kw
-                    if not math.isfinite(limit)
-                    else max(0.0, limit - net_load)
-                )
-                if problem.config.allow_grid_charging
-                else 0.0
-            )
-            charge_headroom = min(
-                problem.battery.max_charge_kw,
-                pv_surplus + grid_charge_headroom,
-            )
             required = max(
                 min_soc,
-                required
-                + required_discharge * row.duration_hours / efficiency
-                - charge_headroom * row.duration_hours * efficiency,
+                required + reserve_deltas[index],
             )
         reserves.append(min(max_soc, required))
     return tuple(reserves)

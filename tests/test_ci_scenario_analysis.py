@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from solar_battery import ci_scenario_analysis as scenario_module
 from solar_battery.ci_scenario_analysis import (
     CiScenarioAnalysisError,
     _build_periods,
@@ -125,6 +126,54 @@ def _streams() -> dict[str, dict[date, list[float]]]:
     }
 
 
+def _reactive_pv_only_scenarios() -> list[dict[str, object]]:
+    disabled = _scenario("reactive-disabled", 0.0, 0.0)
+    disabled |= {
+        "battery_system_id": "battery-none",
+        "pv_system_id": "pv-reactive-disabled",
+    }
+    enabled = {
+        **disabled,
+        "scenario_id": "reactive-enabled",
+        "label": "Synthetic reactive-enabled",
+        "pv_system_id": "pv-reactive-enabled",
+        "reactive_support_enabled": True,
+        "reactive_support_max_kvar": 9.0,
+        "shared_inverter_apparent_power_limit_kva": 20.0,
+    }
+    return [disabled, enabled]
+
+
+def _run_reactive_pv_only_scenarios(monkeypatch, profile):
+    baseline = {
+        "profile": {"profile_id": "synthetic"},
+        "demand_evidence": {
+            "rolling_demand_kva": 15.0,
+            "chargeable_rolling_demand_kva": 15.0,
+            "incentive_demand_kva": 15.0,
+            "billing_period_max_kva": 15.0,
+            "billing_period_max_kw": 12.0,
+        },
+    }
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.analyze_ci_nem12",
+        lambda *_args, **_kwargs: baseline,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.validated_ci_nem12_evidence",
+        lambda *_args, **_kwargs: {"streams": _streams()},
+    )
+    result = analyze_ci_physical_scenarios(
+        b"synthetic",
+        profile=profile,
+        scenarios=_reactive_pv_only_scenarios(),
+    )
+    return {
+        row["scenario_id"]: row
+        for row in result["scenarios"]
+    }
+
+
 def _stub_rolling(problem):
     soc = problem.battery.nominal_capacity_kwh * problem.battery.initial_soc_fraction
     intervals = tuple(
@@ -196,6 +245,10 @@ def _stub_rolling(problem):
         ),
         corrections=(),
         disclosures=("deterministic unit-test rolling replay",),
+        annual_planner_demand_limits=tuple(
+            (item.component_id, 100.0 + index)
+            for index, item in enumerate(problem.demand_charges)
+        ),
     )
 
 
@@ -230,6 +283,10 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     )
 
     assert result["contract_version"] == "ci_physical_scenario_review_v6"
+    assert (
+        result["calculation_revision"]
+        == "ci_physical_scenario_planner_limits_primal_simplex_v1"
+    )
     assert result["customer_facing_permission"] is False
     assert result["recommendation_permitted"] is False
     assert result["currency_values_permitted"] is True
@@ -237,6 +294,11 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     assert [row["physical_review_rank"] for row in result["scenarios"]] == [1, 2]
     assert all(
         len(row["selected_monthly_thresholds_kw"]) == 12
+        for row in result["scenarios"]
+    )
+    assert all(
+        row["selected_monthly_thresholds_kw"]
+        == [None] * 8 + [101.0, 102.0, 103.0, 104.0]
         for row in result["scenarios"]
     )
     assert all(
@@ -288,6 +350,27 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
             "capability_curve": "circular_pq",
             "provenance": "analyst_assumption",
             "overcompensation_permitted": False,
+        }
+        for row in result["scenarios"]
+    )
+    assert all(
+        row["optimizer_run_snapshot"]["calculation_revision"]
+        == "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1"
+        for row in result["scenarios"]
+    )
+    assert all(
+        row["optimizer_run_snapshot"]["result_projection"]
+        ["planned_demand_limits_kva"]
+        == row["planned_demand_limits_kva"]
+        for row in result["scenarios"]
+    )
+    assert all(
+        row["planned_demand_limits_kva"][0]
+        == {
+            "component_id": "annual_rolling_kva",
+            "billing_period_id": None,
+            "rate_aud_per_kva": 12.0,
+            "planner_limit_kva": 100.0,
         }
         for row in result["scenarios"]
     )
@@ -392,6 +475,308 @@ def test_physical_scenario_review_prices_annual_baseline_once_per_request(
     assert pv_profile_calls == 1
 
 
+def test_selected_battery_scenarios_use_bounded_process_chunks(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    baseline = {
+        "profile": {"profile_id": "synthetic"},
+        "demand_evidence": {
+            "rolling_demand_kva": 15.0,
+            "chargeable_rolling_demand_kva": 15.0,
+            "incentive_demand_kva": 15.0,
+            "billing_period_max_kva": 15.0,
+            "billing_period_max_kw": 12.0,
+        },
+    }
+    created_workers: list[int] = []
+    submitted_ids: list[list[str]] = []
+
+    class ImmediateFuture:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self):
+            return self.value
+
+    class ImmediateProcessPool:
+        def __init__(self, *, max_workers, **_kwargs):
+            created_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, function, indexed, *args):
+            submitted_ids.append(
+                [scenario.scenario_id for _index, scenario in indexed]
+            )
+            return ImmediateFuture(function(indexed, *args))
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
+    monkeypatch.setattr(
+        scenario_module,
+        "ProcessPoolExecutor",
+        ImmediateProcessPool,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "analyze_ci_nem12",
+        lambda *_args, **_kwargs: baseline,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "validated_ci_nem12_evidence",
+        lambda *_args, **_kwargs: {"streams": _streams()},
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "execute_ci_peak_shaving_rolling",
+        _stub_rolling,
+    )
+
+    result = analyze_ci_physical_scenarios(
+        b"synthetic",
+        profile=profile,
+        scenarios=[
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ],
+    )
+
+    assert created_workers == [2]
+    assert submitted_ids == [["battery-a"], ["battery-b"]]
+    assert {row["scenario_id"] for row in result["scenarios"]} == {
+        "battery-a",
+        "battery-b",
+    }
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("1", 1), ("3", 3), ("0", 1), ("4", 1), ("invalid", 1)],
+)
+def test_scenario_worker_configuration_is_bounded(
+    monkeypatch,
+    configured,
+    expected,
+) -> None:
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", configured)
+
+    assert scenario_module._configured_scenario_process_workers() == expected
+
+
+def test_single_battery_scenario_stays_in_the_api_process(monkeypatch) -> None:
+    authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
+    monkeypatch.setattr(
+        scenario_module,
+        "_SCENARIO_PROCESS_POOL_DISABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: pytest.fail("a single scenario must not spawn"),
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_run_scenario",
+        lambda scenario, *_args: {"scenario_id": scenario.scenario_id},
+    )
+
+    result = scenario_module._execute_authored_scenarios(
+        authored,
+        (),
+        {},
+        {},
+        {},
+        {},
+        {},
+    )
+
+    assert result == [{"scenario_id": "battery-a"}]
+
+
+def test_process_capability_failure_falls_back_to_exact_serial_execution(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios(
+        [
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ]
+    )
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
+    monkeypatch.setattr(
+        scenario_module,
+        "_SCENARIO_PROCESS_POOL_DISABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            scenario_module._ScenarioProcessPoolUnavailable("not permitted")
+        ),
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_run_scenario",
+        lambda scenario, *_args: {"scenario_id": scenario.scenario_id},
+    )
+
+    result = scenario_module._execute_authored_scenarios(
+        authored,
+        (),
+        {},
+        {},
+        {},
+        {},
+        {},
+    )
+
+    assert [row["scenario_id"] for row in result] == ["battery-a", "battery-b"]
+
+
+def test_broken_process_pool_retries_once_in_one_isolated_worker(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios(
+        [
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ]
+    )
+    worker_counts = []
+
+    def execute(indexed, *_args, worker_count):
+        worker_counts.append(worker_count)
+        if len(worker_counts) == 1:
+            raise scenario_module._ScenarioProcessPoolBroken("child exited")
+        return {
+            index: {"scenario_id": scenario.scenario_id}
+            for index, scenario in indexed
+        }
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
+    monkeypatch.setattr(
+        scenario_module,
+        "_SCENARIO_PROCESS_POOL_DISABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        execute,
+    )
+
+    result = scenario_module._execute_authored_scenarios(
+        authored,
+        (),
+        {},
+        {},
+        {},
+        {},
+        {},
+    )
+
+    assert worker_counts == [2, 1]
+    assert [row["scenario_id"] for row in result] == ["battery-a", "battery-b"]
+
+
+def test_unexpected_process_failure_is_reported_fail_closed(monkeypatch) -> None:
+    authored = _validated_scenarios(
+        [
+            _scenario("battery-a", 10.0, 5.0),
+            _scenario("battery-b", 20.0, 10.0),
+        ]
+    )
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "3")
+    monkeypatch.setattr(
+        scenario_module,
+        "_SCENARIO_PROCESS_POOL_DISABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            scenario_module._ScenarioProcessExecutionFailed("unexpected")
+        ),
+    )
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        scenario_module._execute_authored_scenarios(
+            authored,
+            (),
+            {},
+            {},
+            {},
+            {},
+            {},
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
+
+
+def test_zero_priced_demand_components_are_unplanned_and_report_null_limits(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    profile["rates"]["rolling_demand_aud_per_kva_month"] = 0.0
+    profile["annual_financial_model"][
+        "incentive_demand_aud_per_kva_month"
+    ] = 0.0
+    baseline = {
+        "profile": {"profile_id": "synthetic"},
+        "demand_evidence": {
+            "rolling_demand_kva": 15.0,
+            "chargeable_rolling_demand_kva": 15.0,
+            "incentive_demand_kva": 15.0,
+            "billing_period_max_kva": 15.0,
+            "billing_period_max_kw": 12.0,
+        },
+    }
+    captured_problems = []
+
+    def capture_problem(problem):
+        captured_problems.append(problem)
+        return _stub_rolling(problem)
+
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.analyze_ci_nem12",
+        lambda *_args, **_kwargs: baseline,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.validated_ci_nem12_evidence",
+        lambda *_args, **_kwargs: {"streams": _streams()},
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_scenario_analysis.execute_ci_peak_shaving_rolling",
+        capture_problem,
+    )
+
+    result = analyze_ci_physical_scenarios(
+        b"synthetic",
+        profile=profile,
+        scenarios=[_scenario("zero-demand-rates", 10.0, 5.0)],
+    )
+
+    assert len(captured_problems) == 1
+    assert captured_problems[0].demand_charges == ()
+    row = result["scenarios"][0]
+    assert row["selected_monthly_thresholds_kw"] == [None] * 12
+    assert len(row["planned_demand_limits_kva"]) == 5
+    assert all(
+        item["rate_aud_per_kva"] == 0.0
+        and item["planner_limit_kva"] is None
+        for item in row["planned_demand_limits_kva"]
+    )
+
+
 def test_reactive_scenario_contract_is_explicit_and_fail_closed() -> None:
     enabled = {
         **_scenario("reactive", 20.0, 10.0),
@@ -419,6 +804,70 @@ def test_reactive_scenario_contract_is_explicit_and_fail_closed() -> None:
     ):
         with pytest.raises(CiScenarioAnalysisError):
             _validated_scenarios([invalid])
+
+
+def test_reactive_support_reduces_kva_and_annual_tariff_cost_when_kva_demand_is_priced(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+
+    scenarios = _run_reactive_pv_only_scenarios(monkeypatch, profile)
+    disabled = scenarios["reactive-disabled"]
+    enabled = scenarios["reactive-enabled"]
+
+    assert disabled["post_dispatch"]["maximum_reactive_support_kvar"] == 0.0
+    assert enabled["post_dispatch"]["maximum_reactive_support_kvar"] > 0.0
+    assert (
+        enabled["post_dispatch"]["raw_rolling_demand_kva"]
+        < disabled["post_dispatch"]["raw_rolling_demand_kva"]
+    )
+    disabled_value = disabled["annual_tariff_value"]
+    enabled_value = enabled["annual_tariff_value"]
+    assert (
+        enabled_value["scenario_cost_ex_gst_aud"]
+        < disabled_value["scenario_cost_ex_gst_aud"]
+    )
+    assert (
+        enabled_value["first_year_value_ex_gst_aud"]
+        > disabled_value["first_year_value_ex_gst_aud"]
+    )
+    assert (
+        enabled_value["category_savings_ex_gst_aud"]["network_charges"]
+        > disabled_value["category_savings_ex_gst_aud"]["network_charges"]
+    )
+
+
+def test_unpriced_reactive_support_improves_physical_kva_without_dollar_value(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    profile["rates"]["incentive_demand_aud_per_kva_month"] = 0.0
+    profile["rates"]["rolling_demand_aud_per_kva_month"] = 0.0
+    profile["annual_financial_model"][
+        "incentive_demand_aud_per_kva_month"
+    ] = 0.0
+
+    scenarios = _run_reactive_pv_only_scenarios(monkeypatch, profile)
+    disabled = scenarios["reactive-disabled"]
+    enabled = scenarios["reactive-enabled"]
+
+    assert disabled["post_dispatch"]["maximum_reactive_support_kvar"] == 0.0
+    assert enabled["post_dispatch"]["maximum_reactive_support_kvar"] > 0.0
+    assert (
+        enabled["post_dispatch"]["raw_rolling_demand_kva"]
+        < disabled["post_dispatch"]["raw_rolling_demand_kva"]
+    )
+    disabled_value = disabled["annual_tariff_value"]
+    enabled_value = enabled["annual_tariff_value"]
+    assert enabled_value["scenario_cost_ex_gst_aud"] == disabled_value[
+        "scenario_cost_ex_gst_aud"
+    ]
+    assert enabled_value["first_year_value_ex_gst_aud"] == disabled_value[
+        "first_year_value_ex_gst_aud"
+    ]
+    assert enabled_value["category_savings_ex_gst_aud"][
+        "network_charges"
+    ] == disabled_value["category_savings_ex_gst_aud"]["network_charges"]
 
 
 def test_dispatch_review_projection_selects_earliest_equal_post_kva_peak() -> None:

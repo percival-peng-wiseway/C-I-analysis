@@ -14,7 +14,7 @@
     {
       "class_name": "E3ApiContainer",
       "image": "./Dockerfile",
-      "instance_type": "standard-2",
+      "instance_type": "standard-4",
       "max_instances": 2,
       "rollout_active_grace_period": 1800
     }
@@ -44,7 +44,8 @@
     "LOCAL_WORKSPACE_ID": "e3-ci-production",
     "LOCAL_OWNER_ID": "e3-ci-internal",
     "LOCAL_ACTOR_ID": "public-web-user",
-    "LOCAL_ACTOR_DISPLAY_NAME": "Public web user"
+    "LOCAL_ACTOR_DISPLAY_NAME": "Public web user",
+    "CI_SCENARIO_PROCESS_WORKERS": "3"
   },
   "observability": {
     "enabled": true
