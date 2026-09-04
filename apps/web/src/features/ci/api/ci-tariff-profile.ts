@@ -61,6 +61,10 @@ export interface CiProjectTariffProfileState {
 export const ciProjectTariffProfileQueryKey = (projectId: string) =>
   ["ci-project-tariff-profile", projectId] as const;
 
+const TARIFF_PROFILE_SAVE_ATTEMPTS = 2;
+const TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS = 100;
+const TARIFF_PROFILE_MAX_RETRY_DELAY_MS = 1_000;
+
 export async function fetchCiProjectTariffProfile(
   projectId: string,
   fetcher: typeof fetch = fetch,
@@ -80,22 +84,40 @@ export async function saveCiProjectTariffProfile(
   input: { profile: CiProjectTariffProfile; approveForCalculation: boolean },
   fetcher: typeof fetch = fetch,
 ): Promise<CiProjectTariffProfileState> {
-  const response = await fetcher(
-    `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-profile`,
-    {
-      method: "PUT",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        profile: input.profile,
-        approve_for_calculation: input.approveForCalculation,
-      }),
-    },
-  );
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(tariffProfileErrorMessage(payload, response.status));
+  const url = `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-profile`;
+  const body = JSON.stringify({
+    profile: input.profile,
+    approve_for_calculation: input.approveForCalculation,
+  });
+  for (let attempt = 0; attempt < TARIFF_PROFILE_SAVE_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetcher(url, {
+        method: "PUT",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body,
+      });
+    } catch (error) {
+      if (isAbortError(error) || attempt + 1 >= TARIFF_PROFILE_SAVE_ATTEMPTS) {
+        throw new Error("The project tariff profile could not be saved because the cloud connection was interrupted. Please try again.");
+      }
+      await waitForTariffProfileRetry(TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS);
+      continue;
+    }
+    if (response.ok) return assertCiProjectTariffProfileState(await response.json());
+
+    const failure = await readTariffProfileFailure(response);
+    if (
+      attempt + 1 < TARIFF_PROFILE_SAVE_ATTEMPTS
+      && response.status === 503
+      && isRecoverableContainerFailure(failure.errorCode)
+    ) {
+      await waitForTariffProfileRetry(tariffProfileRetryDelay(response.headers.get("Retry-After")));
+      continue;
+    }
+    throw new Error(tariffProfileErrorMessage(failure, response.status));
   }
-  return assertCiProjectTariffProfileState(await response.json());
+  throw new Error("The project tariff profile could not be saved.");
 }
 
 export function assertCiProjectTariffProfileState(value: unknown): CiProjectTariffProfileState {
@@ -244,17 +266,85 @@ function isBlocker(value: unknown) {
   return Boolean(blocker && isLabel(blocker.code, 120) && isLabel(blocker.message, 500));
 }
 
-function tariffProfileErrorMessage(value: unknown, status: number) {
-  const detail = (value as { detail?: unknown } | null)?.detail;
-  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
-    const message = (detail as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim()) return message;
+interface TariffProfileFailure {
+  errorCode: string | null;
+  message: string | null;
+  requestId: string | null;
+}
+
+async function readTariffProfileFailure(response: Response): Promise<TariffProfileFailure> {
+  const body = await response.text().catch(() => "");
+  if (!body) return { errorCode: null, message: null, requestId: null };
+  try {
+    const payload = JSON.parse(body) as {
+      detail?: unknown;
+      error_code?: unknown;
+      message?: unknown;
+      request_id?: unknown;
+    };
+    const detail = payload.detail;
+    const detailCode = detail && typeof detail === "object" && !Array.isArray(detail)
+      ? (detail as { code?: unknown }).code
+      : null;
+    const detailMessage = detail && typeof detail === "object" && !Array.isArray(detail)
+      ? (detail as { message?: unknown }).message
+      : typeof detail === "string"
+        ? detail
+        : null;
+    const validationMessage = Array.isArray(detail)
+      ? detail
+        .map((item) => (item as { msg?: unknown })?.msg)
+        .find((item) => typeof item === "string" && item.trim())
+      : null;
+    return {
+      errorCode: typeof payload.error_code === "string"
+        ? payload.error_code
+        : typeof detailCode === "string"
+          ? detailCode
+          : null,
+      message: typeof payload.message === "string" && payload.message.trim()
+        ? payload.message
+        : typeof detailMessage === "string" && detailMessage.trim()
+          ? detailMessage
+          : typeof validationMessage === "string"
+            ? validationMessage
+            : null,
+      requestId: typeof payload.request_id === "string" && payload.request_id.trim()
+        ? payload.request_id
+        : null,
+    };
+  } catch {
+    return { errorCode: null, message: null, requestId: null };
   }
-  if (Array.isArray(detail)) {
-    const message = detail
-      .map((item) => (item as { msg?: unknown })?.msg)
-      .find((item) => typeof item === "string" && item.trim());
-    if (typeof message === "string") return message;
-  }
-  return `Project tariff profile could not be saved (${status}).`;
+}
+
+function tariffProfileErrorMessage(failure: TariffProfileFailure, status: number) {
+  const message = failure.message ?? `Project tariff profile could not be saved (${status}).`;
+  if (!failure.requestId) return message;
+  return `${message} Request ID: ${failure.requestId}.`;
+}
+
+function isRecoverableContainerFailure(errorCode: string | null) {
+  return errorCode === "container_provisioning"
+    || errorCode === "container_start_timeout"
+    || errorCode === "container_unavailable";
+}
+
+function tariffProfileRetryDelay(retryAfter: string | null) {
+  if (retryAfter === null) return TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS;
+  const seconds = Number(retryAfter);
+  const requestedDelay = Number.isFinite(seconds)
+    ? seconds * 1_000
+    : Date.parse(retryAfter) - Date.now();
+  if (!Number.isFinite(requestedDelay)) return TARIFF_PROFILE_NETWORK_RETRY_DELAY_MS;
+  return Math.min(TARIFF_PROFILE_MAX_RETRY_DELAY_MS, Math.max(0, requestedDelay));
+}
+
+async function waitForTariffProfileRetry(delayMs: number) {
+  if (delayMs <= 0) return;
+  await new Promise<void>((resolve) => globalThis.setTimeout(resolve, delayMs));
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
 }

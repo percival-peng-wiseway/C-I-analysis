@@ -155,6 +155,9 @@ function operationForRequest(request: Request): string {
   if (url.pathname.endsWith("/tariff-replay")) {
     return request.method === "POST" ? "tariff_replay_run" : "tariff_replay_state";
   }
+  if (url.pathname.endsWith("/tariff-profile")) {
+    return request.method === "PUT" ? "tariff_profile_save" : "tariff_profile_state";
+  }
   if (url.pathname.endsWith("/design-feasibility")) {
     return request.method === "POST" ? "dispatch_run" : "dispatch_state";
   }
@@ -168,11 +171,18 @@ function canRetryContainerProvisioning(
   request: Request,
   operation: string,
 ): boolean {
-  return request.method === "GET" || request.method === "HEAD" || [
-    "dispatch_run",
-    "tariff_replay_run",
-    "finance_run",
-  ].includes(operation);
+  // Every PUT exposed by this service is a transactional replace/upsert. Keep
+  // a clone so an interrupted cold start or rollout can replay the exact body
+  // once without creating duplicate records. Business 4xx responses and
+  // non-container 5xx responses are never retried below.
+  return request.method === "GET"
+    || request.method === "HEAD"
+    || request.method === "PUT"
+    || [
+      "dispatch_run",
+      "tariff_replay_run",
+      "finance_run",
+    ].includes(operation);
 }
 
 function canRecoverContainerFailure(

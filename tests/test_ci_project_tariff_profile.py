@@ -5,11 +5,14 @@ from datetime import date, timedelta
 import hashlib
 from uuid import UUID
 
+from sqlalchemy import select
+
 from solar_battery.ci_project_tariff_profile import (
     approved_ci_project_tariff_calculation_profile,
 )
 from solar_battery.ci_project_evidence import update_ci_project_evidence_inspection
 from solar_battery.ci_tariff_analysis import analyze_ci_nem12
+from solar_battery.durable_cockpit.orm import CiProjectTariffProfileModel
 from tests.durable_test_helpers import (
     create_sqlite_session_factory,
     create_test_client,
@@ -444,6 +447,54 @@ def test_approval_binds_the_real_saved_nem12_and_loads_a_calculation_profile(
     assert analyze_ci_nem12(nem12, profile=calculation_profile)[
         "analysis_status"
     ] == "ready"
+
+
+def test_repeating_the_same_approved_tariff_put_is_idempotent(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "api.ci_routes.inspect_ci_evidence_pair",
+        lambda *_args, **_kwargs: _annualized_evidence_inspection(),
+    )
+    database_url = sqlite_url_for_path(tmp_path / "approved-idempotent.sqlite3")
+    session_factory = create_sqlite_session_factory(database_url)
+    nem12 = _annual_nem12_bytes()
+    with create_test_client(database_url) as client:
+        project_id, project_url = _create_project(client)
+        _save_evidence(
+            client,
+            project_url,
+            bill_bytes=b"synthetic approved bill",
+            nem12=nem12,
+        )
+        profile = client.get(f"{project_url}/tariff-profile").json()[
+            "suggested_profile"
+        ]
+        payload = {"profile": profile, "approve_for_calculation": True}
+
+        first = client.put(f"{project_url}/tariff-profile", json=payload)
+        with session_factory() as session:
+            first_row = session.get(CiProjectTariffProfileModel, project_id)
+            assert first_row is not None
+            first_profile_sha256 = first_row.profile_sha256
+            first_calculation_profile_sha256 = first_row.calculation_profile_sha256
+
+        second = client.put(f"{project_url}/tariff-profile", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["status"] == "approved"
+    assert second.json()["status"] == "approved"
+    assert second.json()["profile_sha256"] == first.json()["profile_sha256"]
+    with session_factory() as session:
+        rows = session.scalars(select(CiProjectTariffProfileModel)).all()
+        assert len(rows) == 1
+        assert rows[0].project_id == project_id
+        assert rows[0].profile_sha256 == first_profile_sha256
+        assert (
+            rows[0].calculation_profile_sha256
+            == first_calculation_profile_sha256
+        )
 
 
 def test_bill_reconciliation_rolling_period_excludes_a_future_analysis_peak(
