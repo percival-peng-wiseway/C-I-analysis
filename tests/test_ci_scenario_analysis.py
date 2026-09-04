@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from solar_battery import ci_scenario_analysis as scenario_module
+from solar_battery.ci_tariff_analysis import CiTariffAnalysisError
 from solar_battery.ci_scenario_analysis import (
     CiScenarioAnalysisError,
     _build_periods,
@@ -285,7 +286,7 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     assert result["contract_version"] == "ci_physical_scenario_review_v6"
     assert (
         result["calculation_revision"]
-        == "ci_physical_scenario_planner_limits_primal_simplex_v1"
+        == "ci_physical_scenario_planner_primary_seed_v2"
     )
     assert result["customer_facing_permission"] is False
     assert result["recommendation_permitted"] is False
@@ -355,7 +356,7 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     )
     assert all(
         row["optimizer_run_snapshot"]["calculation_revision"]
-        == "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1"
+        == "ci_optimizer_run_snapshot_planner_primary_seed_v2"
         for row in result["scenarios"]
     )
     assert all(
@@ -565,7 +566,7 @@ def test_selected_battery_scenarios_use_bounded_process_chunks(
         _stub_rolling,
     )
 
-    result = analyze_ci_physical_scenarios(
+    result = scenario_module._analyze_ci_physical_scenarios_core(
         b"synthetic",
         profile=profile,
         scenarios=[
@@ -626,6 +627,377 @@ def test_scenario_process_timeout_configuration_is_bounded(
         scenario_module._configured_scenario_process_timeout_seconds()
         == expected
     )
+
+
+def test_one_worker_keeps_complete_analysis_inline(monkeypatch) -> None:
+    expected = {"contract_version": "inline"}
+    received: list[tuple[bytes, object, object]] = []
+
+    def execute_core(upload_bytes, *, profile, scenarios):
+        received.append((upload_bytes, profile, scenarios))
+        return expected
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "1")
+    monkeypatch.setattr(
+        scenario_module,
+        "_analyze_ci_physical_scenarios_core",
+        execute_core,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_physical_analysis_in_coordinator",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the explicit one-worker mode must remain inline"
+        ),
+    )
+
+    result = analyze_ci_physical_scenarios(
+        b"evidence",
+        profile={"profile_id": "profile"},
+        scenarios=[{"scenario_id": "one"}],
+    )
+
+    assert result is expected
+    assert received == [
+        (
+            b"evidence",
+            {"profile_id": "profile"},
+            [{"scenario_id": "one"}],
+        )
+    ]
+
+
+def test_complete_analysis_timeout_terminates_coordinator_and_releases_lock(
+    monkeypatch,
+) -> None:
+    result_timeouts: list[float] = []
+    shutdown_calls: list[tuple[bool, bool]] = []
+    initializers = []
+
+    class StubbornProcess:
+        def __init__(self):
+            self.alive = True
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self.join_calls: list[float] = []
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def kill(self):
+            self.kill_calls += 1
+            self.alive = False
+
+        def join(self, timeout):
+            self.join_calls.append(timeout)
+
+    class TimeoutFuture:
+        def __init__(self):
+            self.cancel_calls = 0
+
+        def result(self, timeout):
+            result_timeouts.append(timeout)
+            raise scenario_module.FutureTimeoutError()
+
+        def cancel(self):
+            self.cancel_calls += 1
+            return False
+
+    process = StubbornProcess()
+    future = TimeoutFuture()
+
+    class TimeoutCoordinatorPool:
+        def __init__(self, *, max_workers, initializer, **_kwargs):
+            assert max_workers == 1
+            initializers.append(initializer)
+            self._processes = {1: process}
+
+        def submit(self, *_args, **_kwargs):
+            return future
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(
+        scenario_module,
+        "ProcessPoolExecutor",
+        TimeoutCoordinatorPool,
+    )
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        analyze_ci_physical_scenarios(
+            b"evidence",
+            profile={"profile_id": "profile"},
+            scenarios=[{"scenario_id": "one"}],
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
+    assert initializers == [scenario_module._start_analysis_process_group]
+    assert len(result_timeouts) == 1
+    assert 0 < result_timeouts[0] <= 30
+    assert future.cancel_calls == 1
+    assert shutdown_calls == [(False, True)]
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert len(process.join_calls) == 2
+    assert all(0 <= timeout <= 2 for timeout in process.join_calls)
+    assert scenario_module._SCENARIO_ANALYSIS_PROCESS_LOCK.acquire(
+        blocking=False
+    )
+    scenario_module._SCENARIO_ANALYSIS_PROCESS_LOCK.release()
+
+
+def test_complete_analysis_success_returns_coordinator_result(monkeypatch) -> None:
+    expected = {"contract_version": "coordinated"}
+    submissions = []
+    result_timeouts: list[float] = []
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    class ImmediateFuture:
+        def result(self, timeout):
+            result_timeouts.append(timeout)
+            return (scenario_module._COORDINATOR_RESULT_READY, expected)
+
+    class ImmediateCoordinatorPool:
+        def __init__(self, *, max_workers, initializer, **_kwargs):
+            assert max_workers == 1
+            assert initializer is scenario_module._start_analysis_process_group
+
+        def submit(self, function, *args, **kwargs):
+            submissions.append((function, args, kwargs))
+            return ImmediateFuture()
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(
+        scenario_module,
+        "ProcessPoolExecutor",
+        ImmediateCoordinatorPool,
+    )
+
+    result = analyze_ci_physical_scenarios(
+        b"evidence",
+        profile={"profile_id": "profile"},
+        scenarios=[{"scenario_id": "one"}],
+    )
+
+    assert result is expected
+    assert len(submissions) == 1
+    assert submissions[0] == (
+        scenario_module._run_physical_analysis_coordinator,
+        (b"evidence",),
+        {
+            "profile": {"profile_id": "profile"},
+            "scenarios": [{"scenario_id": "one"}],
+        },
+    )
+    assert len(result_timeouts) == 1
+    assert 0 < result_timeouts[0] <= 30
+    assert shutdown_calls == [(False, False)]
+
+
+def test_transient_coordinator_capability_failure_is_reprobed_safely(
+    monkeypatch,
+) -> None:
+    expected = {"contract_version": "recovered"}
+    attempts = 0
+
+    class ImmediateFuture:
+        def result(self, timeout):
+            assert timeout > 0
+            return (scenario_module._COORDINATOR_RESULT_READY, expected)
+
+    class ReprobedCoordinatorPool:
+        def __init__(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("temporarily unavailable")
+
+        def submit(self, *_args, **_kwargs):
+            return ImmediateFuture()
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            assert wait is False
+            assert cancel_futures is False
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setattr(
+        scenario_module,
+        "ProcessPoolExecutor",
+        ReprobedCoordinatorPool,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_analyze_ci_physical_scenarios_core",
+        lambda *_args, **_kwargs: pytest.fail(
+            "production mode must not fall back to an unbounded inline run"
+        ),
+    )
+
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        analyze_ci_physical_scenarios(
+            b"evidence",
+            profile={"profile_id": "profile"},
+            scenarios=[{"scenario_id": "one"}],
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
+    assert analyze_ci_physical_scenarios(
+        b"evidence",
+        profile={"profile_id": "profile"},
+        scenarios=[{"scenario_id": "one"}],
+    ) is expected
+    assert attempts == 2
+
+
+def test_coordinator_preserves_tariff_error_code_without_pickling_exception(
+    monkeypatch,
+) -> None:
+    class TariffErrorFuture:
+        def result(self, timeout):
+            assert timeout > 0
+            return (
+                scenario_module._COORDINATOR_RESULT_TARIFF_ERROR,
+                "profile_invalid",
+            )
+
+    class TariffErrorCoordinatorPool:
+        def __init__(self, **_kwargs):
+            pass
+
+        def submit(self, function, *_args, **_kwargs):
+            assert function is scenario_module._run_physical_analysis_coordinator
+            return TariffErrorFuture()
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            assert wait is False
+            assert cancel_futures is False
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setattr(
+        scenario_module,
+        "ProcessPoolExecutor",
+        TariffErrorCoordinatorPool,
+    )
+
+    with pytest.raises(CiTariffAnalysisError) as exc_info:
+        analyze_ci_physical_scenarios(
+            b"evidence",
+            profile={"profile_id": "profile"},
+            scenarios=[{"scenario_id": "one"}],
+        )
+
+    assert exc_info.value.code == "profile_invalid"
+
+
+def test_coordinator_wraps_expected_errors_in_pickle_safe_values(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        scenario_module,
+        "_analyze_ci_physical_scenarios_core",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CiTariffAnalysisError("coverage_incomplete")
+        ),
+    )
+
+    outcome = scenario_module._run_physical_analysis_coordinator(
+        b"evidence",
+        profile={},
+        scenarios=[],
+    )
+
+    assert outcome == (
+        scenario_module._COORDINATOR_RESULT_TARIFF_ERROR,
+        "coverage_incomplete",
+    )
+
+
+def test_posix_process_group_failure_fails_closed(monkeypatch) -> None:
+    class FakePosixOs:
+        name = "posix"
+
+        @staticmethod
+        def setsid():
+            raise OSError("not permitted")
+
+    monkeypatch.setattr(scenario_module, "os", FakePosixOs)
+
+    with pytest.raises(RuntimeError, match="could not be established"):
+        scenario_module._start_analysis_process_group()
+
+
+def test_coordinator_abort_kills_the_posix_solver_process_group(
+    monkeypatch,
+) -> None:
+    signals: list[tuple[int, object]] = []
+
+    class GroupLeaderProcess:
+        pid = 4321
+
+        def __init__(self):
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def kill(self):
+            self.kill_calls += 1
+
+        def join(self, timeout):
+            pass
+
+    class CoordinatorPool:
+        def __init__(self, process):
+            self._processes = {1: process}
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            assert wait is False
+            assert cancel_futures is True
+
+    class FakePosixOs:
+        name = "posix"
+
+        @staticmethod
+        def getpgid(pid):
+            return pid
+
+        @staticmethod
+        def killpg(process_group, sent_signal):
+            signals.append((process_group, sent_signal))
+
+    class FakePosixSignal:
+        SIGTERM = 15
+        SIGKILL = 9
+
+    process = GroupLeaderProcess()
+    monkeypatch.setattr(scenario_module, "os", FakePosixOs)
+    monkeypatch.setattr(scenario_module, "signal", FakePosixSignal)
+
+    scenario_module._abort_analysis_coordinator(
+        CoordinatorPool(process),
+        [],
+    )
+
+    assert signals == [
+        (4321, FakePosixSignal.SIGTERM),
+        (4321, FakePosixSignal.SIGKILL),
+    ]
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
 
 
 def test_single_battery_scenario_uses_one_isolated_worker(monkeypatch) -> None:
@@ -766,12 +1138,6 @@ def test_process_pool_timeout_fails_closed_without_serial_retry(monkeypatch) -> 
             scenario_module._ScenarioProcessPoolTimedOut("deadline")
         ),
     )
-    monkeypatch.setattr(
-        scenario_module,
-        "_execute_battery_scenarios_serially",
-        lambda *_args, **_kwargs: pytest.fail("timeout must not retry serially"),
-    )
-
     with pytest.raises(CiScenarioAnalysisError) as exc_info:
         scenario_module._execute_authored_scenarios(
             authored,
@@ -786,7 +1152,7 @@ def test_process_pool_timeout_fails_closed_without_serial_retry(monkeypatch) -> 
     assert exc_info.value.code == "scenario_execution_failed"
 
 
-def test_process_capability_failure_falls_back_to_exact_serial_execution(
+def test_process_capability_failure_fails_closed_without_serial_execution(
     monkeypatch,
 ) -> None:
     authored = _validated_scenarios(
@@ -811,20 +1177,58 @@ def test_process_capability_failure_falls_back_to_exact_serial_execution(
     monkeypatch.setattr(
         scenario_module,
         "_run_scenario",
-        lambda scenario, *_args: {"scenario_id": scenario.scenario_id},
+        lambda *_args: pytest.fail("production mode must not fall back to serial"),
     )
 
-    result = scenario_module._execute_authored_scenarios(
-        authored,
-        (),
-        {},
-        {},
-        {},
-        {},
-        {},
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        scenario_module._execute_authored_scenarios(
+            authored,
+            (),
+            {},
+            {},
+            {},
+            {},
+            {},
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
+
+
+def test_previously_disabled_process_pool_never_runs_production_serially(
+    monkeypatch,
+) -> None:
+    authored = _validated_scenarios([_scenario("battery-a", 10.0, 5.0)])
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setattr(
+        scenario_module,
+        "_SCENARIO_PROCESS_POOL_DISABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_execute_battery_scenarios_in_processes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a disabled process pool must fail before execution"
+        ),
+    )
+    monkeypatch.setattr(
+        scenario_module,
+        "_run_scenario",
+        lambda *_args: pytest.fail("production mode must not run serially"),
     )
 
-    assert [row["scenario_id"] for row in result] == ["battery-a", "battery-b"]
+    with pytest.raises(CiScenarioAnalysisError) as exc_info:
+        scenario_module._execute_authored_scenarios(
+            authored,
+            (),
+            {},
+            {},
+            {},
+            {},
+            {},
+        )
+
+    assert exc_info.value.code == "scenario_execution_failed"
 
 
 def test_broken_process_pool_retries_once_in_one_isolated_worker(

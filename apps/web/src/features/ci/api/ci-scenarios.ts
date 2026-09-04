@@ -31,7 +31,7 @@ export interface CiScenarioInput {
 
 export interface CiPhysicalScenarioResult {
   contract_version: "ci_physical_scenario_review_v6";
-  calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1";
+  calculation_revision: "ci_physical_scenario_planner_primary_seed_v2";
   analysis_status: "ready";
   analysis_mode: "evidence_limited_internal_review";
   customer_facing_permission: false;
@@ -93,7 +93,7 @@ export interface CiPhysicalScenarioResult {
     selected_monthly_thresholds_kw: Array<number | null>;
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2";
-      calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1";
+      calculation_revision: "ci_optimizer_run_snapshot_planner_primary_seed_v2";
       snapshot_sha256: string;
       algorithm_id: "ci_peak_shaving_rolling_replay_v2";
       customer_facing_permission: false;
@@ -575,7 +575,7 @@ export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenar
   const payload = value as CiPhysicalScenarioResult;
   if (
     payload.contract_version !== "ci_physical_scenario_review_v6" ||
-    payload.calculation_revision !== "ci_physical_scenario_planner_limits_primal_simplex_v1" ||
+    payload.calculation_revision !== "ci_physical_scenario_planner_primary_seed_v2" ||
     payload.analysis_status !== "ready" ||
     payload.analysis_mode !== "evidence_limited_internal_review" ||
     payload.customer_facing_permission !== false ||
@@ -804,7 +804,7 @@ function hasSafeScenarioAuthority(
   }
   return item.post_dispatch?.authority_source === "ci_peak_shaving_rolling_replay_v2" &&
     item.optimizer_run_snapshot?.contract_version === "ci_optimizer_run_snapshot_v2" &&
-    item.optimizer_run_snapshot.calculation_revision === "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1" &&
+    item.optimizer_run_snapshot.calculation_revision === "ci_optimizer_run_snapshot_planner_primary_seed_v2" &&
     item.optimizer_run_snapshot.customer_facing_permission === false &&
     item.optimizer_run_snapshot.recommendation_permitted === false &&
     item.optimizer_audit_projection?.contract_version === "ci_optimizer_audit_projection_v2" &&

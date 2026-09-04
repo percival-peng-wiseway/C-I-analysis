@@ -482,7 +482,11 @@ class _WindowSolveOutcome:
     corrections: tuple[str, ...]
 
 
-def optimize_ci_peak_shaving(problem: CiOptimizerProblem) -> CiOptimizerResult:
+def optimize_ci_peak_shaving(
+    problem: CiOptimizerProblem,
+    *,
+    _planner_primary_only: bool = False,
+) -> CiOptimizerResult:
     """Optimize one synthetic/internal C&I horizon with HiGHS.
 
     This repository-owned contract defines the objective and all product
@@ -516,7 +520,12 @@ def optimize_ci_peak_shaving(problem: CiOptimizerProblem) -> CiOptimizerResult:
                 binary,
                 problem.reactive_support.enabled,
             )
-        solved = _solve_two_stage(problem, cuts=cuts, binary=binary)
+        solved = _solve_two_stage(
+            problem,
+            cuts=cuts,
+            binary=binary,
+            run_secondary_tiebreak=not _planner_primary_only,
+        )
         if trace_large_model:
             _LOGGER.info(
                 "ci_optimizer stage=annual_solve_complete intervals=%d kva_iteration=%d binary=%s model_status=%s elapsed_s=%.3f",
@@ -750,7 +759,18 @@ def execute_ci_peak_shaving_rolling(
         len(planner_problem.demand_charges),
         planner_problem.reactive_support.enabled,
     )
-    planner = optimize_ci_peak_shaving(planner_problem)
+    # The annual pass supplies feasible primary-cost ceilings and SOC
+    # boundaries to the authoritative rolling replay; its interval dispatch is
+    # never exposed as the final result.  Once exact nonlinear kVA replay has
+    # passed, any primary-optimal annual trajectory is a valid feasible seed;
+    # the throughput tie-break is not required to make its ceilings or SOC
+    # boundaries safe, so that non-authoritative full-year solve is omitted.
+    # Every rolling window still runs the normal two-stage solve, preserving
+    # final-dispatch determinism and the AUD 0.01 primary objective bound.
+    planner = optimize_ci_peak_shaving(
+        planner_problem,
+        _planner_primary_only=True,
+    )
     _LOGGER.info(
         "ci_optimizer stage=planner_complete intervals=%d status=%s kva_iterations=%d elapsed_s=%.3f",
         len(planner_problem.intervals),
@@ -773,14 +793,16 @@ def execute_ci_peak_shaving_rolling(
         )
 
     planner_references = planner._planner_references
-    planner_corrections: tuple[str, ...] = ()
+    planner_corrections: tuple[str, ...] = (
+        "annual_planner_primary_solution_seed_without_throughput_tiebreak",
+    )
     if planner_references is not None and planner_aggregation is not None:
         planner_references = _expand_planner_references(
             problem,
             planner,
             planner_aggregation,
         )
-        planner_corrections = (
+        planner_corrections += (
             (
                 "annual_planner_15_minute_reactive_pq_aggregation_with_exact_source_interval_kva_references"
                 if problem.reactive_support.enabled
@@ -1978,6 +2000,7 @@ def _solve_two_stage(
     minimum_soc_boundaries: dict[int, float] | None = None,
     fixed_demand_limits: dict[str, float] | None = None,
     forced_idle_period_ids: set[str] | None = None,
+    run_secondary_tiebreak: bool = True,
 ) -> _SolvedDispatch:
     primary_model = _build_model(
         problem,
@@ -2030,6 +2053,8 @@ def _solve_two_stage(
         _whole_bill_kva_underapproximation_aud(problem, primary)
         > problem.config.materiality_tolerance_aud
     ):
+        return primary
+    if not run_secondary_tiebreak:
         return primary
 
     secondary_model = _prepare_secondary_model(

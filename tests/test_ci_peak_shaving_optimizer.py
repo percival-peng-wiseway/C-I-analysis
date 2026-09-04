@@ -1254,6 +1254,10 @@ def test_rolling_replay_commits_24_hours_wraps_january_and_reconciles():
     assert "not a forecast-error model" in result.disclosures[-4]
     assert "physical viability condition" in result.disclosures[-3]
     assert "not billed twice" in result.disclosures[-2]
+    assert (
+        "annual_planner_primary_solution_seed_without_throughput_tiebreak"
+        in result.corrections
+    )
 
 
 def test_planner_soc_commit_bound_preserves_recursive_feasibility():
@@ -1371,7 +1375,7 @@ def test_rolling_replay_failure_retains_idle_bill_and_no_optimization_benefit(
     monkeypatch.setattr(
         optimizer_module,
         "optimize_ci_peak_shaving",
-        lambda supplied: planner,
+        lambda supplied, **_kwargs: planner,
     )
     monkeypatch.setattr(
         optimizer_module,
@@ -1597,6 +1601,45 @@ def test_two_stage_defers_secondary_until_primary_exact_kva_is_material(
     assert calls == 1
     assert result.model_status is highspy.HighsModelStatus.kOptimal
     assert result is primary
+
+
+def test_planner_primary_seed_omits_only_the_secondary_tiebreak(monkeypatch):
+    problem = _problem(
+        intervals=_intervals((2.0, 8.0, 2.0)),
+        battery=_battery(),
+        demand_charges=(CiDemandCharge("peak", 20.0, (0, 1, 2)),),
+    )
+    primary = optimizer_module._idle_dispatch(problem)
+    calls = 0
+
+    def fake_run_model(model, *, binary):
+        nonlocal calls
+        calls += 1
+        return primary
+
+    monkeypatch.setattr(
+        optimizer_module,
+        "_build_model",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(optimizer_module, "_run_model", fake_run_model)
+    monkeypatch.setattr(
+        optimizer_module,
+        "_prepare_secondary_model",
+        lambda *args, **kwargs: pytest.fail(
+            "annual planner seed must not run a full-horizon secondary solve"
+        ),
+    )
+
+    result = optimizer_module._solve_two_stage(
+        problem,
+        cuts={},
+        binary=False,
+        run_secondary_tiebreak=False,
+    )
+
+    assert result is primary
+    assert calls == 1
 
 
 def test_secondary_milp_timeout_preserves_timeout_status(monkeypatch):

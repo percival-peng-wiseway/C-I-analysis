@@ -124,7 +124,7 @@ def _physical_result(_upload, *, profile, scenarios):
         )
     return {
         "contract_version": "ci_physical_scenario_review_v6",
-        "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
+        "calculation_revision": "ci_physical_scenario_planner_primary_seed_v2",
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,

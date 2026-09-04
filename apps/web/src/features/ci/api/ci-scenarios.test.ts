@@ -52,7 +52,7 @@ const reviewProjection = (battery: boolean, index = 0) => ({
 
 const physicalResultFor = (inputs: CiScenarioInput[]) => ({
   contract_version: "ci_physical_scenario_review_v6",
-  calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
+  calculation_revision: "ci_physical_scenario_planner_primary_seed_v2",
   analysis_status: "ready",
   analysis_mode: "evidence_limited_internal_review",
   customer_facing_permission: false,
@@ -88,7 +88,7 @@ const physicalResultFor = (inputs: CiScenarioInput[]) => ({
     selected_monthly_thresholds_kw: Array(12).fill(1),
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2",
-      calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1",
+      calculation_revision: "ci_optimizer_run_snapshot_planner_primary_seed_v2",
       snapshot_sha256: `${index}`.padStart(64, "0"),
       algorithm_id: "ci_peak_shaving_rolling_replay_v2",
       customer_facing_permission: false,
@@ -519,7 +519,7 @@ describe("analyzeCiPhysicalScenarios", () => {
   it("rejects a contract that grants recommendation permission", async () => {
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_physical_scenario_review_v6",
-      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
+      calculation_revision: "ci_physical_scenario_planner_primary_seed_v2",
       analysis_status: "ready",
       analysis_mode: "evidence_limited_internal_review",
       customer_facing_permission: false,
@@ -542,7 +542,7 @@ describe("analyzeCiPhysicalScenarios", () => {
     };
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_physical_scenario_review_v6",
-      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
+      calculation_revision: "ci_physical_scenario_planner_primary_seed_v2",
       analysis_status: "ready",
       analysis_mode: "evidence_limited_internal_review",
       customer_facing_permission: false,

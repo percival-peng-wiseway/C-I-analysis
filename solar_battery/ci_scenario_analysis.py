@@ -12,12 +12,14 @@ import math
 import multiprocessing
 import os
 import pickle
+import signal
 from threading import Lock
 from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from solar_battery.ci_tariff_analysis import (
+    CiTariffAnalysisError,
     analyze_ci_nem12,
     calculate_ci_tariff_charges,
     validated_ci_nem12_evidence,
@@ -42,7 +44,7 @@ from solar_battery.solar_profile import build_pv_profile
 
 CI_PHYSICAL_SCENARIO_CONTRACT_VERSION = "ci_physical_scenario_review_v6"
 CI_PHYSICAL_SCENARIO_CALCULATION_REVISION = (
-    "ci_physical_scenario_planner_limits_primal_simplex_v1"
+    "ci_physical_scenario_planner_primary_seed_v2"
 )
 CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
     "ci_dispatch_review_projection_v2"
@@ -50,7 +52,7 @@ CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
 CI_THREE_CASE_COMPARISON_CONTRACT_VERSION = "ci_three_case_peak_day_comparison_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CONTRACT_VERSION = "ci_optimizer_run_snapshot_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CALCULATION_REVISION = (
-    "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1"
+    "ci_optimizer_run_snapshot_planner_primary_seed_v2"
 )
 CI_OPTIMIZER_AUDIT_PROJECTION_CONTRACT_VERSION = "ci_optimizer_audit_projection_v2"
 CI_PV_ONLY_EXACT_ID = "ci_pv_only_shared_pq_v1"
@@ -66,8 +68,14 @@ MAX_SCENARIO_PROCESS_TIMEOUT_SECONDS = 3600.0
 SCENARIO_PROCESS_TERMINATION_GRACE_SECONDS = 2.0
 
 _LOGGER = logging.getLogger(__name__)
+_SCENARIO_ANALYSIS_PROCESS_LOCK = Lock()
 _SCENARIO_PROCESS_POOL_LOCK = Lock()
 _SCENARIO_PROCESS_POOL_DISABLED = False
+
+_COORDINATOR_RESULT_READY = "ready"
+_COORDINATOR_RESULT_SCENARIO_ERROR = "scenario_error"
+_COORDINATOR_RESULT_TARIFF_ERROR = "tariff_error"
+_COORDINATOR_RESULT_EXECUTION_ERROR = "execution_error"
 
 _SAFE_MESSAGES = {
     "scenario_contract_invalid": (
@@ -182,7 +190,37 @@ def analyze_ci_physical_scenarios(
     profile: dict[str, Any],
     scenarios: object,
 ) -> dict[str, object]:
-    """Compare analyst-authored batteries using physical evidence only."""
+    """Compare analyst-authored batteries using physical evidence only.
+
+    Production configurations run the *entire* calculation in a disposable
+    coordinator process.  The parent API process owns the wall-clock deadline
+    and can terminate the coordinator (and its solver children on POSIX) even
+    when parsing, tariff reconstruction or a native solver call stops making
+    progress.  The one-worker configuration remains inline for local tests and
+    runtimes that explicitly choose the legacy serial execution mode.
+    """
+
+    if _configured_scenario_process_workers() <= 1:
+        return _analyze_ci_physical_scenarios_core(
+            upload_bytes,
+            profile=profile,
+            scenarios=scenarios,
+        )
+    return _execute_physical_analysis_in_coordinator(
+        upload_bytes,
+        profile=profile,
+        scenarios=scenarios,
+    )
+
+
+def _analyze_ci_physical_scenarios_core(
+    upload_bytes: bytes,
+    *,
+    profile: dict[str, Any],
+    scenarios: object,
+) -> dict[str, object]:
+    """Execute the complete physical analysis inside the selected process."""
+
     started_at = monotonic()
     authored = _validated_scenarios(scenarios)
     _LOGGER.info(
@@ -226,6 +264,205 @@ def analyze_ci_physical_scenarios(
     return _physical_scenario_result(tariff_result=tariff_result, results=results)
 
 
+def _execute_physical_analysis_in_coordinator(
+    upload_bytes: bytes,
+    *,
+    profile: dict[str, Any],
+    scenarios: object,
+) -> dict[str, object]:
+    """Run one complete request behind a hard, parent-owned deadline."""
+
+    started_at = monotonic()
+    timeout_seconds = _configured_scenario_process_timeout_seconds()
+    deadline = started_at + timeout_seconds
+    _LOGGER.info(
+        "ci_scenario_analysis stage=coordinator_wait timeout_s=%.1f",
+        timeout_seconds,
+    )
+    acquired = _SCENARIO_ANALYSIS_PROCESS_LOCK.acquire(
+        timeout=max(0.0, deadline - monotonic())
+    )
+    if not acquired:
+        _LOGGER.warning("ci_scenario_analysis stage=coordinator_lock_timeout")
+        raise CiScenarioAnalysisError("scenario_execution_failed")
+
+    executor: ProcessPoolExecutor | None = None
+    futures: list[Any] = []
+    try:
+        try:
+            executor = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_start_analysis_process_group,
+            )
+            futures.append(
+                executor.submit(
+                    _run_physical_analysis_coordinator,
+                    upload_bytes,
+                    profile=profile,
+                    scenarios=scenarios,
+                )
+            )
+        except (OSError, RuntimeError) as exc:
+            raise _ScenarioProcessPoolUnavailable(
+                "the analysis coordinator process could not be started"
+            ) from exc
+
+        _LOGGER.info(
+            "ci_scenario_analysis stage=coordinator_started elapsed_s=%.3f",
+            monotonic() - started_at,
+        )
+        remaining_seconds = deadline - monotonic()
+        if remaining_seconds <= 0.0:
+            raise FutureTimeoutError()
+        try:
+            outcome = futures[0].result(timeout=remaining_seconds)
+        except FutureTimeoutError:
+            raise
+        except BrokenProcessPool as exc:
+            raise _ScenarioProcessPoolBroken(
+                "the analysis coordinator terminated unexpectedly"
+            ) from exc
+        except (pickle.PicklingError, EOFError, OSError) as exc:
+            raise _ScenarioProcessPoolUnavailable(
+                "analysis inputs or outputs could not cross the process boundary"
+            ) from exc
+        except Exception as exc:
+            raise _ScenarioProcessExecutionFailed(
+                "the analysis coordinator returned an unexpected failure"
+            ) from exc
+
+        if monotonic() > deadline:
+            raise FutureTimeoutError()
+        executor.shutdown(wait=False)
+        executor = None
+        result = _unwrap_physical_analysis_coordinator_outcome(outcome)
+        _LOGGER.info(
+            "ci_scenario_analysis stage=coordinator_complete elapsed_s=%.3f",
+            monotonic() - started_at,
+        )
+        return result
+    except FutureTimeoutError as exc:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_timeout timeout_s=%.1f",
+            timeout_seconds,
+        )
+        _abort_analysis_coordinator(executor, futures)
+        executor = None
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
+    except (CiScenarioAnalysisError, CiTariffAnalysisError):
+        _abort_analysis_coordinator(executor, futures)
+        executor = None
+        raise
+    except (
+        _ScenarioProcessPoolUnavailable,
+        _ScenarioProcessPoolBroken,
+        _ScenarioProcessExecutionFailed,
+    ) as exc:
+        _abort_analysis_coordinator(executor, futures)
+        executor = None
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
+    except Exception as exc:
+        _abort_analysis_coordinator(executor, futures)
+        executor = None
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
+    finally:
+        if executor is not None:
+            _abort_analysis_coordinator(executor, futures)
+        _SCENARIO_ANALYSIS_PROCESS_LOCK.release()
+
+
+def _run_physical_analysis_coordinator(
+    upload_bytes: bytes,
+    *,
+    profile: dict[str, Any],
+    scenarios: object,
+) -> tuple[str, object]:
+    """Return only pickle-safe values across the coordinator boundary."""
+
+    try:
+        return (
+            _COORDINATOR_RESULT_READY,
+            _analyze_ci_physical_scenarios_core(
+                upload_bytes,
+                profile=profile,
+                scenarios=scenarios,
+            ),
+        )
+    except CiScenarioAnalysisError as exc:
+        return (_COORDINATOR_RESULT_SCENARIO_ERROR, exc.code)
+    except CiTariffAnalysisError as exc:
+        return (_COORDINATOR_RESULT_TARIFF_ERROR, exc.code)
+    except Exception as exc:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_execution_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return (_COORDINATOR_RESULT_EXECUTION_ERROR, None)
+
+
+def _unwrap_physical_analysis_coordinator_outcome(
+    outcome: object,
+) -> dict[str, object]:
+    """Reconstruct expected domain errors without pickling exception objects."""
+
+    if not isinstance(outcome, tuple) or len(outcome) != 2:
+        raise _ScenarioProcessExecutionFailed(
+            "the analysis coordinator returned an invalid result envelope"
+        )
+    outcome_type, payload = outcome
+    if outcome_type == _COORDINATOR_RESULT_READY:
+        if not isinstance(payload, dict):
+            raise _ScenarioProcessExecutionFailed(
+                "the analysis coordinator returned an invalid result"
+            )
+        return payload
+    if outcome_type == _COORDINATOR_RESULT_SCENARIO_ERROR:
+        if not isinstance(payload, str) or payload not in _SAFE_MESSAGES:
+            raise _ScenarioProcessExecutionFailed(
+                "the analysis coordinator returned an invalid scenario error"
+            )
+        raise CiScenarioAnalysisError(payload)
+    if outcome_type == _COORDINATOR_RESULT_TARIFF_ERROR:
+        if not isinstance(payload, str):
+            raise _ScenarioProcessExecutionFailed(
+                "the analysis coordinator returned an invalid tariff error"
+            )
+        try:
+            error = CiTariffAnalysisError(payload)
+        except (KeyError, TypeError) as exc:
+            raise _ScenarioProcessExecutionFailed(
+                "the analysis coordinator returned an invalid tariff error"
+            ) from exc
+        raise error
+    if outcome_type == _COORDINATOR_RESULT_EXECUTION_ERROR and payload is None:
+        raise _ScenarioProcessExecutionFailed(
+            "the analysis coordinator returned an unexpected failure"
+        )
+    raise _ScenarioProcessExecutionFailed(
+        "the analysis coordinator returned an unknown result envelope"
+    )
+
+
+def _start_analysis_process_group() -> None:
+    """Give a production coordinator its own POSIX process group."""
+
+    if os.name != "posix":
+        return
+    if not hasattr(os, "setsid"):
+        raise RuntimeError(
+            "POSIX process-group isolation is unavailable for analysis"
+        )
+    try:
+        os.setsid()
+    except OSError as exc:
+        # Never enter the core analysis without a group that the parent can
+        # terminate together with every nested solver process.
+        raise RuntimeError(
+            "POSIX process-group isolation could not be established"
+        ) from exc
+
+
 def _execute_authored_scenarios(
     authored: tuple[_Scenario, ...],
     periods: tuple[PeakShavingPeriodInput, ...],
@@ -249,11 +486,7 @@ def _execute_authored_scenarios(
         for index, scenario in enumerate(authored)
         if scenario.nominal_capacity_kwh > 0.0
     )
-    if (
-        workers <= 1
-        or not indexed_battery
-        or _scenario_process_pool_disabled()
-    ):
+    if workers <= 1 or not indexed_battery:
         return [
             _run_scenario(
                 item,
@@ -266,6 +499,8 @@ def _execute_authored_scenarios(
             )
             for item in authored
         ]
+    if _scenario_process_pool_disabled():
+        raise CiScenarioAnalysisError("scenario_execution_failed")
 
     results_by_index: dict[int, dict[str, object]] = {}
     for index, scenario in enumerate(authored):
@@ -290,20 +525,11 @@ def _execute_authored_scenarios(
             worker_count=min(workers, len(indexed_battery)),
         )
     except _ScenarioProcessPoolUnavailable as exc:
-        # Some container runtimes can disallow process creation. Preserve the
-        # exact legacy serial calculation and keep the container useful after
-        # the capability failure instead of returning 5xx for every batch.
         _LOGGER.warning(
-            "C&I scenario process pool unavailable; using serial execution",
+            "C&I scenario process pool unavailable; failing closed",
             exc_info=True,
         )
-        parallel_results = _execute_battery_scenarios_serially(
-            indexed_battery,
-            periods,
-            interval_evidence,
-            tariff_membership,
-            profile,
-        )
+        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
     except _ScenarioProcessPoolTimedOut as exc:
         _LOGGER.warning(
             "ci_scenario_analysis stage=pool_timeout scenarios=%d workers=%d",
@@ -328,15 +554,8 @@ def _execute_authored_scenarios(
                 profile,
                 worker_count=1,
             )
-        except _ScenarioProcessPoolUnavailable:
-            parallel_results = _execute_battery_scenarios_serially(
-                indexed_battery,
-                periods,
-                interval_evidence,
-                tariff_membership,
-                profile,
-            )
         except (
+            _ScenarioProcessPoolUnavailable,
             _ScenarioProcessPoolBroken,
             _ScenarioProcessExecutionFailed,
             _ScenarioProcessPoolTimedOut,
@@ -390,29 +609,6 @@ def _scenario_process_pool_disabled() -> bool:
     # The boolean assignment is atomic in supported CPython versions. Avoid
     # blocking here because pool acquisition itself has the watchdog deadline.
     return _SCENARIO_PROCESS_POOL_DISABLED
-
-
-def _execute_battery_scenarios_serially(
-    indexed_scenarios: tuple[tuple[int, _Scenario], ...],
-    periods: tuple[PeakShavingPeriodInput, ...],
-    interval_evidence: dict[datetime, dict[str, object]],
-    tariff_membership: _TariffRowMembership,
-    profile: dict[str, Any],
-) -> dict[int, dict[str, object]]:
-    try:
-        return dict(
-            _execute_scenario_chunk(
-                indexed_scenarios,
-                periods,
-                interval_evidence,
-                tariff_membership,
-                profile,
-            )
-        )
-    except CiScenarioAnalysisError:
-        raise
-    except Exception as exc:
-        raise CiScenarioAnalysisError("scenario_execution_failed") from exc
 
 
 def _execute_battery_scenarios_in_processes(
@@ -572,6 +768,83 @@ def _execute_battery_scenarios_in_processes(
         if executor is not None:
             _abort_scenario_process_pool(executor, futures)
         _SCENARIO_PROCESS_POOL_LOCK.release()
+
+
+def _abort_analysis_coordinator(
+    executor: ProcessPoolExecutor | None,
+    futures: list[Any],
+) -> None:
+    """Stop the coordinator and its nested solver workers within four seconds."""
+
+    for future in futures:
+        try:
+            future.cancel()
+        except Exception:
+            pass
+    if executor is None:
+        return
+
+    process_map = getattr(executor, "_processes", None)
+    processes = (
+        tuple(process_map.values()) if isinstance(process_map, dict) else ()
+    )
+    process_groups: dict[int, int] = {}
+    if os.name == "posix" and hasattr(os, "getpgid"):
+        for process in processes:
+            process_id = getattr(process, "pid", None)
+            if not isinstance(process_id, int) or process_id <= 0:
+                continue
+            try:
+                process_group = os.getpgid(process_id)
+            except (OSError, ProcessLookupError):
+                continue
+            if process_group == process_id:
+                process_groups[id(process)] = process_group
+
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        _LOGGER.warning(
+            "ci_scenario_analysis stage=coordinator_abort_shutdown_failed",
+            exc_info=True,
+        )
+
+    for process in processes:
+        process_group = process_groups.get(id(process))
+        try:
+            if process_group is not None:
+                os.killpg(process_group, signal.SIGTERM)
+            elif process.is_alive():
+                process.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+        except Exception:
+            _LOGGER.warning(
+                "ci_scenario_analysis stage=coordinator_terminate_failed",
+                exc_info=True,
+            )
+    _join_scenario_processes(
+        processes,
+        timeout_seconds=SCENARIO_PROCESS_TERMINATION_GRACE_SECONDS,
+    )
+    for process in processes:
+        process_group = process_groups.get(id(process))
+        try:
+            if process_group is not None:
+                os.killpg(process_group, signal.SIGKILL)
+            elif process.is_alive():
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        except Exception:
+            _LOGGER.warning(
+                "ci_scenario_analysis stage=coordinator_kill_failed",
+                exc_info=True,
+            )
+    _join_scenario_processes(
+        processes,
+        timeout_seconds=SCENARIO_PROCESS_TERMINATION_GRACE_SECONDS,
+    )
 
 
 def _abort_scenario_process_pool(

@@ -85,7 +85,7 @@ const scenario = {
   selected_monthly_thresholds_kw: Array(12).fill(350),
   optimizer_run_snapshot: {
     contract_version: "ci_optimizer_run_snapshot_v2" as const,
-    calculation_revision: "ci_optimizer_run_snapshot_planner_limits_primal_simplex_v1" as const,
+    calculation_revision: "ci_optimizer_run_snapshot_planner_primary_seed_v2" as const,
     snapshot_sha256: "a".repeat(64),
     algorithm_id: "ci_peak_shaving_rolling_replay_v2" as const,
     customer_facing_permission: false as const,

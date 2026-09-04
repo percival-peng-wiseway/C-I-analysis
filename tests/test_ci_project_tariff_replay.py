@@ -70,7 +70,7 @@ def _scenario_result(
 def _result(*scenarios: dict[str, object]) -> dict[str, object]:
     return {
         "contract_version": "ci_physical_scenario_review_v6",
-        "calculation_revision": "ci_physical_scenario_planner_limits_primal_simplex_v1",
+        "calculation_revision": "ci_physical_scenario_planner_primary_seed_v2",
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,
@@ -392,7 +392,7 @@ def test_saved_replay_without_current_calculation_revision_is_stale(
 
     assert refreshed["status"] == "ready"
     assert refreshed["result"]["calculation_revision"] == (
-        "ci_physical_scenario_planner_limits_primal_simplex_v1"
+        "ci_physical_scenario_planner_primary_seed_v2"
     )
     assert [
         item["scenario_id"] for item in refreshed["result"]["scenarios"]

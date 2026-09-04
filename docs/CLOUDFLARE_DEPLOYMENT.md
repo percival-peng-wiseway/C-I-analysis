@@ -68,10 +68,13 @@ isolated battery-scenario processes. Each process keeps HiGHS single-threaded;
 this avoids solver oversubscription while using two cores concurrently and
 leaving memory headroom for the API, interval evidence and result persistence.
 `CI_SCENARIO_PROCESS_TIMEOUT_SECONDS` is a wall-clock watchdog for the complete
-process batch (600 seconds in production), whereas the optimizer's 120-second
-limit applies separately to each HiGHS solve. A watchdog expiry terminates the
-child processes and fails closed so a later request cannot wait forever behind
-an abandoned calculation lock.
+physical-analysis request (600 seconds in production), including evidence
+parsing, tariff reconstruction, dispatch and result assembly. The optimizer's
+120-second limit applies separately to each HiGHS solve. Production requests
+run in a disposable coordinator process; a watchdog expiry terminates its
+solver process group and fails closed so a later request cannot wait forever
+behind an abandoned calculation lock. Production never falls back to an
+unbounded serial solver run when process isolation is unavailable.
 
 The production Worker starts the API container in the background on an HTML
 navigation and keeps the single instance available for two hours after its
