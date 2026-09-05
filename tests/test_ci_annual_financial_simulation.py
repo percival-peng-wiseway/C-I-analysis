@@ -7,7 +7,9 @@ import pytest
 
 from solar_battery.ci_annual_financial_comparison import (
     compare_ci_annual_financial_scenarios,
+    preview_ci_design_candidate_prices,
 )
+from solar_battery.ci_annual_financial_simulation import _pv_only_candidate
 from solar_battery.ci_project_annual_financial import (
     ci_annual_financial_state,
     record_ci_annual_financial_result,
@@ -15,6 +17,7 @@ from solar_battery.ci_project_annual_financial import (
 from solar_battery.ci_project_feasibility import canonical_sha256
 from solar_battery.ci_projects import CiProjectError, create_ci_project
 from solar_battery.ci_rebate_rules import ci_rebate_ruleset_sha256
+from solar_battery.ci_scenario_analysis import CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
 from solar_battery.durable_cockpit.orm import CiProjectAnnualFinancialResultModel
 from tests.durable_test_helpers import (
     create_sqlite_session_factory,
@@ -90,6 +93,83 @@ def _device_profile() -> dict[str, object]:
     return suggested_ci_device_profile()
 
 
+def test_separate_ac_prices_pv_inverter_and_battery_pcs_once_each() -> None:
+    candidate = {
+        **_scenario(),
+        "dispatch_topology": "separate_ac",
+        "pv_inverter_capacity_kw_ac": 80.0,
+        "battery_inverter_capacity_kw_ac": 125.0,
+    }
+    preview = preview_ci_design_candidate_prices(
+        candidates=[candidate], device_profile=_device_profile()
+    )["solutions"][0]
+
+    assert preview["inverter_capacity_kw_ac"] == 125.0
+    assert preview["pv_inverter_capacity_kw_ac"] == 80.0
+    assert preview["battery_inverter_capacity_kw_ac"] == 125.0
+    assert preview["inverter_pricing"]["pv_inverter_aud_ex_gst"] == 9000.0
+    assert preview["inverter_pricing"]["battery_inverter_aud_ex_gst"] == 10000.0
+    assert preview["inverter_pricing"]["shared_inverter_aud_ex_gst"] == 0.0
+    assert preview["capex_breakdown_aud_ex_gst"]["inverter_aud"] == 19000.0
+    assert preview["gross_capex_aud_ex_gst"] == round(sum(preview["capex_breakdown_aud_ex_gst"].values()), 2)
+    assert "screening_proxy" in preview["inverter_pricing"]["basis"]
+
+    pv_only = {**candidate, "nominal_capacity_kwh": 0.0, "battery_inverter_capacity_kw_ac": 0.0}
+    pv_preview = preview_ci_design_candidate_prices(
+        candidates=[pv_only], device_profile=_device_profile()
+    )["solutions"][0]
+    assert pv_preview["capex_breakdown_aud_ex_gst"]["inverter_aud"] == 9000.0
+    assert pv_preview["inverter_pricing"]["battery_inverter_aud_ex_gst"] == 0.0
+
+
+def test_separate_ac_manual_quote_is_not_repriced_or_rebated_twice() -> None:
+    candidate = {
+        **_scenario(),
+        "dispatch_topology": "separate_ac",
+        "pv_inverter_capacity_kw_ac": 80.0,
+        "battery_inverter_capacity_kw_ac": 125.0,
+    }
+    tariff = _physical_result(b"", profile={}, scenarios=[candidate])
+    result = compare_ci_annual_financial_scenarios(
+        tariff_replay_result=tariff,
+        request={"prices": [{"scenario_id": candidate["scenario_id"], "upfront_cost_aud_ex_gst": 250000.0}]},
+    )["solutions"][0]
+
+    assert result["upfront_cost_aud_ex_gst"] == 250000.0
+    assert result["upfront_rebate_aud_ex_gst"] == 0.0
+    assert result["capex_breakdown_aud_ex_gst"] is None
+    assert result["inverter_pricing"] is None
+    assert result["inverter_capacity_kw_ac"] == 125.0
+    assert result["pv_inverter_capacity_kw_ac"] == 80.0
+    assert result["battery_inverter_capacity_kw_ac"] == 125.0
+
+
+def test_separate_ac_missing_battery_pcs_fails_closed() -> None:
+    with pytest.raises(CiProjectError):
+        preview_ci_design_candidate_prices(
+            candidates=[{**_scenario(), "dispatch_topology": "separate_ac"}],
+            device_profile=_device_profile(),
+        )
+
+
+def test_separate_ac_pv_only_comparator_removes_battery_inverter_and_support() -> None:
+    selected = {
+        **_scenario(),
+        "dispatch_topology": "separate_ac",
+        "battery_inverter_capacity_kw_ac": 125.0,
+        "reactive_support_enabled": True,
+        "reactive_support_max_kvar": 82.5,
+        "shared_inverter_apparent_power_limit_kva": 137.5,
+    }
+    candidate = _pv_only_candidate(selected)
+    assert candidate["pv_inverter_capacity_kw_ac"] == 80.0
+    assert candidate["battery_inverter_capacity_kw_ac"] == 0.0
+    assert candidate["nominal_capacity_kwh"] == 0.0
+    assert candidate["reactive_support_enabled"] is False
+    assert candidate["reactive_support_max_kvar"] == 0.0
+    assert candidate["shared_inverter_apparent_power_limit_kva"] is None
+
+
 def _physical_result(_upload, *, profile, scenarios):
     results = []
     for index, scenario in enumerate(scenarios, start=1):
@@ -124,7 +204,7 @@ def _physical_result(_upload, *, profile, scenarios):
         )
     return {
         "contract_version": "ci_physical_scenario_review_v6",
-        "calculation_revision": "ci_physical_scenario_incremental_kva_planner_v3",
+        "calculation_revision": CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,
@@ -222,6 +302,45 @@ def test_annual_finance_rejects_result_bound_to_another_tariff_replay(
                 result=result,
             )
     assert error.value.code == "ci_project_annual_financial_result_invalid"
+
+
+@pytest.mark.parametrize("changed_field", ["annual_projection", "inverter_pricing"])
+def test_finance_integrity_hash_covers_new_projection_and_inverter_fields(
+    tmp_path, changed_field,
+) -> None:
+    session_factory = create_sqlite_session_factory(
+        sqlite_url_for_path(tmp_path / "finance-audit-integrity.sqlite3")
+    )
+    actor = local_actor()
+    with session_factory.begin() as session:
+        project = create_ci_project(session, display_name="Projection integrity", actor=actor)
+        project_id = UUID(str(project["project_id"]))
+        tariff = _physical_result(None, profile={}, scenarios=[_scenario()])
+        result = _persistable_finance_result(project_id=project_id, tariff_replay_result=tariff)
+        saved = record_ci_annual_financial_result(
+            session, project_id=project_id, actor=actor,
+            expected_tariff_replay_result_sha256=canonical_sha256(tariff),
+            expected_rebate_profile_sha256=None,
+            active_tariff_replay_result=tariff, result=result,
+        )
+        assert saved["result"]["solutions"][0]["metrics"]["annual_projection"]
+    with session_factory.begin() as session:
+        row = session.get(CiProjectAnnualFinancialResultModel, project_id)
+        tampered = json.loads(json.dumps(row.result_json))
+        solution = tampered["solutions"][0]
+        if changed_field == "annual_projection":
+            solution["metrics"]["annual_projection"][0]["net_cashflow_aud"] += 1.0
+        else:
+            solution["inverter_pricing"] = {"total_inverter_aud_ex_gst": 1.0}
+        row.result_json = tampered
+    with session_factory.begin() as session:
+        state = ci_annual_financial_state(
+            session, project_id=project_id, actor=actor,
+            active_tariff_replay_result=tariff,
+        )
+    assert state["status"] == "stale"
+    assert state["result"] is None
+    assert "result_integrity_failed" in state["stale_reasons"]
 
 
 def test_annual_finance_restore_rejects_tampered_tariff_replay_binding(

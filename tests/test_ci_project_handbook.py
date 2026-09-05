@@ -378,7 +378,7 @@ def test_project_handbook_projects_saved_price_stc_and_finance_audit_without_rec
         item["parameter_id"]: item for item in finance["parameters"]
     }
     assert finance_parameters["finance.one_click_fallback.discount_rate"]["value"] == 0.08
-    assert finance_parameters["finance.one_click_fallback.discount_rate"]["active_in_current_model"] is True
+    assert finance_parameters["finance.one_click_fallback.discount_rate"]["active_in_current_model"] is False
     finance_row = finance["result_sets"][0]["rows"][0]["values"]
     assert finance_row["gross_upfront"] == finance_row["net_capex"] == 205_000.0
     assert finance_row["upfront_rebate"] == 0.0
@@ -730,7 +730,7 @@ def test_handbook_explains_peak_dispatch_and_finance_provenance() -> None:
     assert "approved_demand_rate[d] > 0" in scenario_calculations[
         "scenario.optimizer_objective"
     ]["formula"]
-    assert "zero-rate demand component is omitted" in scenario_calculations[
+    assert "Zero-rate demand components are omitted" in scenario_calculations[
         "scenario.optimizer_objective"
     ]["description"]
     assert "does not require every interval to equal the ceiling" in (
@@ -776,3 +776,10 @@ def test_handbook_explains_peak_dispatch_and_finance_provenance() -> None:
         "bound to the exact saved tariff replay" in boundary
         for boundary in finance["boundaries"]
     )
+    assert "not merely a tie-break" in scenario_calculations["scenario.optimizer_objective"]["description"]
+    assert "85.7375%" in scenario_calculations["scenario.efficiency_basis"]["description"]
+    assert "solar_geometry_screening_v1" in scenario_calculations["scenario.interval_pv"]["description"]
+    assert "neither mode is measured or weather-derived PV" in scenario_calculations["scenario.interval_pv"]["description"]
+    assert any("separate_ac" in boundary for boundary in scenario["boundaries"])
+    assert "current saved finance assumptions" in finance_calculations["finance.one_click_assumptions"]["formula"]
+    assert "not evidence of 80%" in finance_calculations["finance.reference_comparison"]["description"]

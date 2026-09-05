@@ -113,6 +113,11 @@ class CiSolutionBatteryRangeRequest(BaseModel):
 
 
 class CiSolutionSiteFactorsRequest(BaseModel):
+    pv_timing_model: Literal["generic_normalized_solar_shape_v1", "solar_geometry_screening_v1"] = "generic_normalized_solar_shape_v1"
+    latitude_degrees: float | None = Field(default=None, ge=-90, le=90)
+    longitude_degrees: float | None = Field(default=None, ge=-180, le=180)
+    location_source_label: str | None = Field(default=None, min_length=1, max_length=240)
+    location_confirmed: bool = False
     resource_basis: Literal["gross_specific_yield_before_site_losses"]
     resource_source: Literal[
         "analyst_assumption", "site_assessment", "imported_resource_study"
@@ -130,6 +135,8 @@ class CiSolutionSiteFactorsRequest(BaseModel):
 
 
 class CiSolutionConnectionOptionsRequest(BaseModel):
+    dispatch_topology: Literal["shared_hybrid_dc", "separate_ac"] = "shared_hybrid_dc"
+    battery_efficiency_basis: Literal["pack_plus_conversion", "whole_system_ac"] = "pack_plus_conversion"
     inverter_block_size_kw: float = Field(ge=0.1, le=1000)
     inverter_quantity: int | None = Field(default=None, ge=1, le=10_000)
     site_ac_headroom_kw: float = Field(gt=0, le=1_000_000)

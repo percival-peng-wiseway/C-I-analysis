@@ -1,5 +1,5 @@
 export type CiPriceBasis = "fixed" | "per_kwh_capacity" | "per_kw_discharge" | "per_kw_pv_dc" | "size_cost_table";
-export type CiSizeMetric = "pv_kwp_dc" | "pv_inverter_kw_ac" | "battery_kwh" | "battery_kw_discharge";
+export type CiSizeMetric = "pv_kwp_dc" | "pv_inverter_kw_ac" | "battery_inverter_kw_ac" | "battery_kwh" | "battery_kw_discharge";
 
 export interface CiCostRow {
   size: number;

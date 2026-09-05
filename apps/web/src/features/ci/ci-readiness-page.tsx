@@ -1,4 +1,5 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { inverterDescription } from "./ci-scenario-labels";
 import { Activity, ArrowLeft, ArrowRight, Play, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -39,7 +40,9 @@ import { ciProjectRebateProfileQueryKey } from "@/features/ci/api/ci-rebate-prof
 import {
   ciAnnualFinancialComparisonQueryKey,
   compareCiAnnualFinancialScenarios,
+  fetchCiSavedAnnualFinancialComparison,
 } from "@/features/ci/api/ci-annual-financial-comparison";
+import { resolveCiAnnualFinanceAssumptions } from "@/features/ci/api/ci-finance-assumptions";
 import {
   ciProjectTariffReplayQueryKey,
   fetchCiSavedTariffReplay,
@@ -525,7 +528,8 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
       if (!ciAnalysisPriceSnapshotMatchesPreview(snapshot, preview)) {
         throw new InvalidAnalysisPriceSnapshotError("The Net CAPEX snapshot changed. Return to Solution Generator and confirm the current quotations.");
       }
-      const [savedFeasibility, savedTariffReplay] = await Promise.all([
+      // Capture current finance inputs before dispatch can invalidate its saved result.
+      const [savedFeasibility, savedTariffReplay, savedFinance, deviceProfile] = await Promise.all([
         queryClient.fetchQuery({
           queryKey: ciSavedFeasibilityQueryKey(projectId),
           queryFn: () => fetchCiSavedFeasibility(projectId),
@@ -536,7 +540,20 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
           queryFn: () => fetchCiSavedTariffReplay(projectId),
           staleTime: 0,
         }),
+        queryClient.fetchQuery({
+          queryKey: ciAnnualFinancialComparisonQueryKey(projectId),
+          queryFn: () => fetchCiSavedAnnualFinancialComparison(projectId),
+          staleTime: 0,
+          retry: false,
+        }),
+        queryClient.fetchQuery({
+          queryKey: ciDeviceProfileQueryKey,
+          queryFn: () => fetchCiDeviceProfile(),
+          staleTime: 0,
+          retry: false,
+        }),
       ]);
+      const financeAssumptions = resolveCiAnnualFinanceAssumptions(savedFinance, deviceProfile);
       const scenarioIds = snapshot.scenarioIds;
       const feasibilityResult = savedFeasibility.status === "ready"
         && savedFeasibility.result !== null
@@ -599,6 +616,7 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
         projectId,
         pricingMode: "manual_quotes",
         prices: snapshot.prices,
+        assumptions: financeAssumptions,
       });
       setProgress({ projectId, percent: 100, label: "Analysis complete" });
       return { projectId, snapshot, feasibilityResult, tariffResult, financeResult };
@@ -753,7 +771,7 @@ function DispatchReadyState({ design, scenarioIds }: { design: CiDesignCandidate
       <aside className="border-b border-slate-200 bg-slate-50/70 p-4 xl:border-b-0 xl:border-r">
         <p className="text-xs font-semibold uppercase tracking-[.14em] text-slate-500">Generated solutions</p>
         <div className="mt-3 max-h-[540px] space-y-2 overflow-y-auto pr-1">
-          {candidates.map((scenario, index) => <div className="rounded-lg border border-slate-200 bg-white p-3" key={scenario.scenario_id}><div className="flex items-center justify-between gap-2"><strong className="text-xs text-slate-900">Solution {index + 1}</strong><span className="text-[11px] text-slate-400">Not run</span></div><p className="mt-1 text-xs tabular-nums text-slate-600">{numberLabel(scenario.pv_capacity_kwp_dc)} kWp PV · {numberLabel(scenario.nominal_capacity_kwh)} kWh battery</p><p className="mt-0.5 text-[11px] text-slate-500">{numberLabel(scenario.pv_inverter_capacity_kw_ac)} kW hybrid inverter / PCS</p></div>)}
+          {candidates.map((scenario, index) => <div className="rounded-lg border border-slate-200 bg-white p-3" key={scenario.scenario_id}><div className="flex items-center justify-between gap-2"><strong className="text-xs text-slate-900">Solution {index + 1}</strong><span className="text-[11px] text-slate-400">Not run</span></div><p className="mt-1 text-xs tabular-nums text-slate-600">{numberLabel(scenario.pv_capacity_kwp_dc)} kWp PV · {numberLabel(scenario.nominal_capacity_kwh)} kWh battery</p><p className="mt-0.5 text-[11px] text-slate-500">{inverterDescription(scenario)}</p></div>)}
         </div>
       </aside>
       <div className="grid min-h-[540px] place-items-center p-8 text-center"><div className="max-w-md"><span className="mx-auto grid size-14 place-items-center rounded-2xl bg-cyan-50 text-cyan-800"><Play className="size-6" /></span><h2 className="mt-5 text-xl font-semibold text-slate-950">Ready to simulate {candidates.length} selected {candidates.length === 1 ? "solution" : "solutions"}</h2></div></div>

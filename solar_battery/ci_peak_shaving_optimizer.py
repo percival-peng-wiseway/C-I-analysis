@@ -262,6 +262,8 @@ class CiOptimizerProblem:
         default_factory=CiReactiveSupportSpec
     )
     config: CiOptimizerConfig = field(default_factory=CiOptimizerConfig)
+    dispatch_topology: Literal["shared_hybrid_dc", "separate_ac"] = "shared_hybrid_dc"
+    pv_inverter_capacity_kw_ac: float | None = None
 
     def __post_init__(self) -> None:
         intervals = tuple(self.intervals)
@@ -282,6 +284,14 @@ class CiOptimizerProblem:
         if not isinstance(self.battery, CiBatterySpec):
             raise ValueError("battery must be a CiBatterySpec")
         _finite_positive("shared_ac_headroom_kw", self.shared_ac_headroom_kw)
+        if self.dispatch_topology not in {"shared_hybrid_dc", "separate_ac"}:
+            raise ValueError("unsupported dispatch topology")
+        if self.dispatch_topology == "separate_ac":
+            if self.pv_inverter_capacity_kw_ac is None:
+                raise ValueError("separate_ac requires an explicit PV inverter limit")
+            _finite_non_negative("pv_inverter_capacity_kw_ac", self.pv_inverter_capacity_kw_ac)
+        elif self.pv_inverter_capacity_kw_ac is not None:
+            raise ValueError("legacy shared topology must not carry a separate PV inverter limit")
         if not isinstance(self.reactive_support, CiReactiveSupportSpec):
             raise ValueError("reactive_support must be a CiReactiveSupportSpec")
         if not isinstance(self.config, CiOptimizerConfig):
@@ -745,9 +755,7 @@ def _optimize_ci_peak_shaving(
                 ),
                 shared_inverter_apparent_power_kva=_clean(
                     math.hypot(
-                        solved.pv_to_ac[index]
-                        + solved.discharge[index]
-                        - solved.grid_charge[index],
+                        _solved_reactive_port_power(problem, solved, index),
                         solved.reactive_support[index],
                     )
                 ),
@@ -839,6 +847,7 @@ def execute_ci_peak_shaving_rolling(
     replay_started_at = time.perf_counter()
     if (
         problem.reactive_support.enabled
+        and problem.dispatch_topology == "shared_hybrid_dc"
         and not any(
             component.basis == "kva" and component.rate_aud_per_unit > 0.0
             for component in problem.demand_charges
@@ -1013,6 +1022,8 @@ def execute_ci_peak_shaving_rolling(
                 for period_id, indexes in window_period_indexes.items()
             ),
             shared_ac_headroom_kw=problem.shared_ac_headroom_kw,
+            dispatch_topology=problem.dispatch_topology,
+            pv_inverter_capacity_kw_ac=problem.pv_inverter_capacity_kw_ac,
             reactive_support=problem.reactive_support,
             config=problem.config,
         )
@@ -1099,9 +1110,7 @@ def execute_ci_peak_shaving_rolling(
                     ),
                     shared_inverter_apparent_power_kva=_clean(
                         math.hypot(
-                            solved.pv_to_ac[local_index]
-                            + solved.discharge[local_index]
-                            - solved.grid_charge[local_index],
+                            _solved_reactive_port_power(window_problem, solved, local_index),
                             solved.reactive_support[local_index],
                         )
                     ),
@@ -1169,9 +1178,7 @@ def execute_ci_peak_shaving_rolling(
                 ),
                 shared_inverter_apparent_power_kva=_clean(
                     math.hypot(
-                        full_solved.pv_to_ac[index]
-                        + full_solved.discharge[index]
-                        - full_solved.grid_charge[index],
+                        _solved_reactive_port_power(problem, full_solved, index),
                         full_solved.reactive_support[index],
                     )
                 ),
@@ -1375,7 +1382,8 @@ def _annual_planner_problem(
     source_duration = problem.intervals[0].duration_hours
     target_duration = 0.25
     if (
-        problem.config.allow_grid_charging
+        problem.dispatch_topology == "separate_ac"
+        or problem.config.allow_grid_charging
         or source_duration > target_duration + 1e-12
         or not any(
             component.basis == "kva" for component in problem.demand_charges
@@ -1695,6 +1703,39 @@ def _conservative_reactive_support_bound(
     return min(exact_bound, max(0.0, polygon_bound))
 
 
+def _reactive_port_power(
+    problem: CiOptimizerProblem, pv_to_ac: float, discharge: float,
+    grid_charge: float, pv_charge: float,
+) -> float:
+    if problem.dispatch_topology == "separate_ac":
+        return discharge - grid_charge - pv_charge
+    return pv_to_ac + discharge - grid_charge
+
+
+def _solved_reactive_port_power(
+    problem: CiOptimizerProblem, solved: _SolvedDispatch, index: int,
+) -> float:
+    return _reactive_port_power(
+        problem, solved.pv_to_ac[index], solved.discharge[index],
+        solved.grid_charge[index], solved.pv_charge[index],
+    )
+
+
+def _pv_supply_limit(problem: CiOptimizerProblem, row: CiOptimizerInterval) -> float:
+    if problem.dispatch_topology == "separate_ac":
+        assert problem.pv_inverter_capacity_kw_ac is not None
+        return min(row.pv_kw, problem.pv_inverter_capacity_kw_ac)
+    return row.pv_kw
+
+
+def _idle_pv_limit(problem: CiOptimizerProblem, row: CiOptimizerInterval) -> float:
+    limit = min(_pv_supply_limit(problem, row), problem.shared_ac_headroom_kw)
+    if problem.dispatch_topology == "shared_hybrid_dc" and problem.reactive_support.enabled:
+        assert problem.reactive_support.inverter_apparent_power_limit_kva is not None
+        limit = min(limit, problem.reactive_support.inverter_apparent_power_limit_kva)
+    return limit
+
+
 def _shared_ac_port_absolute_bound(
     problem: CiOptimizerProblem,
     row: CiOptimizerInterval,
@@ -1703,6 +1744,12 @@ def _shared_ac_port_absolute_bound(
 ) -> float:
     """Return a safe box bound for the shared-port active-power expression."""
 
+    if problem.dispatch_topology == "separate_ac":
+        # The P-Q envelope belongs to the battery PCS, not the sum of two
+        # independent inverters. PV charging traverses this AC battery port.
+        return 0.0 if forced_idle else max(
+            problem.battery.max_charge_kw, problem.battery.max_discharge_kw
+        )
     pv_to_ac_upper = min(row.pv_kw, problem.shared_ac_headroom_kw)
     discharge_upper = (
         0.0
@@ -2360,7 +2407,8 @@ def _build_model(
     battery = problem.battery
     count = len(problem.intervals)
     fast_equivalent_pv_allocation = (
-        not problem.reactive_support.enabled
+        problem.dispatch_topology == "shared_hybrid_dc"
+        and not problem.reactive_support.enabled
         and problem.config.allow_grid_charging
         and battery.max_charge_kw <= problem.shared_ac_headroom_kw
         and all(
@@ -2574,7 +2622,7 @@ def _build_model(
                 if fast_equivalent_pv_allocation
                 else -highspy.kHighsInf
             ),
-            upper=row.pv_kw,
+            upper=_pv_supply_limit(problem, row),
         )
         if fast_equivalent_pv_allocation:
             add_row(
@@ -2618,9 +2666,10 @@ def _build_model(
             ):
                 add_row(
                     (
-                        (pv_to_ac[index], active_weight),
+                        (pv_to_ac[index], active_weight if problem.dispatch_topology == "shared_hybrid_dc" else 0.0),
                         (discharge[index], active_weight),
                         (grid_charge[index], -active_weight),
+                        (pv_charge[index], -active_weight if problem.dispatch_topology == "separate_ac" else 0.0),
                         (reactive_support[index], reactive_weight),
                     ),
                     upper=conservative_radius,
@@ -2980,12 +3029,15 @@ def _physical_dispatch_violation(
         discharge = solved.discharge[index]
         reactive_support = solved.reactive_support[index]
         shared_port = pv_to_ac + discharge - grid_charge
-        apparent_power = math.hypot(shared_port, reactive_support)
+        apparent_power = math.hypot(
+            _reactive_port_power(problem, pv_to_ac, discharge, grid_charge, pv_charge),
+            reactive_support,
+        )
         apparent_limit = problem.reactive_support.inverter_apparent_power_limit_kva
         if (
             grid_charge + pv_charge > problem.battery.max_charge_kw + tolerance
             or discharge > problem.battery.max_discharge_kw + tolerance
-            or pv_to_ac + pv_charge > row.pv_kw + tolerance
+            or pv_to_ac + pv_charge > _pv_supply_limit(problem, row) + tolerance
             or pv_export > pv_to_ac + tolerance
             or pv_to_ac + discharge - pv_export > row.load_kw + tolerance
             or solved.grid_import[index] < -tolerance
@@ -3202,15 +3254,7 @@ def _replay_bill_from_dispatch(
 
 def _idle_bill(problem: CiOptimizerProblem) -> float:
     pv_to_ac = tuple(
-        min(
-            row.pv_kw,
-            problem.shared_ac_headroom_kw,
-            (
-                problem.reactive_support.inverter_apparent_power_limit_kva
-                if problem.reactive_support.enabled
-                else problem.shared_ac_headroom_kw
-            ),
-        )
+        _idle_pv_limit(problem, row)
         for row in problem.intervals
     )
     imports = tuple(
@@ -3222,7 +3266,7 @@ def _idle_bill(problem: CiOptimizerProblem) -> float:
         for index, row in enumerate(problem.intervals)
     )
     reactive_support = tuple(
-        _maximum_reactive_support(problem, index, pv_to_ac[index])
+        _maximum_reactive_support(problem, index, _reactive_port_power(problem, pv_to_ac[index], 0.0, 0.0, 0.0))
         for index in range(len(problem.intervals))
     )
     energy = sum(
@@ -3247,15 +3291,7 @@ def _idle_bill(problem: CiOptimizerProblem) -> float:
 
 def _idle_dispatch(problem: CiOptimizerProblem) -> _SolvedDispatch:
     pv_to_ac = tuple(
-        min(
-            row.pv_kw,
-            problem.shared_ac_headroom_kw,
-            (
-                problem.reactive_support.inverter_apparent_power_limit_kva
-                if problem.reactive_support.enabled
-                else problem.shared_ac_headroom_kw
-            ),
-        )
+        _idle_pv_limit(problem, row)
         for row in problem.intervals
     )
     imports = tuple(
@@ -3267,7 +3303,7 @@ def _idle_dispatch(problem: CiOptimizerProblem) -> _SolvedDispatch:
         for index, row in enumerate(problem.intervals)
     )
     reactive_support = tuple(
-        _maximum_reactive_support(problem, index, pv_to_ac[index])
+        _maximum_reactive_support(problem, index, _reactive_port_power(problem, pv_to_ac[index], 0.0, 0.0, 0.0))
         for index in range(len(problem.intervals))
     )
     initial_soc = (
@@ -3480,12 +3516,13 @@ def _dynamic_reserve(
     for index, row in enumerate(problem.intervals):
         active_limits = kw_limits_by_index[index]
         limit = min(active_limits) if active_limits else math.inf
-        net_load = max(0.0, row.load_kw - row.pv_kw)
+        pv_supply = _pv_supply_limit(problem, row)
+        net_load = max(0.0, row.load_kw - pv_supply)
         required_discharge = min(
             problem.battery.max_discharge_kw,
             max(0.0, net_load - limit),
         )
-        pv_surplus = max(0.0, row.pv_kw - row.load_kw)
+        pv_surplus = max(0.0, pv_supply - row.load_kw)
         grid_charge_headroom = (
             (
                 problem.battery.max_charge_kw
@@ -3618,8 +3655,8 @@ def _disclosures() -> tuple[str, ...]:
         "The 48-hour reserve diagnostic uses actual future synthetic inputs and is not a forecast-error model.",
         "HiGHS executes the repository-owned LP/MILP; no proprietary evaluator or score semantics are claimed.",
         "Each explicit billing period exposes battery_idle and optimized_dispatch candidates; the annual objective and AUD 0.01 throughput tie-break select zero-flow idle periods without breaking cross-period SOC continuity.",
-        "The editable shared AC-port headroom defaults to 250 kW and applies bidirectionally to PV-to-AC plus battery discharge minus grid-to-battery charging; DC-coupled PV-to-battery charging does not consume that AC headroom.",
-        "Reactive support is an explicit analyst assumption, is limited by measured site kvar, an authored kvar cap and the shared inverter circular P-Q apparent-power envelope, and cannot overcompensate or export reactive power.",
+        "The saved topology controls conversion paths: shared_hybrid_dc retains the legacy shared bidirectional port; separate_ac constrains total PV output (including battery charging) by its separate PV inverter limit and applies the battery PCS P-Q envelope to discharge minus all AC charging.",
+        "Reactive support is an explicit analyst assumption, limited by measured site kvar, authored kvar cap and the appropriate inverter circular P-Q envelope (shared hybrid or separate battery PCS), and cannot overcompensate or export reactive power.",
         "HiGHS uses a conservative 16-segment inner P-Q approximation; independent nonlinear replay checks shared-inverter apparent power, post-grid kvar and exact grid-import kVA.",
         "Battery wear is an AUD 0.05 per discharged kWh dispatch shadow cost and is not a finance or NPV cash flow.",
         "Fixed charges, tariff eligibility, GST, recommendation and customer claims are outside this optimizer contract.",

@@ -196,10 +196,9 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
         derating = _effective_derating(site)
         one_way_efficiency = math.sqrt(
             float(battery_performance["round_trip_efficiency_percent"]) / 100
-        ) * (
-            float(battery_performance["power_conversion_efficiency_percent"])
-            / 100
         )
+        if options.get("battery_efficiency_basis", "pack_plus_conversion") == "pack_plus_conversion":
+            one_way_efficiency *= float(battery_performance["power_conversion_efficiency_percent"]) / 100
         minimum_soc = 1 - (
             float(battery_performance["usable_depth_of_discharge_percent"])
             / 100
@@ -519,7 +518,13 @@ def _validate_technical_options(
         inverter_quantity = _integer(value, "inverter_quantity", positive=True)
         if inverter_quantity > 10_000:
             raise ValueError
+    topology = value.get("dispatch_topology", "shared_hybrid_dc")
+    efficiency_basis = value.get("battery_efficiency_basis", "pack_plus_conversion")
+    if topology not in ("shared_hybrid_dc", "separate_ac") or efficiency_basis not in ("pack_plus_conversion", "whole_system_ac"):
+        raise ValueError
     result = {
+        "dispatch_topology": topology,
+        "battery_efficiency_basis": efficiency_basis,
         "annual_specific_yield_kwh_per_kw": annual_yield,
         **losses,
         "system_availability_percent": availability,

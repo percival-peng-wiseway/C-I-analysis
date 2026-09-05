@@ -71,8 +71,8 @@ const result = {
     dispatch_review_projection: {
       peak_local_date: "2025-02-17",
       points: [
-        { local_time_label: "16:00", baseline_kva: 250, post_dispatch_kva: 220, site_reactive_import_kvar: 65, inverter_reactive_support_kvar: 33.625, post_grid_reactive_kvar: 31.375 },
-        { local_time_label: "16:15", baseline_kva: 300, post_dispatch_kva: 238, site_reactive_import_kvar: 80, inverter_reactive_support_kvar: 47.625, post_grid_reactive_kvar: 32.375 },
+        { local_time_label: "16:00", baseline_import_kw: 241.4, post_dispatch_import_kw: 217.75, baseline_kva: 250, post_dispatch_kva: 220, site_reactive_import_kvar: 65, inverter_reactive_support_kvar: 33.625, post_grid_reactive_kvar: 31.375, battery_discharge_kw: 0, grid_charge_kw: 0, pv_charge_kw: 0, soc_end_kwh: 180 },
+        { local_time_label: "16:15", baseline_import_kw: 289.1, post_dispatch_import_kw: 235.78, baseline_kva: 300, post_dispatch_kva: 238, site_reactive_import_kvar: 80, inverter_reactive_support_kvar: 47.625, post_grid_reactive_kvar: 32.375, battery_discharge_kw: 0, grid_charge_kw: 0, pv_charge_kw: 0, soc_end_kwh: 180 },
       ],
     },
   }],
@@ -366,9 +366,17 @@ describe("Tariff replay result workspace", () => {
     expect(screen.getByRole("heading", { name: "Optimized monthly demand ceilings" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Intervals" }));
+    expect(screen.getByRole("img", { name: "Tariff interval demand replay" })).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "Scenario Analysis active-power peak shaving replay" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Optimized dispatch" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("img", { name: "Tariff battery charge and discharge" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Tariff battery state of charge" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Active import · kW" }));
+    expect(within(screen.getByRole("img", { name: "Tariff interval demand replay" })).getByText("16:00 · Post-dispatch import kW: 217.75 kW")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Technical screening · kW" }));
     expect(screen.getByRole("img", { name: "Scenario Analysis active-power peak shaving replay" })).toBeTruthy();
     expect(screen.getByText("2 intervals at target")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Tariff peak · kVA" }));
+    await user.click(screen.getByRole("button", { name: "Optimized dispatch" }));
     expect(screen.getByRole("img", { name: "Tariff interval demand replay" })).toBeTruthy();
     expect(screen.getByText("Battery idle on this day")).toBeTruthy();
 

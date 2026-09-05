@@ -163,6 +163,11 @@ beforeEach(() => {
     status: "ready",
     profile_sha256: "a".repeat(64),
     profile: {
+      discount_rate: 0.07,
+      annual_value_escalation_rate: 0.03,
+      annual_value_degradation_rate: 0.01,
+      annual_om_fraction_of_capex: 0.02,
+      analysis_term_years: 20,
       default_equipment_selection: {
         pv_product_id: "pv-one",
         battery_product_id: "battery-one",
@@ -287,6 +292,13 @@ describe("Finance analysis runner", () => {
       projectId: "project-1",
       pricingMode: "manual_quotes",
       prices: [{ scenarioId: "case-1", upfrontCostAudExGst: 200000 }],
+      assumptions: {
+        discountRate: 0.07,
+        annualValueEscalationRate: 0.03,
+        annualValueDegradationRate: 0.01,
+        annualOmFractionOfCapex: 0.02,
+        analysisTermYears: 20,
+      },
     });
   });
 
@@ -340,7 +352,15 @@ describe("Finance analysis runner", () => {
       saved_at: "2026-09-04T00:00:00Z",
       stale_reasons: [],
       result: {
-        assumptions: { price_source: "analyst_entered_total_solution_price" },
+        assumptions: {
+          price_source: "analyst_entered_total_solution_price",
+          discount_rate: 0.09,
+          annual_value_escalation_rate: 0.04,
+          annual_value_degradation_rate: 0.02,
+          annual_om_fraction_of_capex: 0.025,
+          analysis_term_years: 25,
+          replacement_events_aud: [],
+        },
         solutions: [
           { scenario_id: "case-1", upfront_cost_aud_ex_gst: 200000 },
           { scenario_id: "case-2", upfront_cost_aud_ex_gst: 210000 },
@@ -361,6 +381,15 @@ describe("Finance analysis runner", () => {
     await waitFor(() => expect(mocks.compareFinance).toHaveBeenCalledTimes(1));
 
     expect(view.client.getQueryData(["finance", "project-1"])).toEqual(notSavedFinance);
+    expect(mocks.compareFinance).toHaveBeenCalledWith(expect.objectContaining({
+      assumptions: {
+        discountRate: 0.09,
+        annualValueEscalationRate: 0.04,
+        annualValueDegradationRate: 0.02,
+        annualOmFractionOfCapex: 0.025,
+        analysisTermYears: 25,
+      },
+    }));
     expect(view.client.getQueryData(["tariff-replay", "project-1"])).toMatchObject({
       status: "ready",
       result: { scenarios: [{ scenario_id: "case-1", authored_inputs: { reactive_support_enabled: false } }] },

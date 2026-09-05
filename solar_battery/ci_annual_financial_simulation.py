@@ -149,6 +149,16 @@ def _pv_only_candidate(selected: dict[str, object]) -> dict[str, object]:
         "max_charge_kw": 0.0,
         "max_discharge_kw": 0.0,
         "allow_grid_charging": False,
+        **(
+            {
+                "battery_inverter_capacity_kw_ac": 0.0,
+                "reactive_support_enabled": False,
+                "reactive_support_max_kvar": 0.0,
+                "shared_inverter_apparent_power_limit_kva": None,
+            }
+            if selected.get("dispatch_topology") == "separate_ac"
+            else {}
+        ),
     }
 
 

@@ -22,6 +22,7 @@ PRICE_BASES = {
 SIZE_METRICS = {
     "pv_kwp_dc",
     "pv_inverter_kw_ac",
+    "battery_inverter_kw_ac",
     "battery_kwh",
     "battery_kw_discharge",
 }
@@ -162,7 +163,7 @@ def publish(session, *, version_id: UUID, workspace_id: str, owner_id: str, acto
     return _serialize(row)
 
 
-def resolve_price(session, *, version_id: UUID, product_ids: list[str], installation_item_ids: list[str], capacity_kwh: float, discharge_kw: float, pv_capacity_kw: float, workspace_id: str, owner_id: str, pv_inverter_kw: float = 0.0) -> dict[str, object]:
+def resolve_price(session, *, version_id: UUID, product_ids: list[str], installation_item_ids: list[str], capacity_kwh: float, discharge_kw: float, pv_capacity_kw: float, workspace_id: str, owner_id: str, pv_inverter_kw: float = 0.0, battery_inverter_kw: float | None = None) -> dict[str, object]:
     row = _owned(session, version_id, workspace_id, owner_id)
     if row.status != "published":
         raise CiPricingCatalogError("new solutions require a published price catalog")
@@ -202,6 +203,7 @@ def resolve_price(session, *, version_id: UUID, product_ids: list[str], installa
                 discharge_kw=discharge_kw,
                 pv_capacity_kw=pv_capacity_kw,
                 pv_inverter_kw=pv_inverter_kw,
+                battery_inverter_kw=battery_inverter_kw,
             )
         )
         if basis == "size_cost_table":
@@ -309,11 +311,21 @@ def _size_quantity(
     discharge_kw: float,
     pv_capacity_kw: float,
     pv_inverter_kw: float,
+    battery_inverter_kw: float | None = None,
 ) -> float:
     if metric == "pv_kwp_dc":
         return pv_capacity_kw
     if metric == "pv_inverter_kw_ac":
         return pv_inverter_kw
+    if metric == "battery_inverter_kw_ac":
+        if (
+            isinstance(battery_inverter_kw, bool)
+            or not isinstance(battery_inverter_kw, (float, int))
+            or not math.isfinite(battery_inverter_kw)
+            or battery_inverter_kw < 0
+        ):
+            raise CiPricingCatalogError("battery inverter pricing requires an explicit AC capacity")
+        return float(battery_inverter_kw)
     if metric == "battery_kwh":
         return capacity_kwh
     if metric == "battery_kw_discharge":

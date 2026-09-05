@@ -287,7 +287,7 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     assert result["contract_version"] == "ci_physical_scenario_review_v6"
     assert (
         result["calculation_revision"]
-        == "ci_physical_scenario_incremental_kva_planner_v3"
+        == scenario_module.CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
     )
     assert result["customer_facing_permission"] is False
     assert result["recommendation_permitted"] is False
@@ -357,7 +357,7 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     )
     assert all(
         row["optimizer_run_snapshot"]["calculation_revision"]
-        == "ci_optimizer_run_snapshot_incremental_kva_planner_v3"
+        == scenario_module.CI_OPTIMIZER_RUN_SNAPSHOT_CALCULATION_REVISION
         for row in result["scenarios"]
     )
     assert all(

@@ -208,6 +208,81 @@ def test_python_finance_applies_value_escalation_before_om() -> None:
     assert metrics["annual_cashflows_aud"] == [24000.0, 24625.0, 25265.62]
 
 
+def test_annual_projection_audits_each_factor_without_claiming_aged_dispatch() -> None:
+    metrics = calculate_metrics(
+        {
+            "upfront_cost_aud": 100000.0,
+            "first_year_net_value_aud": 25000.0,
+            "annual_om_cost_aud": 1000.0,
+            "replacement_events_aud": [{"year": 2, "amount_aud": 5000.0}],
+            "discount_rate": 0.08,
+            "annual_value_degradation_rate": 0.02,
+            "annual_value_escalation_rate": 0.025,
+            "analysis_term_years": 3,
+        }
+    )
+
+    rows = metrics["annual_projection"]
+    assert metrics["projection_method"] == "representative_year_aggregate_value_projection_v1"
+    assert metrics["physical_redispatch_each_year"] is False
+    assert "do not separately model" in metrics["projection_disclosure"]
+    assert rows[0]["value_escalation_factor"] == 1.0
+    assert rows[0]["aggregate_value_retention_factor"] == 1.0
+    assert rows[0]["projected_tariff_savings_aud"] == 25000.0
+    assert rows[0]["cumulative_cashflow_aud"] == -76000.0
+    assert rows[1]["projected_tariff_savings_aud"] == 25112.5
+    assert rows[1]["net_cashflow_aud"] == 19112.5
+    assert rows[1]["replacement_cost_aud"] == 5000.0
+    assert rows[2]["aggregate_value_retention_factor"] == pytest.approx(0.98**2)
+    assert rows[2]["annual_om_cost_aud"] == 1000.0
+    assert [row["net_cashflow_aud"] for row in rows] == metrics["annual_cashflows_aud"]
+    assert rows[-1]["cumulative_cashflow_aud"] == metrics["lifetime_net_value_undiscounted_aud"]
+    npv = -100000 + sum(
+        (25000 * 1.025**year * 0.98**year - 1000 - (5000 if year == 1 else 0))
+        / 1.08 ** (year + 1)
+        for year in range(3)
+    )
+    assert metrics["net_present_value_aud"] == round(npv, 2)
+
+
+def test_finance_flags_non_conventional_cashflows_instead_of_arbitrary_irr() -> None:
+    metrics = calculate_metrics(
+        {
+            "upfront_cost_aud": 100.0,
+            "first_year_net_value_aud": 230.0,
+            "replacement_events_aud": [{"year": 2, "amount_aud": 362.0}],
+            "discount_rate": 0.08,
+            "annual_value_degradation_rate": 0.0,
+            "analysis_term_years": 2,
+        }
+    )
+
+    # -100 + 230/(1+r) - 132/(1+r)^2 has two IRRs: 10% and 20%.
+    assert metrics["annual_cashflows_aud"] == [230.0, -132.0]
+    assert metrics["internal_rate_of_return"] is None
+    assert metrics["internal_rate_of_return_status"] == "non_conventional_cashflows"
+    assert metrics["net_present_value_aud"] == pytest.approx(-0.21)
+
+
+def test_finance_projection_keeps_negative_savings_and_no_payback() -> None:
+    metrics = calculate_metrics(
+        {
+            "upfront_cost_aud": 100000.0,
+            "first_year_net_value_aud": -2500.0,
+            "annual_om_cost_aud": 1000.0,
+            "discount_rate": 0.08,
+            "annual_value_degradation_rate": 0.0,
+            "analysis_term_years": 3,
+        }
+    )
+
+    assert metrics["annual_cashflows_aud"] == [-3500.0] * 3
+    assert metrics["annual_projection"][0]["projected_tariff_savings_aud"] == -2500.0
+    assert metrics["payback_period_years"] is None
+    assert metrics["internal_rate_of_return"] is None
+    assert metrics["internal_rate_of_return_status"] == "no_bracketed_root"
+
+
 def test_financial_solution_save_list_and_star_are_workspace_persistent(tmp_path) -> None:
     with create_test_client(sqlite_url_for_path(tmp_path / "ci-finance.sqlite3")) as client:
         version_id = _publish_catalog(client)

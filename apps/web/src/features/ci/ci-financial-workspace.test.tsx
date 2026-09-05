@@ -70,6 +70,9 @@ describe("C&I pricing catalog workspace", () => {
 
     expect(html).toContain("Size cost table");
     expect(html).toContain("Battery kWh");
+    expect(html).toContain('value="battery_inverter_kw_ac"');
+    expect(html).toContain("Battery PCS kW AC");
+    expect(html).toContain("PV inverter kW AC");
     expect(html).toContain("Capital (AUD)");
     expect(html).toContain("Replacement (AUD)");
     expect(html).toContain("O&amp;M (AUD/year)");

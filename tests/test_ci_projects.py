@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from uuid import UUID
+from solar_battery.ci_scenario_analysis import CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
 
 from solar_battery.ci_project_evidence import (
     CiEvidenceSource,
@@ -421,7 +422,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         )
         return {
             "contract_version": "ci_physical_scenario_review_v6",
-            "calculation_revision": "ci_physical_scenario_incremental_kva_planner_v3",
+            "calculation_revision": CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
             "analysis_status": "ready",
             "analysis_mode": "evidence_limited_internal_review",
             "customer_facing_permission": False,
@@ -549,9 +550,16 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         )
         assert feasibility_result.status_code == 200
         assert feasibility_result.json()["contract_version"] == "ci_design_feasibility_v5"
+        normalized_scenario = {
+            **_scenario(),
+            "dispatch_topology": "shared_hybrid_dc",
+            "battery_efficiency_basis": "pack_plus_conversion",
+            "battery_inverter_capacity_kw_ac": None,
+            "pv_geometry": None,
+        }
         assert captured_feasibility == {
             "interval_bytes": b"synthetic",
-            "scenarios": [_scenario()],
+            "scenarios": [normalized_scenario],
         }
         restored_feasibility = client.get(
             f"/api/commercial-industrial/projects/{project['project_id']}/design-feasibility"
@@ -575,7 +583,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         assert activity_result.json()["contract_version"] == "ci_interval_activity_v1"
         assert captured_activity == {
             "interval_bytes": b"synthetic",
-            "scenarios": [_scenario()],
+            "scenarios": [normalized_scenario],
             "scenario_id": _scenario()["scenario_id"],
             "start_date": "2026-01-02",
             "days": 3,
@@ -589,7 +597,7 @@ def test_ci_projects_are_persistent_and_design_validation_is_project_scoped(
         assert captured_tariff == {
             "interval_bytes": b"synthetic",
             "profile": {"profile_id": "test"},
-            "scenarios": [_scenario()],
+            "scenarios": [normalized_scenario],
         }
         restored_tariff = client.get(
             f"/api/commercial-industrial/projects/{project['project_id']}/tariff-replay"
@@ -794,7 +802,7 @@ def test_project_analysis_accepts_only_saved_selected_solution_subsets(
             result_ids = scenario_ids[:1]
         return {
             "contract_version": "ci_physical_scenario_review_v6",
-            "calculation_revision": "ci_physical_scenario_incremental_kva_planner_v3",
+            "calculation_revision": CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
             "analysis_status": "ready",
             "analysis_mode": "evidence_limited_internal_review",
             "customer_facing_permission": False,

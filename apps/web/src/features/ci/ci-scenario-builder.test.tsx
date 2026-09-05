@@ -12,6 +12,28 @@ import { CiScenarioBuilder } from "./ci-scenario-builder";
 afterEach(cleanup);
 
 describe("CiScenarioBuilder", () => {
+  it("requires confirmed coordinates for geometry timing and submits independent topology and RTE basis", async () => {
+    const onSubmit = vi.fn();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText("PV interval model"), "solar_geometry_screening_v1");
+    const save = screen.getByRole("button", { name: "Save configuration & generate solutions" });
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText("Latitude (°)"), "-37.8");
+    await user.type(screen.getByLabelText("Longitude (°)"), "144.9");
+    await user.type(screen.getByLabelText("Coordinate source"), "Confirmed site map");
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByLabelText("Coordinates confirmed"));
+    await user.selectOptions(screen.getByLabelText("Electrical topology"), "separate_ac");
+    await user.selectOptions(screen.getByLabelText("Battery RTE basis"), "whole_system_ac");
+    await user.click(save);
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      site_factors: { pv_timing_model: "solar_geometry_screening_v1", latitude_degrees: -37.8, longitude_degrees: 144.9, location_confirmed: true },
+      connection_options: { dispatch_topology: "separate_ac", battery_efficiency_basis: "whole_system_ac" },
+    });
+    await user.clear(screen.getByLabelText("Latitude (°)"));
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+  });
   it("submits only the profile selections, site factors and ranges for Python generation", async () => {
     const onSubmit = vi.fn();
     render(

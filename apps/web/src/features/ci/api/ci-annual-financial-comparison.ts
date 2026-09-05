@@ -1,4 +1,5 @@
 export interface CiAnnualFinancialComparisonSolution {
+  inverter_pricing?: CiInverterPricing | null;
   scenario_id: string;
   label: string;
   physical_review_rank: number;
@@ -6,6 +7,9 @@ export interface CiAnnualFinancialComparisonSolution {
   pv_capacity_kwp_dc: number;
   battery_capacity_kwh: number;
   inverter_capacity_kw_ac: number;
+  dispatch_topology?: "shared_hybrid_dc" | "separate_ac";
+  pv_inverter_capacity_kw_ac?: number;
+  battery_inverter_capacity_kw_ac?: number | null;
   gross_upfront_cost_aud_ex_gst: number;
   upfront_rebate_aud_ex_gst: number;
   upfront_cost_aud_ex_gst: number;
@@ -21,6 +25,20 @@ export interface CiAnnualFinancialComparisonSolution {
   first_year_value_aud_ex_gst: number;
   annual_cost_aud_ex_gst: number;
   metrics: {
+    projection_method?: "representative_year_aggregate_value_projection_v1";
+    physical_redispatch_each_year?: false;
+    internal_rate_of_return_status?: "calculated" | "non_conventional_cashflows" | "no_bracketed_root";
+    annual_projection?: Array<{
+      year: number;
+      value_escalation_factor: number;
+      aggregate_value_retention_factor: number;
+      projected_tariff_savings_aud: number;
+      annual_om_cost_aud: number;
+      replacement_cost_aud: number;
+      net_cashflow_aud: number;
+      discounted_cashflow_aud: number;
+      cumulative_cashflow_aud: number;
+    }>;
     net_present_value_aud: number;
     payback_period_years: number | null;
     internal_rate_of_return: number | null;
@@ -29,6 +47,16 @@ export interface CiAnnualFinancialComparisonSolution {
   };
   customer_facing_permission: false;
   recommendation_permitted: false;
+}
+
+export interface CiInverterPricing {
+  basis: string;
+  source_product_id: string;
+  pv_inverter_aud_ex_gst: number;
+  battery_inverter_aud_ex_gst: number;
+  shared_inverter_aud_ex_gst: number;
+  total_inverter_aud_ex_gst: number;
+  disclosure: string;
 }
 
 export interface CiAnnualFinancialRebateBreakdown {

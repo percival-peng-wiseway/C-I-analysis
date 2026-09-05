@@ -36,6 +36,11 @@ type CompleteBatterySolutionProfile = CiBatterySolutionProfile & {
   maximum_units: number;
 };
 type SiteFactorsForm = {
+  pv_timing_model: "generic_normalized_solar_shape_v1" | "solar_geometry_screening_v1";
+  latitude_degrees: string;
+  longitude_degrees: string;
+  location_source_label: string;
+  location_confirmed: boolean;
   resource_source: CiSolutionGenerationRequest["site_factors"]["resource_source"];
   resource_label: string;
   annual_specific_yield_kwh_per_kw: string;
@@ -49,6 +54,8 @@ type SiteFactorsForm = {
   system_availability_percent: string;
 };
 type ConnectionOptionsForm = {
+  dispatch_topology: "shared_hybrid_dc" | "separate_ac";
+  battery_efficiency_basis: "pack_plus_conversion" | "whole_system_ac";
   inverter_block_size_kw: string;
   site_ac_headroom_kw: string;
   allow_grid_charging: boolean;
@@ -70,6 +77,11 @@ const MAX_PV_CANDIDATES = 20;
 const MAX_BATTERY_CANDIDATES = 15;
 const MAX_SOLUTIONS = 200;
 const defaultSiteFactors = (): SiteFactorsForm => ({
+  pv_timing_model: "generic_normalized_solar_shape_v1",
+  latitude_degrees: "",
+  longitude_degrees: "",
+  location_source_label: "",
+  location_confirmed: false,
   resource_source: "analyst_assumption",
   resource_label: "Workspace screening assumption",
   annual_specific_yield_kwh_per_kw: "1500",
@@ -83,6 +95,8 @@ const defaultSiteFactors = (): SiteFactorsForm => ({
   system_availability_percent: "99",
 });
 const defaultConnectionOptions = (): ConnectionOptionsForm => ({
+  dispatch_topology: "shared_hybrid_dc",
+  battery_efficiency_basis: "pack_plus_conversion",
   inverter_block_size_kw: "5",
   site_ac_headroom_kw: "250",
   allow_grid_charging: true,
@@ -242,6 +256,14 @@ export function CiScenarioBuilder({
                 <NumberField label="Gross annual specific yield (kWh/kWp)" onChange={(annual_specific_yield_kwh_per_kw) => setSite({ ...site, annual_specific_yield_kwh_per_kw })} value={site.annual_specific_yield_kwh_per_kw} />
                 <NumberField label="Array azimuth (°; 0 = north)" onChange={(array_azimuth_degrees) => setSite({ ...site, array_azimuth_degrees })} value={site.array_azimuth_degrees} />
                 <NumberField label="Array tilt (°)" onChange={(array_tilt_degrees) => setSite({ ...site, array_tilt_degrees })} value={site.array_tilt_degrees} />
+                <SelectField label="PV interval model" value={site.pv_timing_model} onChange={(pv_timing_model) => setSite({ ...site, pv_timing_model: pv_timing_model as SiteFactorsForm["pv_timing_model"] })} options={[["generic_normalized_solar_shape_v1", "Legacy generic timing"], ["solar_geometry_screening_v1", "Location & orientation screening"]]} />
+                {site.pv_timing_model === "solar_geometry_screening_v1" ? <>
+                  <NumberField min={-90} label="Latitude (°)" value={site.latitude_degrees} onChange={(latitude_degrees) => setSite({ ...site, latitude_degrees, location_confirmed: false })} />
+                  <NumberField min={-180} label="Longitude (°)" value={site.longitude_degrees} onChange={(longitude_degrees) => setSite({ ...site, longitude_degrees, location_confirmed: false })} />
+                  <TextField label="Coordinate source" value={site.location_source_label} onChange={(location_source_label) => setSite({ ...site, location_source_label })} />
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={site.location_confirmed} onChange={(event) => setSite({ ...site, location_confirmed: event.target.checked })} />Coordinates confirmed</label>
+                  <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Geometry-only screening, not measured or weather-based PV. Annual yield remains the entered assumption.</p>
+                </> : <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Legacy timing does not use location, tilt or azimuth.</p>}
               </div>
               <details className="mt-4 rounded-lg border border-slate-200 bg-white">
                 <summary className="cursor-pointer list-none px-3 py-2.5 text-xs font-semibold text-slate-700">Site losses & availability</summary>
@@ -275,6 +297,8 @@ export function CiScenarioBuilder({
             <h4 className="font-semibold text-slate-950">Connection &amp; environment</h4>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <OptionGroup title="Connection capacity">
+                <SelectField label="Electrical topology" value={connection.dispatch_topology} onChange={(dispatch_topology) => setConnection({ ...connection, dispatch_topology: dispatch_topology as ConnectionOptionsForm["dispatch_topology"] })} options={[["shared_hybrid_dc", "Shared hybrid / DC charging (legacy)"], ["separate_ac", "Separate AC PV inverter & battery PCS"]]} />
+                <SelectField label="Battery RTE basis" value={connection.battery_efficiency_basis} onChange={(battery_efficiency_basis) => setConnection({ ...connection, battery_efficiency_basis: battery_efficiency_basis as ConnectionOptionsForm["battery_efficiency_basis"] })} options={[["pack_plus_conversion", "Pack RTE + converter losses"], ["whole_system_ac", "Whole-system AC RTE (converter included)"]]} />
                 <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
               </OptionGroup>
               <OptionGroup title="Environmental assumptions">
@@ -430,8 +454,8 @@ function OptionGroup({ children, title }: { children: ReactNode; title: string }
   return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>;
 }
 
-function NumberField({ allowBlank = false, label, onChange, value }: { allowBlank?: boolean; label: string; onChange: (value: string) => void; value: string }) {
-  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min="0" onChange={(event) => onChange(event.target.value)} placeholder={allowBlank ? "Not modelled" : undefined} step="any" type="number" value={value} /></label>;
+function NumberField({ allowBlank = false, min = 0, label, onChange, value }: { allowBlank?: boolean; min?: number; label: string; onChange: (value: string) => void; value: string }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min={min} onChange={(event) => onChange(event.target.value)} placeholder={allowBlank ? "Not modelled" : undefined} step="any" type="number" value={value} /></label>;
 }
 
 function TextField({ className = "", label, onChange, value }: { className?: string; label: string; onChange: (value: string) => void; value: string }) {
@@ -491,6 +515,12 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
   const reactive = reactiveEnabled ? inverterProfile.maximum_reactive_power_kvar : 0;
   const emissions = connection.grid_emissions_factor_kg_co2e_per_kwh.trim() ? parseNumber(connection.grid_emissions_factor_kg_co2e_per_kwh) : null;
   const losses = [shading, soiling, temperature, wiring, other];
+  const latitude = parseNumber(site.latitude_degrees);
+  const longitude = parseNumber(site.longitude_degrees);
+  if (site.pv_timing_model === "solar_geometry_screening_v1" && (
+    !between(latitude, -90, 90) || !between(longitude, -180, 180) ||
+    !site.location_source_label.trim() || site.location_source_label.trim().length > 240 || !site.location_confirmed
+  )) return null;
   if (
     !pv || !battery ||
     !between(annualYield, 500, 3000) || !between(azimuth, 0, 360) || !between(tilt, 0, 90) ||
@@ -507,6 +537,11 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
     battery_profile_id: batteryProfile.profile_id,
     inverter_profile_id: inverterProfile.profile_id,
     site_factors: {
+      pv_timing_model: site.pv_timing_model,
+      ...(site.pv_timing_model === "solar_geometry_screening_v1" ? {
+        latitude_degrees: latitude, longitude_degrees: longitude,
+        location_source_label: site.location_source_label.trim(), location_confirmed: true,
+      } : {}),
       resource_basis: "gross_specific_yield_before_site_losses",
       resource_source: site.resource_source,
       resource_label: site.resource_label.trim(),
@@ -521,6 +556,8 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
       system_availability_percent: availability,
     },
     connection_options: {
+      dispatch_topology: connection.dispatch_topology,
+      battery_efficiency_basis: connection.battery_efficiency_basis,
       inverter_block_size_kw: block,
       site_ac_headroom_kw: headroom,
       allow_grid_charging: true,
@@ -648,6 +685,11 @@ function restoreV2(context: CiDesignContextV2): RestoredBuilderState {
       step: formatCandidateValue(context.search_space.battery_range.step_kwh),
     },
     site: {
+      pv_timing_model: context.site_factors.pv_timing_model ?? "generic_normalized_solar_shape_v1",
+      latitude_degrees: context.site_factors.latitude_degrees == null ? "" : String(context.site_factors.latitude_degrees),
+      longitude_degrees: context.site_factors.longitude_degrees == null ? "" : String(context.site_factors.longitude_degrees),
+      location_source_label: context.site_factors.location_source_label ?? "",
+      location_confirmed: context.site_factors.location_confirmed === true,
       resource_source: context.site_factors.resource_source,
       resource_label: context.site_factors.resource_label,
       annual_specific_yield_kwh_per_kw: formatNumber(context.site_factors.annual_specific_yield_kwh_per_kw),
@@ -682,6 +724,8 @@ function siteFormFromTechnical(options: CiDesignContext["technical_options"]): S
 
 function connectionFormFromTechnical(options: CiDesignContext["technical_options"]): ConnectionOptionsForm {
   return {
+    dispatch_topology: options.dispatch_topology ?? "shared_hybrid_dc",
+    battery_efficiency_basis: options.battery_efficiency_basis ?? "pack_plus_conversion",
     inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
     site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
     allow_grid_charging: true,

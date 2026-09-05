@@ -192,7 +192,10 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
     if (path.endsWith("/settings/device-profile")) {
       const suggested = deviceProfileFixture;
       if (init?.method === "PUT") return new Response(JSON.stringify({ contract_version: "ci_device_profile_state_v1", status: "ready", updated_at: "2026-08-19", profile_sha256: "a".repeat(64), profile: JSON.parse(String(init.body)), suggested_profile: suggested }), { status: 200 });
-      const payload = { contract_version: "ci_device_profile_state_v1", status: "not_configured", updated_at: null, profile_sha256: null, profile: null, suggested_profile: suggested };
+      // A saved generated solution space has a configured workspace profile.
+      const payload = currentSavedDesign
+        ? { contract_version: "ci_device_profile_state_v1", status: "ready", updated_at: "2026-09-04", profile_sha256: "c".repeat(64), profile: suggested, suggested_profile: suggested }
+        : { contract_version: "ci_device_profile_state_v1", status: "not_configured", updated_at: null, profile_sha256: null, profile: null, suggested_profile: suggested };
       deviceProfileReads += 1;
       return overrides.deviceProfile?.(deviceProfileReads, payload) ?? new Response(JSON.stringify(payload), { status: 200 });
     }

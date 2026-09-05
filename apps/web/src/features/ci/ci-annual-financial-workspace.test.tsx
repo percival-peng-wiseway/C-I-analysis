@@ -141,15 +141,12 @@ it("applies the shared Device profile to all tariff scenarios", async () => {
   expect(screen.getAllByText("+$90,000").length).toBeGreaterThan(0);
 });
 
-it("shows the supplied Chef Q Top 3 report snapshot when replay is not ready", async () => {
+it("never substitutes a named project's hardcoded report when saved tariff results are missing", async () => {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><CiAnnualFinancialWorkspace onComplete={() => undefined} profileReady project={chefQProject} /></QueryClientProvider>);
 
-  expect(await screen.findByRole("heading", { name: "Commercial comparison snapshot" })).toBeTruthy();
-  expect(screen.queryByRole("region", { name: "Highest NPV option" })).toBeNull();
-  expect(screen.getByRole("heading", { name: "250 kWh battery" })).toBeTruthy();
-  expect(screen.getByRole("img", { name: "Top 3 financial return comparison" })).toBeTruthy();
-  expect(screen.getAllByText("$417,782.55").length).toBeGreaterThan(0);
-  expect(screen.getAllByText("375.84 kWh battery").length).toBeGreaterThan(0);
-  expect(screen.getByText("+$1,542.68/yr")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /Run finance/ })).toBeNull();
+  expect(await screen.findByText("Run Tariff replay before calculating Annual finance.")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Commercial comparison snapshot" })).toBeNull();
+  expect(screen.queryByRole("img", { name: "Top 3 financial return comparison" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Run .*solutions/ })).toBeNull();
+  expect(fixtures.compare).not.toHaveBeenCalled();
 });

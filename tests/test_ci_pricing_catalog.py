@@ -4,7 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from uuid import UUID
 
+import pytest
+
 from solar_battery.ci_pricing_catalog import (
+    CiPricingCatalogError,
     _resolve_cost_table,
     create_draft,
     publish,
@@ -128,6 +131,12 @@ def test_inverter_cost_table_resolves_from_authored_ac_capacity() -> None:
         }],
         "installation_items": [],
     }
+    catalog["products"].append({
+        **catalog["products"][0],
+        "item_id": "battery-pcs",
+        "label": "Separate battery PCS",
+        "size_metric": "battery_inverter_kw_ac",
+    })
     version_id = UUID(draft["catalog_version_id"])
     updated = replace_draft(session, version_id=version_id, catalog=catalog, workspace_id="w", owner_id="o")
     published = publish(session, version_id=version_id, workspace_id="w", owner_id="o", actor_id="a", expected_hash=updated["catalog_hash"])
@@ -145,3 +154,23 @@ def test_inverter_cost_table_resolves_from_authored_ac_capacity() -> None:
     )
     assert resolved["resolved_upfront_cost_aud"] == 9500.0
     assert resolved["lines"][0]["quantity"] == 100.0
+
+    separated = resolve_price(
+        session, version_id=version_id,
+        product_ids=["inverter", "battery-pcs"], installation_item_ids=[],
+        capacity_kwh=400.0, discharge_kw=180.0, pv_capacity_kw=125.0,
+        pv_inverter_kw=100.0, battery_inverter_kw=125.0,
+        workspace_id="w", owner_id="o",
+    )
+    assert separated["resolved_upfront_cost_aud"] == 19500.0
+    assert {line["size_metric"]: line["quantity"] for line in separated["lines"]} == {
+        "pv_inverter_kw_ac": 100.0,
+        "battery_inverter_kw_ac": 125.0,
+    }
+    with pytest.raises(CiPricingCatalogError, match="explicit AC capacity"):
+        resolve_price(
+            session, version_id=version_id,
+            product_ids=["battery-pcs"], installation_item_ids=[],
+            capacity_kwh=400.0, discharge_kw=180.0, pv_capacity_kw=125.0,
+            pv_inverter_kw=100.0, workspace_id="w", owner_id="o",
+        )

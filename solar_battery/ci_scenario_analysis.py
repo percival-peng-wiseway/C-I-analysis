@@ -49,11 +49,17 @@ from solar_battery.ci_peak_shaving_optimizer import (
 from solar_battery.models import CleanedInterval
 from solar_battery.peak_shaving import PeakShavingPeriodInput
 from solar_battery.solar_profile import build_pv_profile
+from solar_battery.ci_pv_timing import (
+    SOLAR_GEOMETRY_PROFILE_ID,
+    build_geometry_pv_profile,
+    normalize_pv_geometry,
+    pv_geometry_cache_key,
+)
 
 
 CI_PHYSICAL_SCENARIO_CONTRACT_VERSION = "ci_physical_scenario_review_v6"
 CI_PHYSICAL_SCENARIO_CALCULATION_REVISION = (
-    "ci_physical_scenario_incremental_kva_planner_v3"
+    "ci_physical_scenario_topology_geometry_v4"
 )
 CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
     "ci_dispatch_review_projection_v2"
@@ -61,7 +67,7 @@ CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
 CI_THREE_CASE_COMPARISON_CONTRACT_VERSION = "ci_three_case_peak_day_comparison_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CONTRACT_VERSION = "ci_optimizer_run_snapshot_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CALCULATION_REVISION = (
-    "ci_optimizer_run_snapshot_incremental_kva_planner_v3"
+    "ci_optimizer_run_snapshot_topology_geometry_v4"
 )
 CI_OPTIMIZER_AUDIT_PROJECTION_CONTRACT_VERSION = "ci_optimizer_audit_projection_v2"
 CI_PV_ONLY_EXACT_ID = "ci_pv_only_shared_pq_v1"
@@ -171,6 +177,10 @@ class _Scenario:
     initial_soc_fraction: float
     allow_grid_charging: bool
     grid_emissions_factor_kg_co2e_per_kwh: float
+    dispatch_topology: str = "shared_hybrid_dc"
+    battery_efficiency_basis: str = "pack_plus_conversion"
+    battery_inverter_capacity_kw_ac: float | None = None
+    pv_geometry: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -1307,7 +1317,7 @@ def _physical_scenario_result(
         "assumptions": [
             "Battery inputs were explicitly authored for this request and are not product defaults.",
             "PV uses the selected normalized shape scaled to the explicitly authored annual specific yield and derating factor.",
-            "PV-to-battery charging is DC-coupled and does not consume the shared bidirectional AC-port headroom.",
+            "The saved dispatch topology is authoritative: shared_hybrid_dc retains the legacy shared port; separate_ac routes PV charging through the PV inverter and battery PCS, whose P-Q capability is separate from PV output.",
             "Reactive support is Python-owned, explicitly authored, never exceeds measured site reactive import, and is customer-facing disabled.",
             "A circular P-Q capability is an editable analyst assumption, not a Fox equipment fact or guarantee; exact nonlinear replay validates every interval.",
             "The repository-owned HiGHS planner and 48-hour/24-hour rolling replay are the dispatch authority.",
@@ -1480,6 +1490,8 @@ def _validated_comparison_pair(
     ):
         raise CiScenarioAnalysisError("comparison_pair_invalid")
     pv_pair_fields = (
+        "dispatch_topology",
+        "pv_geometry",
         "pv_system_id",
         "pv_profile_id",
         "pv_capacity_kwp_dc",
@@ -1494,6 +1506,10 @@ def _validated_comparison_pair(
         "pv_annual_specific_yield_kwh_per_kw",
         "pv_derating_factor",
     )
+    if pv_only.dispatch_topology == "separate_ac":
+        pv_pair_fields = tuple(field for field in pv_pair_fields if field not in {
+            "reactive_support_enabled", "reactive_support_max_kvar", "shared_inverter_apparent_power_limit_kva",
+        })
     if any(
         getattr(pv_only, field) != getattr(pv_battery, field)
         for field in pv_pair_fields
@@ -1549,6 +1565,7 @@ def _execute_scenario(
         scenario.pv_capacity_kwp_dc,
         scenario.pv_annual_specific_yield_kwh_per_kw,
         scenario.pv_derating_factor,
+        pv_geometry_cache_key(scenario.pv_geometry),
     )
     cached_raw_pv_kw = (
         pv_generation_cache.get(pv_cache_key)
@@ -1558,10 +1575,18 @@ def _execute_scenario(
     if cached_raw_pv_kw is not None:
         raw_pv_kw = cached_raw_pv_kw
     else:
-        pv_per_kw_kwh = build_pv_profile(
-            tuple(interval.timestamp for interval in flat_intervals),
-            scenario.pv_annual_specific_yield_kwh_per_kw,
-        )
+        if scenario.pv_profile_id == SOLAR_GEOMETRY_PROFILE_ID:
+            pv_per_kw_kwh = build_geometry_pv_profile(
+                tuple(interval.timestamp for interval in flat_intervals),
+                scenario.pv_annual_specific_yield_kwh_per_kw,
+                interval_minutes=flat_intervals[0].interval_minutes,
+                geometry=scenario.pv_geometry,
+            )
+        else:
+            pv_per_kw_kwh = build_pv_profile(
+                tuple(interval.timestamp for interval in flat_intervals),
+                scenario.pv_annual_specific_yield_kwh_per_kw,
+            )
         raw_pv_kw = tuple(
             per_kw_kwh
             * scenario.pv_capacity_kwp_dc
@@ -1588,6 +1613,7 @@ def _execute_scenario(
                 raw_pv_kw[index],
                 scenario.shared_ac_headroom_kw,
                 apparent_active_limit,
+                scenario.pv_inverter_capacity_kw_ac if scenario.dispatch_topology == "separate_ac" else math.inf,
             )
             reactive_support = _pv_only_reactive_support(
                 scenario,
@@ -1608,7 +1634,8 @@ def _execute_scenario(
                     "post_grid_reactive_kvar": post_kvar,
                     "exact_grid_import_kva": math.hypot(grid_import, post_kvar),
                     "shared_inverter_apparent_power_kva": math.hypot(
-                        pv_to_ac, reactive_support
+                        0.0 if scenario.dispatch_topology == "separate_ac" else pv_to_ac,
+                        reactive_support,
                     ),
                 }
             )
@@ -2376,6 +2403,8 @@ def _optimizer_problem(
                 for period, indexes in zip(periods, period_indexes, strict=True)
             ),
             shared_ac_headroom_kw=scenario.shared_ac_headroom_kw,
+            dispatch_topology=scenario.dispatch_topology,
+            pv_inverter_capacity_kw_ac=(scenario.pv_inverter_capacity_kw_ac if scenario.dispatch_topology == "separate_ac" else None),
             reactive_support=CiReactiveSupportSpec(
                 enabled=scenario.reactive_support_enabled,
                 max_reactive_support_kvar=scenario.reactive_support_max_kvar,
@@ -2566,6 +2595,8 @@ def _optimizer_snapshot(
         "physical_assumptions": {
             "battery": asdict(problem.battery),
             "shared_ac_headroom_kw": problem.shared_ac_headroom_kw,
+            "dispatch_topology": problem.dispatch_topology,
+            "pv_inverter_capacity_kw_ac": problem.pv_inverter_capacity_kw_ac,
             "reactive_support": {
                 "contract_version": CI_REACTIVE_SUPPORT_CONTRACT_VERSION,
                 **asdict(problem.reactive_support),
@@ -3082,7 +3113,7 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
                 pv_profile_id=_supported_choice(
                     raw,
                     "pv_profile_id",
-                    {"generic_normalized_solar_shape_v1"},
+                    {"generic_normalized_solar_shape_v1", "solar_geometry_screening_v1"},
                 ),
                 pv_capacity_kwp_dc=_non_negative(raw, "pv_capacity_kwp_dc"),
                 pv_inverter_capacity_kw_ac=_non_negative(
@@ -3090,6 +3121,13 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
                     "pv_inverter_capacity_kw_ac",
                 ),
                 shared_ac_headroom_kw=_positive(raw, "shared_ac_headroom_kw"),
+                dispatch_topology=raw.get("dispatch_topology", "shared_hybrid_dc"),
+                battery_efficiency_basis=raw.get("battery_efficiency_basis", "pack_plus_conversion"),
+                battery_inverter_capacity_kw_ac=(
+                    _non_negative(raw, "battery_inverter_capacity_kw_ac")
+                    if raw.get("battery_inverter_capacity_kw_ac") is not None else None
+                ),
+                pv_geometry=(normalize_pv_geometry(raw["pv_geometry"]) if raw.get("pv_geometry") is not None else None),
                 reactive_support_enabled=raw["reactive_support_enabled"],
                 reactive_support_max_kvar=_non_negative(
                     raw, "reactive_support_max_kvar"
@@ -3153,6 +3191,17 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
                     scenario.reactive_overcompensation_permitted
                 ),
             )
+            if scenario.dispatch_topology not in {"shared_hybrid_dc", "separate_ac"} or scenario.battery_efficiency_basis not in {"pack_plus_conversion", "whole_system_ac"}:
+                raise ValueError
+            if (scenario.pv_profile_id == "solar_geometry_screening_v1") != (scenario.pv_geometry is not None):
+                raise ValueError
+            if scenario.dispatch_topology == "separate_ac":
+                if scenario.battery_inverter_capacity_kw_ac is None or scenario.battery_inverter_capacity_kw_ac + 1e-9 < max(scenario.max_charge_kw, scenario.max_discharge_kw):
+                    raise ValueError
+                if scenario.nominal_capacity_kwh == 0 and (scenario.battery_inverter_capacity_kw_ac != 0 or scenario.reactive_support_enabled):
+                    raise ValueError
+            elif scenario.battery_inverter_capacity_kw_ac is not None:
+                raise ValueError
             if (scenario.pv_capacity_kwp_dc == 0) != (
                 scenario.pv_inverter_capacity_kw_ac == 0
             ):
@@ -3175,6 +3224,7 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
             if not battery_zero and (
                 scenario.initial_soc_fraction != scenario.max_soc_fraction
                 or scenario.max_charge_kw != scenario.max_discharge_kw
+                or abs(scenario.charge_efficiency - scenario.discharge_efficiency) > 1e-10
             ):
                 raise ValueError
             results.append(scenario)
@@ -3200,15 +3250,18 @@ def _validated_scenarios(value: object) -> tuple[_Scenario, ...]:
                 item.max_soc_fraction,
                 item.initial_soc_fraction,
                 item.allow_grid_charging,
+                item.battery_efficiency_basis,
+                item.battery_inverter_capacity_kw_ac,
+                *((item.reactive_support_enabled, item.reactive_support_max_kvar, item.shared_inverter_apparent_power_limit_kva) if item.dispatch_topology == "separate_ac" else ()),
             )
             pv_signature = (
+                item.dispatch_topology,
+                _canonical_sha256(item.pv_geometry) if item.pv_geometry is not None else None,
                 item.pv_profile_id,
                 item.pv_capacity_kwp_dc,
                 item.pv_inverter_capacity_kw_ac,
                 item.shared_ac_headroom_kw,
-                item.reactive_support_enabled,
-                item.reactive_support_max_kvar,
-                item.shared_inverter_apparent_power_limit_kva,
+                *((item.reactive_support_enabled, item.reactive_support_max_kvar, item.shared_inverter_apparent_power_limit_kva) if item.dispatch_topology == "shared_hybrid_dc" else ()),
                 item.reactive_capability_curve,
                 item.reactive_capability_provenance,
                 item.reactive_overcompensation_permitted,

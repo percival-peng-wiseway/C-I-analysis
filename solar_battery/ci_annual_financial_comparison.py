@@ -99,14 +99,16 @@ def preview_ci_design_candidate_prices(
                     authored.get("nominal_capacity_kwh"),
                     message="A selected battery size is invalid.",
                 ),
-                "inverter_capacity_kw_ac": _finite_number(
-                    authored.get("pv_inverter_capacity_kw_ac"),
-                    message="A selected inverter size is invalid.",
-                ),
+                **_inverter_capacity_projection(authored),
                 "gross_capex_aud_ex_gst": gross_capex,
                 "upfront_rebate_aud_ex_gst": round(upfront_rebate, 2),
                 "net_capex_aud_ex_gst": net_capex,
                 "capex_breakdown_aud_ex_gst": capex_breakdown,
+                "inverter_pricing": _profile_inverter_pricing(
+                    authored,
+                    profile=validated_profile,
+                    equipment_selection=equipment_selection,
+                ),
                 "rebate_calculation": rebate_calculation,
             }
         )
@@ -180,6 +182,15 @@ def compare_ci_annual_financial_scenarios(
             assumptions=assumptions,
             rebate_calculation=rebate_results[str(scenario["scenario_id"])],
             apply_rebate_to_upfront=validated_profile is not None,
+            inverter_pricing=(
+                _profile_inverter_pricing(
+                    scenario["authored_inputs"],
+                    profile=validated_profile,
+                    equipment_selection=equipment_selection,
+                )
+                if validated_profile is not None and equipment_selection is not None
+                else None
+            ),
             capex_breakdown=(
                 _profile_capex_breakdown(
                     scenario,
@@ -432,6 +443,7 @@ def _financial_solution(
     rebate_calculation: dict[str, Any],
     apply_rebate_to_upfront: bool,
     capex_breakdown: dict[str, float] | None,
+    inverter_pricing: dict[str, object] | None = None,
 ) -> dict[str, object]:
     tariff_value = scenario.get("annual_tariff_value")
     if not isinstance(tariff_value, dict):
@@ -494,10 +506,7 @@ def _financial_solution(
             authored.get("nominal_capacity_kwh"),
             message="A selected battery size is invalid.",
         ),
-        "inverter_capacity_kw_ac": _finite_number(
-            authored.get("pv_inverter_capacity_kw_ac"),
-            message="A selected inverter size is invalid.",
-        ),
+        **_inverter_capacity_projection(authored),
         "upfront_cost_aud_ex_gst": net_upfront_cost,
         "gross_upfront_cost_aud_ex_gst": upfront_cost_aud,
         "upfront_rebate_aud_ex_gst": round(upfront_rebate, 2),
@@ -519,6 +528,7 @@ def _financial_solution(
         ],
         "rebate_calculation": rebate_calculation,
         "capex_breakdown_aud_ex_gst": capex_breakdown,
+        "inverter_pricing": inverter_pricing,
         "annual_om_cost_aud_ex_gst": round(annual_om, 2),
         "first_year_value_aud_ex_gst": first_year_value,
         "annual_cost_aud_ex_gst": annual_cost,
@@ -536,6 +546,38 @@ def _finite_number(value: object, *, message: str) -> float:
     if not math.isfinite(result):
         raise CiProjectError("ci_annual_financial_value_invalid", message)
     return result
+
+
+def _inverter_capacity_projection(authored: dict[str, Any]) -> dict[str, object]:
+    topology = authored.get("dispatch_topology", "shared_hybrid_dc")
+    if topology not in {"shared_hybrid_dc", "separate_ac"}:
+        raise CiProjectError(
+            "ci_annual_financial_scenario_invalid", "A selected inverter topology is invalid."
+        )
+    pv_capacity = _finite_number(
+        authored.get("pv_inverter_capacity_kw_ac"),
+        message="A selected PV inverter size is invalid.",
+    )
+    battery_capacity = (
+        _finite_number(
+            authored.get("battery_inverter_capacity_kw_ac"),
+            message="A selected battery PCS size is invalid.",
+        )
+        if topology == "separate_ac"
+        else None
+    )
+    if pv_capacity < 0 or (battery_capacity is not None and battery_capacity < 0):
+        raise CiProjectError(
+            "ci_annual_financial_scenario_invalid", "Inverter capacities must be non-negative."
+        )
+    return {
+        "dispatch_topology": topology,
+        "pv_inverter_capacity_kw_ac": pv_capacity,
+        "battery_inverter_capacity_kw_ac": battery_capacity,
+        "inverter_capacity_kw_ac": (
+            battery_capacity if battery_capacity is not None else pv_capacity
+        ),
+    }
 
 
 def _rate(
@@ -614,39 +656,18 @@ def _profile_capex_breakdown(
         authored.get("nominal_capacity_kwh"),
         message="A selected battery size is invalid.",
     )
-    inverter_capacity = _finite_number(
-        authored.get("pv_inverter_capacity_kw_ac"),
-        message="A selected inverter size is invalid.",
-    )
     pv_product = _selected_product(
         profile, "pv_products", equipment_selection["pv_product_id"]
     )
     battery_product = _selected_product(
         profile, "battery_products", equipment_selection["battery_product_id"]
     )
-    inverter_product = _selected_product(
-        profile, "inverter_products", equipment_selection["inverter_product_id"]
-    )
     battery_reference_quantity = max(
         0.0,
         battery_capacity / float(battery_product["module_capacity_kwh"]),
     )
-    inverter_reference_capacity = float(inverter_product["sizing_unit_kw_ac"])
-    inverter_reference_cost = _curve_cost(
-        inverter_product["cost_curve"],
-        x=inverter_reference_capacity,
-        axis="capacity_kw_ac",
-    )
-    inverter_cost = (
-        _curve_cost(
-            inverter_product["cost_curve"],
-            x=inverter_capacity,
-            axis="capacity_kw_ac",
-        )
-        if inverter_capacity <= inverter_reference_capacity
-        else inverter_capacity
-        / inverter_reference_capacity
-        * inverter_reference_cost
+    inverter_pricing = _profile_inverter_pricing(
+        authored, profile=profile, equipment_selection=equipment_selection
     )
     return {
         "pv_aud": round(
@@ -660,7 +681,56 @@ def _profile_capex_breakdown(
             ),
             2,
         ),
-        "inverter_aud": round(inverter_cost, 2),
+        "inverter_aud": float(inverter_pricing["total_inverter_aud_ex_gst"]),
+    }
+
+
+def _profile_inverter_pricing(
+    authored: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+    equipment_selection: dict[str, str],
+) -> dict[str, object]:
+    capacities = _inverter_capacity_projection(authored)
+    inverter_product = _selected_product(
+        profile, "inverter_products", equipment_selection["inverter_product_id"]
+    )
+    reference_capacity = float(inverter_product["sizing_unit_kw_ac"])
+    reference_cost = _curve_cost(
+        inverter_product["cost_curve"], x=reference_capacity, axis="capacity_kw_ac"
+    )
+
+    def cost(capacity: float) -> float:
+        return round(
+            _curve_cost(
+                inverter_product["cost_curve"], x=capacity, axis="capacity_kw_ac"
+            )
+            if capacity <= reference_capacity
+            else capacity / reference_capacity * reference_cost,
+            2,
+        )
+
+    separate_ac = capacities["dispatch_topology"] == "separate_ac"
+    pv_inverter_cost = cost(float(capacities["pv_inverter_capacity_kw_ac"])) if separate_ac else 0.0
+    battery_inverter_cost = cost(float(capacities["battery_inverter_capacity_kw_ac"])) if separate_ac else 0.0
+    shared_inverter_cost = cost(float(capacities["pv_inverter_capacity_kw_ac"])) if not separate_ac else 0.0
+    return {
+        "basis": (
+            "separate_pv_and_battery_inverters_same_catalog_curve_screening_proxy"
+            if separate_ac else "single_shared_inverter_catalog_curve"
+        ),
+        "source_product_id": inverter_product["product_id"],
+        "pv_inverter_aud_ex_gst": pv_inverter_cost,
+        "battery_inverter_aud_ex_gst": battery_inverter_cost,
+        "shared_inverter_aud_ex_gst": shared_inverter_cost,
+        "total_inverter_aud_ex_gst": round(pv_inverter_cost + battery_inverter_cost + shared_inverter_cost, 2),
+        "disclosure": (
+            "PV inverter and battery PCS are separate equipment and each is "
+            "priced once using the saved inverter curve as a screening proxy. "
+            "The PV per-kWp line excludes this separately itemised inverter cost; "
+            "replace with a complete supplier quotation for actual procurement."
+            if separate_ac else "One shared PV/battery inverter is priced once."
+        ),
     }
 
 

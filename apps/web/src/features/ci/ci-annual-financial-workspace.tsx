@@ -20,7 +20,6 @@ import {
   fetchCiDeviceProfile,
 } from "@/features/ci/api/ci-device-profile";
 import type { CiProject } from "@/features/ci/api/ci-projects";
-import { CiAnnualFinanceReportSnapshot } from "@/features/ci/ci-annual-finance-report-snapshot";
 import { ciProjectTariffReplayQueryKey, fetchCiSavedTariffReplay } from "@/features/ci/api/ci-scenarios";
 
 const defaultAssumptions = {
@@ -100,7 +99,6 @@ function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorks
   if (tariff.isPending || savedFinance.isPending || deviceProfile.isPending) return <StateCard text="Loading tariff scenarios, device prices and saved finance…" />;
   if (tariff.isError || savedFinance.isError || deviceProfile.isError) return <StateCard error text="The annual finance workspace could not be restored." />;
   if (tariff.data.status !== "ready" || !tariff.data.result) {
-    if (project.display_name.trim().toLocaleLowerCase("en-AU") === "chef q") return <CiAnnualFinanceReportSnapshot />;
     return <StateCard error text="Run Tariff replay before calculating Annual finance." />;
   }
 
@@ -251,7 +249,7 @@ function StateCard({ error = false, text }: { error?: boolean; text: string }) {
 function MetricCell({ positive = false, value }: { positive?: boolean; value: string }) { return <td className={`px-3 py-4 text-right font-semibold tabular-nums ${positive ? "text-emerald-700" : "text-slate-800"}`}>{value}</td>; }
 function Basis({ label, value }: { label: string; value: string }) { return <div className="rounded-lg bg-slate-50 p-3"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 text-sm font-semibold text-slate-950">{value}</dd></div>; }
 function ChartMetric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-slate-200 bg-white p-4"><p className="text-[10px] uppercase tracking-[.12em] text-slate-400">{label}</p><p className="mt-2 text-base font-semibold tabular-nums text-slate-950">{value}</p></div>; }
-function configurationFromFinance(item: CiAnnualFinancialComparisonResult["solutions"][number]) { return `${capacityLabel(item.pv_capacity_kwp_dc)} kWp PV · ${capacityLabel(item.battery_capacity_kwh)} kWh battery · ${capacityLabel(item.inverter_capacity_kw_ac)} kW hybrid inverter / PCS`; }
+function configurationFromFinance(item: CiAnnualFinancialComparisonResult["solutions"][number]) { return `${capacityLabel(item.pv_capacity_kwp_dc)} kWp PV · ${capacityLabel(item.battery_capacity_kwh)} kWh battery · ${item.dispatch_topology === "separate_ac" ? `${capacityLabel(item.pv_inverter_capacity_kw_ac ?? 0)} kW PV inverter · ${capacityLabel(item.battery_inverter_capacity_kw_ac ?? item.inverter_capacity_kw_ac)} kW battery PCS` : `${capacityLabel(item.inverter_capacity_kw_ac)} kW hybrid inverter / PCS`}`; }
 function aud(value: number) { return new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 }).format(value); }
 function signedAud(value: number) { return `${value >= 0 ? "+" : "−"}${aud(Math.abs(value))}`; }
 function percent(value: number | null) { return value === null ? "No IRR" : `${(value * 100).toFixed(1)}%`; }

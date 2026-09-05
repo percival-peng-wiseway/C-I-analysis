@@ -8,6 +8,7 @@ import math
 from typing import Any
 
 from solar_battery.ci_projects import CiProjectError
+from solar_battery.ci_pv_timing import SOLAR_GEOMETRY_PROFILE_ID, normalize_pv_geometry
 from solar_battery.ci_scenario_analysis import (
     MAX_BATTERY_SYSTEMS,
     MAX_PV_SYSTEMS,
@@ -76,9 +77,7 @@ def generate_ci_solutions(
     site = request["site_factors"]
     connection = request["connection_options"]
     derating = _effective_derating(site)
-    one_way_efficiency = math.sqrt(
-        battery_performance["round_trip_efficiency_percent"] / 100
-    ) * (battery_performance["power_conversion_efficiency_percent"] / 100)
+    one_way_efficiency = _one_way_efficiency(battery_performance, connection)
     minimum_soc = 1 - (
         battery_performance["usable_depth_of_discharge_percent"] / 100
     )
@@ -120,12 +119,29 @@ def generate_ci_solutions(
         # surviving requirement so the PV-system signature remains stable while
         # infeasible large batteries do not remove smaller feasible candidates.
         inverter_capacity = _clean_number(
-            max(
+            max(power for _capacity, power in feasible_battery_options)
+            if connection["dispatch_topology"] == "separate_ac" else max(
                 pv_capacity / solar_performance["default_dc_ac_ratio"],
                 max(power for _capacity, power in feasible_battery_options),
             )
         )
+        if connection["inverter_quantity"] is not None:
+            inverter_capacity = _clean_number(
+                connection["inverter_quantity"] * (
+                    float(inverter_performance["rated_active_power_kw"])
+                    if inverter_performance is not None
+                    else connection["inverter_block_size_kw"]
+                )
+            )
         for battery_capacity, battery_power in feasible_battery_options:
+            separate_ac = connection["dispatch_topology"] == "separate_ac"
+            required_pcs = battery_power if separate_ac else max(
+                pv_capacity / solar_performance["default_dc_ac_ratio"], battery_power
+            )
+            if inverter_capacity + 1e-9 < required_pcs or inverter_capacity > connection["site_ac_headroom_kw"] + 1e-9:
+                rejected_requested += 1
+                rejection_counts["inverter_capacity_outside_limits"] += 1
+                continue
             battery_performance_scale = _clean_number(
                 battery_capacity
                 / float(battery_performance["nominal_capacity_kwh_per_unit"])
@@ -147,6 +163,7 @@ def generate_ci_solutions(
                 minimum_soc=minimum_soc,
                 connection=connection,
                 inverter_performance=inverter_performance,
+                pv_geometry=_geometry_from_site(site),
             )
             scenarios.append(scenario)
 
@@ -251,7 +268,8 @@ def generate_ci_custom_solution(
         battery_capacity, battery_performance
     )
     inverter_capacity = _clean_number(requested_inverter)
-    minimum_inverter = max(
+    topology = technical.get("dispatch_topology", "shared_hybrid_dc")
+    minimum_inverter = battery_power if topology == "separate_ac" else max(
         pv_actual / float(solar_performance["default_dc_ac_ratio"]),
         battery_power,
     )
@@ -267,6 +285,9 @@ def generate_ci_custom_solution(
             f"{_candidate_label_number(site_headroom)} kW AC site headroom."
         )
     connection = {
+        "dispatch_topology": topology,
+        "battery_efficiency_basis": technical.get("battery_efficiency_basis", "pack_plus_conversion"),
+        "site_ac_headroom_kw": site_headroom,
         "allow_grid_charging": technical.get("allow_grid_charging"),
         "reactive_support_enabled": technical.get("reactive_support_enabled"),
         "reactive_support_max_kvar": technical.get("reactive_support_max_kvar"),
@@ -282,9 +303,7 @@ def generate_ci_custom_solution(
     # the matrix generator does.  The display-oriented percentages in
     # technical_options are rounded and can otherwise make a reused system ID
     # appear to have a different physical signature by a few floating-point bits.
-    one_way_efficiency = math.sqrt(
-        float(battery_performance["round_trip_efficiency_percent"]) / 100
-    ) * (float(battery_performance["power_conversion_efficiency_percent"]) / 100)
+    one_way_efficiency = _one_way_efficiency(battery_performance, connection)
     minimum_soc = 1 - (
         float(battery_performance["usable_depth_of_discharge_percent"]) / 100
     )
@@ -306,6 +325,7 @@ def generate_ci_custom_solution(
         minimum_soc=minimum_soc,
         connection=connection,
         inverter_performance=inverter_performance,
+        pv_geometry=_geometry_from_site(site),
     )
     scenario["label"] = _text(custom_request.get("label"), "custom solution label")
     return {
@@ -354,6 +374,20 @@ def _generation_request(value: object) -> dict[str, Any]:
     }
 
 
+def _geometry_from_site(value: dict[str, Any]) -> dict[str, object] | None:
+    mode = value.get("pv_timing_model", "generic_normalized_solar_shape_v1")
+    if mode == "generic_normalized_solar_shape_v1":
+        return None
+    if mode != SOLAR_GEOMETRY_PROFILE_ID:
+        raise _invalid("The PV timing model is invalid.")
+    try:
+        return normalize_pv_geometry({key: value.get(key) for key in (
+            "latitude_degrees", "longitude_degrees", "array_tilt_degrees", "array_azimuth_degrees", "location_source_label", "location_confirmed",
+        )})
+    except (TypeError, ValueError) as exc:
+        raise _invalid("The confirmed solar geometry is invalid.") from exc
+
+
 def _site_factors(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise _invalid("The site factors are invalid.")
@@ -366,7 +400,10 @@ def _site_factors(value: object) -> dict[str, object]:
         "imported_resource_study",
     }:
         raise _invalid("The solar resource source is invalid.")
+    pv_geometry = _geometry_from_site(value)
     return {
+        "pv_timing_model": SOLAR_GEOMETRY_PROFILE_ID if pv_geometry is not None else "generic_normalized_solar_shape_v1",
+        **({key: pv_geometry[key] for key in ("latitude_degrees", "longitude_degrees", "location_source_label", "location_confirmed")} if pv_geometry is not None else {}),
         "resource_basis": "gross_specific_yield_before_site_losses",
         "resource_source": resource_source,
         "resource_label": _text(value.get("resource_label"), "resource label"),
@@ -398,6 +435,10 @@ def _site_factors(value: object) -> dict[str, object]:
 def _connection_options(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise _invalid("The connection options are invalid.")
+    topology = value.get("dispatch_topology", "shared_hybrid_dc")
+    efficiency_basis = value.get("battery_efficiency_basis", "pack_plus_conversion")
+    if topology not in {"shared_hybrid_dc", "separate_ac"} or efficiency_basis not in {"pack_plus_conversion", "whole_system_ac"}:
+        raise _invalid("The topology or battery efficiency basis is invalid.")
     reactive_enabled = value.get("reactive_support_enabled")
     allow_grid_charging = value.get("allow_grid_charging")
     if not isinstance(reactive_enabled, bool) or not isinstance(
@@ -420,6 +461,8 @@ def _connection_options(value: object) -> dict[str, object]:
     if inverter_quantity is not None:
         inverter_quantity = _integer(inverter_quantity, 1, 10_000)
     return {
+        "dispatch_topology": topology,
+        "battery_efficiency_basis": efficiency_basis,
         "inverter_block_size_kw": _bounded(
             value.get("inverter_block_size_kw"), 0.1, 1000
         ),
@@ -595,6 +638,14 @@ def _screening_battery_power(
     )
 
 
+def _one_way_efficiency(profile: dict[str, Any], connection: dict[str, Any]) -> float:
+    basis = connection.get("battery_efficiency_basis", "pack_plus_conversion")
+    if basis not in {"pack_plus_conversion", "whole_system_ac"}:
+        raise _invalid("The saved battery efficiency basis is invalid.")
+    conversion = float(profile["power_conversion_efficiency_percent"]) / 100 if basis == "pack_plus_conversion" else 1.0
+    return math.sqrt(float(profile["round_trip_efficiency_percent"]) / 100) * conversion
+
+
 def _scenario(
     *,
     solar: dict[str, object],
@@ -611,7 +662,17 @@ def _scenario(
     minimum_soc: float,
     connection: dict[str, Any],
     inverter_performance: dict[str, Any] | None,
+    pv_geometry: object = None,
 ) -> dict[str, object]:
+    topology = connection.get("dispatch_topology", "shared_hybrid_dc")
+    if topology not in {"shared_hybrid_dc", "separate_ac"}:
+        raise _invalid("The saved dispatch topology is invalid.")
+    separate_ac = topology == "separate_ac"
+    pv_inverter_capacity = (
+        _clean_number(pv_capacity_kwp_dc / _solar_performance(solar)["default_dc_ac_ratio"])
+        if separate_ac else inverter_capacity_kw_ac
+    )
+    battery_inverter_capacity = inverter_capacity_kw_ac if battery_capacity_kwh > 0 else 0.0
     inverter_performance_scale = (
         inverter_capacity_kw_ac
         / float(inverter_performance["rated_active_power_kw"])
@@ -661,12 +722,17 @@ def _scenario(
         "reactive_capability_provenance": "analyst_assumption",
         "reactive_overcompensation_permitted": False,
     }
+    if separate_ac and battery_capacity_kwh == 0:
+        reactive_enabled = False
+        reactive_signature.update(reactive_support_enabled=False, reactive_support_max_kvar=0.0, shared_inverter_apparent_power_limit_kva=None)
     solar_key = {
         "profile_id": _profile_id(solar),
         "version": _integer(solar.get("version"), 1, 10_000),
         "profile_sha256": _snapshot_sha256(solar),
         "pv_capacity_kwp_dc": pv_capacity_kwp_dc,
-        "inverter_capacity_kw_ac": inverter_capacity_kw_ac,
+        "inverter_capacity_kw_ac": pv_inverter_capacity,
+        "dispatch_topology": topology,
+        "pv_geometry": pv_geometry,
     }
     if inverter is not None:
         solar_key["inverter_profile_id"] = _profile_id(inverter)
@@ -674,9 +740,9 @@ def _scenario(
             inverter.get("version"), 1, 10_000
         )
         solar_key["inverter_profile_sha256"] = _snapshot_sha256(inverter)
-    if reactive_enabled:
-        # Preserve legacy IDs for disabled support while giving every enabled
-        # physical capability a distinct system identity.
+    if reactive_enabled and not separate_ac:
+        # Shared-hybrid Q capability is part of the PV/inverter identity;
+        # separate-AC Q capability belongs to the battery PCS identity below.
         solar_key["reactive_support"] = reactive_signature
     battery_key = {
         "profile_id": _profile_id(battery),
@@ -685,6 +751,8 @@ def _scenario(
         "battery_performance_scale": battery_performance_scale,
         "battery_capacity_kwh": battery_capacity_kwh,
         "battery_power_kw": battery_power_kw,
+        "battery_efficiency_basis": connection.get("battery_efficiency_basis", "pack_plus_conversion"),
+        **({"battery_inverter_capacity_kw_ac": battery_inverter_capacity, "reactive_support": reactive_signature} if separate_ac else {}),
     }
     pv_system_id = _stable_id("pv", solar_key)
     battery_system_id = (
@@ -697,16 +765,22 @@ def _scenario(
         "label": (
             f"{_candidate_label_number(pv_capacity_kwp_dc)} kWp PV + "
             f"{_candidate_label_number(battery_capacity_kwh)} kWh battery / "
-            f"{_candidate_label_number(inverter_capacity_kw_ac)} kW hybrid inverter"
+            + (f"{_candidate_label_number(pv_inverter_capacity)} kW PV inverter + "
+             f"{_candidate_label_number(battery_inverter_capacity)} kW battery PCS"
+             if separate_ac else f"{_candidate_label_number(inverter_capacity_kw_ac)} kW hybrid inverter")
         ),
         "battery_system_id": battery_system_id,
         "battery_technology_id": "generic_li_ion_ac",
         "control_profile_id": "demand_peak_shaving",
         "pv_system_id": pv_system_id,
-        "pv_profile_id": "generic_normalized_solar_shape_v1",
+        "pv_profile_id": SOLAR_GEOMETRY_PROFILE_ID if pv_geometry is not None else "generic_normalized_solar_shape_v1",
+        "pv_geometry": pv_geometry,
+        "dispatch_topology": topology,
+        "battery_efficiency_basis": connection.get("battery_efficiency_basis", "pack_plus_conversion"),
+        "battery_inverter_capacity_kw_ac": battery_inverter_capacity if separate_ac else None,
         "pv_capacity_kwp_dc": pv_capacity_kwp_dc,
-        "pv_inverter_capacity_kw_ac": inverter_capacity_kw_ac,
-        "shared_ac_headroom_kw": inverter_capacity_kw_ac,
+        "pv_inverter_capacity_kw_ac": pv_inverter_capacity,
+        "shared_ac_headroom_kw": float(connection["site_ac_headroom_kw"]) if separate_ac else inverter_capacity_kw_ac,
         **reactive_signature,
         "pv_annual_specific_yield_kwh_per_kw": annual_specific_yield,
         "pv_derating_factor": derating,
@@ -808,6 +882,8 @@ def _design_context(
                 else {}
             ),
             "site_ac_headroom_kw": connection["site_ac_headroom_kw"],
+            "dispatch_topology": connection["dispatch_topology"],
+            "battery_efficiency_basis": connection["battery_efficiency_basis"],
             "battery_duration_hours": _clean_number(duration),
             "charge_efficiency_percent": round(one_way_efficiency * 100, 8),
             "discharge_efficiency_percent": round(one_way_efficiency * 100, 8),

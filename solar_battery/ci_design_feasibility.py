@@ -23,6 +23,12 @@ from solar_battery.ci_scenario_analysis import (
     _validated_scenarios,
 )
 from solar_battery.models import BatteryPreset, CleanedInterval
+from solar_battery.ci_pv_timing import (
+    PV_GEOMETRY_SCREENING_DISCLOSURE,
+    SOLAR_GEOMETRY_PROFILE_ID,
+    build_geometry_pv_profile,
+    pv_geometry_cache_key,
+)
 from solar_battery.solar_profile import solar_shape
 
 
@@ -82,7 +88,11 @@ def analyze_ci_design_feasibility(
     baseline_peak_index = max(
         peak_indexes, key=lambda index: intervals[index].load_kw_avg
     )
-    shape_energy_per_interval = _normalized_solar_shape(intervals)
+    shape_by_geometry: dict[tuple[object, ...], tuple[float, ...]] = {}
+    for scenario in authored:
+        key = (scenario.pv_profile_id, *pv_geometry_cache_key(scenario.pv_geometry))
+        if key not in shape_by_geometry:
+            shape_by_geometry[key] = _normalized_solar_shape(intervals, scenario=scenario)
     year_indexes = _year_indexes(intervals)
     complete_years = tuple(
         year for year, indexes in year_indexes.items()
@@ -93,7 +103,9 @@ def analyze_ci_design_feasibility(
         _analyze_scenario(
             scenario,
             intervals=intervals,
-            shape_energy_per_interval=shape_energy_per_interval,
+            shape_energy_per_interval=shape_by_geometry[
+                (scenario.pv_profile_id, *pv_geometry_cache_key(scenario.pv_geometry))
+            ],
             peak_indexes=peak_indexes,
             year_indexes=year_indexes,
         )
@@ -147,7 +159,12 @@ def analyze_ci_design_feasibility(
         "assumptions": [
             "Measured active import is the physical load basis; it is not reconstructed gross site load.",
             "Standard NEM12 E1 is aggregated to 15 minutes; reported wide-export kW remains at 30 minutes and is never upsampled.",
-            "The repository solar shape is scaled to each authored annual specific yield and PV derating assumption.",
+            "The saved PV timing model is scaled to each authored annual specific yield and PV derating assumption.",
+            *(
+                [PV_GEOMETRY_SCREENING_DISCLOSURE]
+                if any(item.pv_profile_id == SOLAR_GEOMETRY_PROFILE_ID for item in authored)
+                else ["Legacy generic solar timing does not use location, tilt or azimuth."]
+            ),
             "Coverage energy uses PV-first self-consumption dispatch. Grid charging is not scheduled without an approved tariff time basis.",
             "Peak reduction is a selected measured peak-day physical envelope starting at the authored SOC, not a billing-demand result.",
             "No tariff window, minimum demand, kVA/PF outcome, demand charge, savings, recommendation or customer claim is calculated.",
@@ -195,7 +212,7 @@ def analyze_ci_interval_activity(
     energy = _scenario_energy_series(
         scenario,
         intervals=intervals,
-        shape_energy_per_interval=_normalized_solar_shape(intervals),
+        shape_energy_per_interval=_normalized_solar_shape(intervals, scenario=scenario),
     )
     hours = source.interval_minutes / 60
     points = []
@@ -237,9 +254,16 @@ def analyze_ci_interval_activity(
 
 
 def _normalized_solar_shape(
-    intervals: tuple[CleanedInterval, ...]
+    intervals: tuple[CleanedInterval, ...], *, scenario: _Scenario | None = None
 ) -> tuple[float, ...]:
     minutes = intervals[0].interval_minutes
+    if scenario is not None and scenario.pv_profile_id == SOLAR_GEOMETRY_PROFILE_ID:
+        return build_geometry_pv_profile(
+            tuple(row.timestamp for row in intervals),
+            1.0,
+            interval_minutes=minutes,
+            geometry=scenario.pv_geometry,
+        )
     interval_hours = minutes / 60
     fixed_aest = timezone(timedelta(hours=10), name="AEST")
     reference_start = datetime(2025, 1, 1, tzinfo=fixed_aest)

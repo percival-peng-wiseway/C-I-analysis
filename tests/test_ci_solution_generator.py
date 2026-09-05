@@ -287,7 +287,7 @@ def test_fox_range_example_keeps_all_36_screening_combinations() -> None:
     ]
     assert all(
         item["pv_inverter_capacity_kw_ac"]
-        == pytest.approx(264.819376027)
+        == pytest.approx(300.0)
         for item in result["candidates"]
     )
 
@@ -340,16 +340,16 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
     )
 
     assert all(
-        candidate["pv_inverter_capacity_kw_ac"] == pytest.approx(83.333333333)
+        candidate["pv_inverter_capacity_kw_ac"] == pytest.approx(250.0)
         for candidate in result["candidates"]
     )
     assert all(
-        candidate["reactive_support_max_kvar"] == pytest.approx(55.0)
+        candidate["reactive_support_max_kvar"] == pytest.approx(165.0)
         for candidate in result["candidates"]
     )
     assert all(
         candidate["shared_inverter_apparent_power_limit_kva"]
-        == pytest.approx(91.666666666)
+        == pytest.approx(275.0)
         for candidate in result["candidates"]
     )
     selection = result["design_context"]["profile_selection"]
@@ -512,7 +512,7 @@ def test_python_generator_includes_reactive_support_in_scenario_identity() -> No
     }
 
 
-def test_python_generator_treats_inverter_quantity_as_non_binding_reference() -> None:
+def test_python_generator_rejects_explicit_quantity_below_required_power() -> None:
     request = _request(maximum_pv=200.0, headroom=500.0)
     request["pv_range"] = {
         "minimum_kwp_dc": 200.0,
@@ -529,16 +529,12 @@ def test_python_generator_treats_inverter_quantity_as_non_binding_reference() ->
         {"inverter_block_size_kw": 125.0, "inverter_quantity": 1}
     )
 
-    result = generate_ci_solutions(
-        request,
-        device_profile=_device_profile(),
-        device_profile_sha256="e" * 64,
-    )
-
-    assert result["candidates"][0]["pv_capacity_kwp_dc"] == 200.0
-    assert result["candidates"][0]["pv_inverter_capacity_kw_ac"] == pytest.approx(
-        166.666666667
-    )
+    with pytest.raises(CiProjectError, match="one to 200"):
+        generate_ci_solutions(
+            request,
+            device_profile=_device_profile(),
+            device_profile_sha256="e" * 64,
+        )
 
 
 def test_python_generator_rejects_continuous_pcs_above_headroom() -> None:

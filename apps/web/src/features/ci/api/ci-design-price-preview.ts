@@ -1,7 +1,11 @@
-import type { CiScenarioRebateCalculation } from "@/features/ci/api/ci-annual-financial-comparison";
+import type { CiScenarioRebateCalculation, CiInverterPricing } from "@/features/ci/api/ci-annual-financial-comparison";
 import type { CiEquipmentSelection } from "@/features/ci/api/ci-device-profile";
 
 export interface CiDesignPricePreviewSolution {
+  dispatch_topology?: "shared_hybrid_dc" | "separate_ac";
+  pv_inverter_capacity_kw_ac?: number;
+  battery_inverter_capacity_kw_ac?: number | null;
+  inverter_pricing?: CiInverterPricing | null;
   scenario_id: string;
   label: string;
   pv_capacity_kwp_dc: number;

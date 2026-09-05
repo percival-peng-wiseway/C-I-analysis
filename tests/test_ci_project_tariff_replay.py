@@ -16,6 +16,7 @@ from solar_battery.ci_project_tariff_replay import (
     tariff_profile_sha256,
 )
 from solar_battery.ci_projects import CiProjectError, create_ci_project
+from solar_battery.ci_scenario_analysis import CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
 from solar_battery.durable_cockpit.orm import (
     CiProjectEvidenceModel,
     CiProjectModel,
@@ -71,7 +72,7 @@ def _scenario_result(
 def _result(*scenarios: dict[str, object]) -> dict[str, object]:
     return {
         "contract_version": "ci_physical_scenario_review_v6",
-        "calculation_revision": "ci_physical_scenario_incremental_kva_planner_v3",
+        "calculation_revision": CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
         "analysis_status": "ready",
         "analysis_mode": "evidence_limited_internal_review",
         "customer_facing_permission": False,
@@ -472,7 +473,7 @@ def test_saved_replay_without_current_calculation_revision_is_stale(
 
     assert refreshed["status"] == "ready"
     assert refreshed["result"]["calculation_revision"] == (
-        "ci_physical_scenario_incremental_kva_planner_v3"
+        CI_PHYSICAL_SCENARIO_CALCULATION_REVISION
     )
     assert [
         item["scenario_id"] for item in refreshed["result"]["scenarios"]

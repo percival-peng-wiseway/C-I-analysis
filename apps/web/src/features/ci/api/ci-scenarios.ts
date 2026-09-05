@@ -5,7 +5,11 @@ export interface CiScenarioInput {
   battery_technology_id: "generic_li_ion_ac";
   control_profile_id: "demand_peak_shaving";
   pv_system_id: string;
-  pv_profile_id: "generic_normalized_solar_shape_v1";
+  pv_profile_id: "generic_normalized_solar_shape_v1" | "solar_geometry_screening_v1";
+  pv_geometry?: { latitude_degrees: number; longitude_degrees: number; array_tilt_degrees: number; array_azimuth_degrees: number; location_source_label: string; location_confirmed: true } | null;
+  dispatch_topology?: "shared_hybrid_dc" | "separate_ac";
+  battery_efficiency_basis?: "pack_plus_conversion" | "whole_system_ac";
+  battery_inverter_capacity_kw_ac?: number | null;
   pv_capacity_kwp_dc: number;
   pv_inverter_capacity_kw_ac: number;
   shared_ac_headroom_kw: number;
@@ -31,7 +35,7 @@ export interface CiScenarioInput {
 
 export interface CiPhysicalScenarioResult {
   contract_version: "ci_physical_scenario_review_v6";
-  calculation_revision: "ci_physical_scenario_incremental_kva_planner_v3";
+  calculation_revision: "ci_physical_scenario_incremental_kva_planner_v3" | "ci_physical_scenario_topology_geometry_v4";
   analysis_status: "ready";
   analysis_mode: "evidence_limited_internal_review";
   customer_facing_permission: false;
@@ -93,7 +97,7 @@ export interface CiPhysicalScenarioResult {
     selected_monthly_thresholds_kw: Array<number | null>;
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2";
-      calculation_revision: "ci_optimizer_run_snapshot_incremental_kva_planner_v3";
+      calculation_revision: "ci_optimizer_run_snapshot_incremental_kva_planner_v3" | "ci_optimizer_run_snapshot_topology_geometry_v4";
       snapshot_sha256: string;
       algorithm_id: "ci_peak_shaving_rolling_replay_v2";
       customer_facing_permission: false;
@@ -1000,7 +1004,7 @@ export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenar
   const payload = value as CiPhysicalScenarioResult;
   if (
     payload.contract_version !== "ci_physical_scenario_review_v6" ||
-    payload.calculation_revision !== "ci_physical_scenario_incremental_kva_planner_v3" ||
+    !["ci_physical_scenario_incremental_kva_planner_v3", "ci_physical_scenario_topology_geometry_v4"].includes(payload.calculation_revision) ||
     payload.analysis_status !== "ready" ||
     payload.analysis_mode !== "evidence_limited_internal_review" ||
     payload.customer_facing_permission !== false ||
@@ -1229,7 +1233,7 @@ function hasSafeScenarioAuthority(
   }
   return item.post_dispatch?.authority_source === "ci_peak_shaving_rolling_replay_v2" &&
     item.optimizer_run_snapshot?.contract_version === "ci_optimizer_run_snapshot_v2" &&
-    item.optimizer_run_snapshot.calculation_revision === "ci_optimizer_run_snapshot_incremental_kva_planner_v3" &&
+    ["ci_optimizer_run_snapshot_incremental_kva_planner_v3", "ci_optimizer_run_snapshot_topology_geometry_v4"].includes(item.optimizer_run_snapshot.calculation_revision) &&
     item.optimizer_run_snapshot.customer_facing_permission === false &&
     item.optimizer_run_snapshot.recommendation_permitted === false &&
     item.optimizer_audit_projection?.contract_version === "ci_optimizer_audit_projection_v2" &&

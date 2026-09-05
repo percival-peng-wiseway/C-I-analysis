@@ -268,6 +268,8 @@ def _solution_module(
         device_profile.get("default_equipment_selection")
     )
     parameters: list[dict[str, object]] = []
+    for key, label in (("pv_timing_model", "PV interval model"), ("latitude_degrees", "Latitude"), ("longitude_degrees", "Longitude"), ("array_tilt_degrees", "Array tilt"), ("array_azimuth_degrees", "Array azimuth"), ("location_source_label", "Coordinate source"), ("location_confirmed", "Coordinates confirmed")):
+        parameters.append(_parameter(f"solution.site.{key}", label, site.get(key), source_kind="analyst_input", source_label="Saved PV timing assumptions", source_path=f"{site_source_path}.{key}", edit_stage="physical_feasibility"))
     for key, label, unit in (
         ("minimum_kwp_dc", "PV range minimum", "kWp DC"),
         ("maximum_kwp_dc", "PV range maximum", "kWp DC"),
@@ -291,6 +293,8 @@ def _solution_module(
     ):
         parameters.append(_parameter(f"solution.site.{key}", label, site.get(key), unit=unit, source_kind="analyst_input", source_label=str(site.get("resource_label") or "Solution Generator"), source_path=f"{site_source_path}.{key}", edit_stage="physical_feasibility"))
     technical_parameters = (
+        ("dispatch_topology", "Electrical topology (absence means legacy shared hybrid)", None, "analyst_input", True, True),
+        ("battery_efficiency_basis", "Battery RTE basis (absence means pack plus conversion)", None, "analyst_input", True, True),
         ("target_dc_ac_ratio", "Solar default DC/AC ratio", None, "derived", False, True),
         (
             "inverter_block_size_kw",
@@ -440,7 +444,7 @@ def _solution_module(
         _calculation("solution.pv_derating", "Effective PV derating", "derating = availability * product(1 - loss_i)", "Combines all saved site-loss assumptions multiplicatively.", ["availability", "shading", "soiling", "temperature", "wiring/mismatch", "other loss"], "solar_battery/ci_solution_generator.py::_effective_derating", example=_pv_derating_example(site, technical)),
         _calculation("solution.annual_pv_output", "Expected annual PV output", "annual_kWh = PV_kWp * specific_yield_kWh_per_kWp * derating", "Used for energy screening and Solar STC output eligibility.", ["PV capacity", "specific yield", "derating"], "solar_battery/ci_design_feasibility.py::_scenario_energy_series"),
         _calculation("solution.battery_power", "Battery screening power", "battery_kW = target_kWh * profile_kW_per_unit / profile_kWh_per_unit", "Uses the selected battery profile as a performance ratio only.", ["target battery capacity", "profile continuous power", "profile nominal capacity"], "solar_battery/ci_solution_generator.py::_screening_battery_power"),
-        _calculation("solution.one_way_efficiency", "One-way battery efficiency", "eta_one_way = sqrt(round_trip_efficiency) * conversion_efficiency", "The same one-way efficiency is assigned to charge and discharge.", ["round-trip efficiency", "power conversion efficiency"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
+        _calculation("solution.one_way_efficiency", "One-way battery efficiency", "pack_plus_conversion: eta=sqrt(RTE)*conversion; whole_system_ac: eta=sqrt(RTE)", "The same one-way efficiency is assigned to charge and discharge. Whole-system AC RTE already includes conversion; the converter multiplier is not applied again.", ["RTE basis", "round-trip efficiency", "power conversion efficiency"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.minimum_soc", "Minimum state of charge", "minimum_SOC = 1 - usable_depth_of_discharge", "Converts usable DoD into the lower SOC bound.", ["usable depth of discharge"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.pcs_size", "Common screening PCS capacity", "requirement(PV,battery) = max(PV_kWp / DC_AC_ratio, battery_kW); PCS(PV) = max(requirement(PV,battery) for every headroom-feasible battery option in that PV row)", "Every surviving battery alternative for one PV target receives the same continuous PCS capacity. The value is not snapped to configured inverter quantity or block size.", ["PV capacity", "DC/AC ratio", "all feasible battery screening powers for the PV row"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.headroom_gate", "Site connection gate", "feasible when max(PV_kWp / DC_AC_ratio, battery_kW) <= site_AC_headroom_kW", "Rejects combinations above the saved site connection allowance.", ["PV requirement", "battery requirement", "site AC headroom"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
@@ -471,7 +475,9 @@ def _solution_module(
             "values": {
                 "pv_capacity": candidate.get("pv_capacity_kwp_dc"),
                 "battery_capacity": candidate.get("nominal_capacity_kwh"),
-                "pcs_capacity": candidate.get("pv_inverter_capacity_kw_ac"),
+                "pcs_capacity": candidate.get("battery_inverter_capacity_kw_ac") if candidate.get("dispatch_topology") == "separate_ac" else candidate.get("pv_inverter_capacity_kw_ac"),
+                "pv_inverter_capacity": candidate.get("pv_inverter_capacity_kw_ac"),
+                "topology": candidate.get("dispatch_topology", "shared_hybrid_dc"),
                 "gross_capex": priced.get("gross_capex_aud_ex_gst"),
                 "pv_capex": breakdown.get("pv_aud"),
                 "battery_capex": breakdown.get("battery_aud"),
@@ -520,6 +526,8 @@ def _solution_module(
                 {"key": "pv_capacity", "label": "PV", "unit": "kWp DC"},
                 {"key": "battery_capacity", "label": "Battery", "unit": "kWh"},
                 {"key": "pcs_capacity", "label": "PCS", "unit": "kW AC"},
+                {"key": "pv_inverter_capacity", "label": "PV / shared inverter", "unit": "kW AC"},
+                {"key": "topology", "label": "Topology", "unit": None},
                 {"key": "pv_capex", "label": "PV CAPEX", "unit": "AUD ex GST"},
                 {"key": "battery_capex", "label": "Battery CAPEX", "unit": "AUD ex GST"},
                 {"key": "inverter_capex", "label": "Inverter CAPEX", "unit": "AUD ex GST"},
@@ -547,7 +555,7 @@ def _solution_module(
             "Legacy top-level AUD/kWp, AUD/kWh and AUD/kW price summaries in the device profile are not the active battery or inverter curve inputs for the current price preview; the selected equipment catalogue is authoritative.",
             "Draft, stale and suggested rebate values are shown as inactive working information. Only an approved rebate calculation profile may affect the saved Net CAPEX preview.",
             "Certificate eligibility is not guaranteed. Disabled or ineligible programs remain visible with zero value, reason codes, source provenance, saved operands and the active ruleset identity.",
-            "The selected battery profile must be AC-coupled, while the current optimizer models PV-to-battery charging as a path that does not consume the shared AC port. This modelling boundary should be reviewed for project-specific topology.",
+            "Electrical topology is explicit: shared_hybrid_dc preserves legacy DC PV charging outside the shared AC port; separate_ac uses independent PV inverter and battery PCS ports, with PV charging crossing both. An AC-labelled profile does not automatically select the topology.",
         ],
     )
 
@@ -604,7 +612,7 @@ def _scenario_module(
             )
         )
     calculations = [
-        _calculation("scenario.interval_pv", "Unclipped interval PV energy", "PV_unclipped_kWh,t = normalized_shape_t * specific_yield * PV_kWp * derating", "Scales the repository solar shape to the saved system before inverter and shared-AC clipping.", ["normalized solar shape", "specific yield", "PV capacity", "derating"], "solar_battery/ci_design_feasibility.py::_scenario_energy_series"),
+        _calculation("scenario.interval_pv", "Unclipped interval PV energy", "PV_unclipped_kWh,t = normalized_shape_t * specific_yield * PV_kWp * derating", "Legacy timing uses a generic 06:00-18:00 seasonal shape. Opt-in solar_geometry_screening_v1 uses confirmed latitude/longitude, tilt and azimuth: raw_shape=max(sin(elevation),0)*max(dot(sun,array_normal),0), normalized over the full calendar year. It changes timing, not the authored annual yield; neither mode is measured or weather-derived PV.", ["PV timing model", "confirmed coordinates and orientation when geometry selected", "specific yield", "PV capacity", "derating"], "solar_battery/ci_pv_timing.py"),
         _calculation("scenario.pv_clipping", "Delivered interval PV energy", "PV_delivered_kWh,t = min(PV_unclipped_kWh,t, inverter_kW * delta_t_hours, shared_AC_kW * delta_t_hours)", "The pre-tariff feasibility series records the energy that survives inverter and shared-connection clipping.", ["unclipped PV energy", "inverter capacity", "shared AC headroom", "interval duration"], "solar_battery/ci_design_feasibility.py::_scenario_energy_series"),
         _calculation("scenario.pv_to_load", "PV allocation", "PV_to_load = min(load_kWh, PV_kWh); surplus = max(0, PV_kWh - PV_to_load)", "Uses PV-first self-consumption in the pre-tariff feasibility pass.", ["measured load", "PV generation"], "solar_battery/ci_design_feasibility.py::_scenario_energy_series"),
         _calculation("scenario.pre_tariff_peak_target", "Technical peak-day target", "sampled_target_kW = min(theta in 51 samples from 0 to 1.1 * PV_only_peak_kW where post_import_kW[t] <= theta for every selected peak-day interval)", "This is a tariff-independent active-power stress test. The target is an upper bound, not an equality or an all-day smoothing objective: intervals above the feasible target may form a flat clipped section, while intervals already below it remain below it.", ["selected measured peak day", "PV-only import kW", "battery energy and power", "initial SOC", "shared AC headroom"], "solar_battery/ci_design_feasibility.py::_peak_day_envelope"),
@@ -615,7 +623,8 @@ def _scenario_module(
         _calculation("scenario.shared_ac_port", "Shared AC-port power", "P_port[t] = PV_to_AC[t] + discharge[t] - grid_charge[t]; abs(P_port[t]) <= shared_AC_headroom_kW", "The headroom is bidirectional. The current optimizer excludes the PV-to-battery path from this AC-port expression.", ["PV to AC", "discharge", "grid charge", "shared AC headroom"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
         _calculation("scenario.reactive_balance", "Reactive import after support", "post_kvar = measured_kvar - inverter_reactive_support", "The saved inverter profile snapshot enables or disables support and supplies the per-inverter kvar capability; the Solution Generator scales that capability to each candidate PCS. Support cannot overcompensate measured reactive import. The physical reduction changes the bill only through an approved non-zero kVA demand rate.", ["measured kvar", "profile-scaled reactive support kvar", "approved kVA demand rate"], "solar_battery/ci_scenario_analysis.py::_execute_scenario"),
         _calculation("scenario.post_kva", "Post-system apparent demand", "post_kVA = sqrt(post_kW^2 + post_kvar^2)", "Produces the kVA series used by rolling and incentive demand charges.", ["post kW", "post kvar"], "solar_battery/ci_scenario_analysis.py::_execute_scenario"),
-        _calculation("scenario.optimizer_objective", "Tariff-aware dispatch objective", "min sum_t(delta_t * (grid_import[t] * import_rate[t] - PV_export[t] * export_credit[t] + discharge[t] * 0.05)) + sum_{d: approved_demand_rate[d] > 0}(demand_peak[d] * demand_rate[d])", "Tariff replay re-optimizes dispatch from the saved scenario using approved rates. The export credit is currently fixed to zero and the AUD 0.05/kWh discharge term is a deterministic throughput tie-break, not a finance cashflow. A zero-rate demand component is omitted, so the optimizer does not reserve battery energy solely to lower that unpriced kVA peak; reactive support may still reduce physical kVA but creates no demand-charge value at a zero rate.", ["interval imports", "zero export credit", "battery discharge", "positive-rate approved demand components"], "solar_battery/ci_peak_shaving_optimizer.py::_model_bill"),
+        _calculation("scenario.optimizer_objective", "Tariff-aware dispatch objective", "min sum_t(delta_t * (grid_import[t] * import_rate[t] - PV_export[t] * export_credit[t] + discharge[t] * 0.05)) + sum_{d: approved_demand_rate[d] > 0}(demand_peak[d] * demand_rate[d])", "The AUD 0.05/kWh discharge shadow cost materially affects dispatch and is not merely a tie-break or a finance cashflow. It is separate from the secondary throughput minimisation within AUD 0.01 of the primary optimum. Export credit is currently zero. Zero-rate demand components are omitted: unpriced peak reduction is not an economic objective.", ["interval imports", "zero export credit", "battery discharge", "positive-rate approved demand components"], "solar_battery/ci_peak_shaving_optimizer.py::_model_bill"),
+        _calculation("scenario.efficiency_basis", "Effective battery round-trip efficiency", "pack_plus_conversion: effective_RTE=pack_RTE*conversion^2; whole_system_ac: effective_RTE=profile_RTE", "RTE basis is explicitly saved. Pack RTE 95% plus one-way conversion 95% gives effective RTE 85.7375%; whole-system AC RTE 95% stays 95%. Selected inverter European efficiency remains reference metadata, not another multiplier.", ["RTE basis", "profile round-trip efficiency", "battery conversion efficiency"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("scenario.saved_result_reuse", "Saved-result reuse gate", "reuse = interval_SHA256_match AND design_SHA256_match AND tariff_SHA256_match AND calculation_revision_match AND result_SHA256_valid AND exact_requested_scenario_ID_set_match", "A repeated Analysis request returns the saved authoritative result without starting HiGHS only when every input identity, calculation revision, result digest and requested solution set matches. Any mismatch runs the full Python calculation again.", ["saved NEM12 digest", "saved design digest", "approved tariff digest", "calculation revision", "saved result digest", "selected solution IDs"], "solar_battery/ci_project_tariff_replay.py::reusable_ci_tariff_replay_result"),
         _calculation("scenario.pq_polygon", "Optimizer P-Q envelope", "for 16 segment normals: cos(theta_j) * P_port[t] + sin(theta_j) * Q_support[t] <= S_limit * cos(pi / 32)", "HiGHS uses a conservative 16-segment inner approximation of a circular inverter capability envelope; exact nonlinear replay verifies apparent power. The Q and S limits are scaled from the saved inverter profile snapshot, but the circular curve model itself remains an analyst assumption rather than a supplier P-Q curve.", ["shared-port active power", "reactive support", "profile-scaled apparent-power limit"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
         _calculation("scenario.demand_peak", "Demand-peak epigraph", "peak[d] >= minimum_chargeable[d] and peak[d] >= post_import_kW[t] or exact post_import_kVA[t] for every interval in priced demand window d", "This defines the smallest economically selected ceiling for a positive-rate demand component; it does not require every interval to equal the ceiling or minimise profile variance. Only binding peak intervals are expected to appear flat. kVA components start with linear bounds and receive tangent cuts until exact nonlinear replay is within the fixed materiality gate or the run fails closed.", ["priced demand window", "post-import kW/kVA", "minimum chargeable demand", "positive demand rate"], "solar_battery/ci_peak_shaving_optimizer.py::_build_model"),
@@ -769,6 +778,8 @@ def _scenario_module(
             f"Tariff replay snapshot: {tariff_replay_state.get('status', 'not_saved')}.",
             "The pre-tariff peak-day view is a technical active-kW envelope. Tariff replay is a separate annual optimization of the same saved scenario against approved tariff windows and rates, including kVA where applicable.",
             "A demand ceiling is an upper bound, not an all-day flattening target. With a zero approved demand rate, the optimizer has no bill incentive to reserve battery energy for that kVA peak; reactive support may still reduce physical kVA but cannot create demand-charge savings.",
+            "In shared_hybrid_dc, PV-to-battery charging bypasses the shared AC port. In separate_ac, PV inverter output is limited independently, battery PCS active power is discharge minus all charging, and site AC headroom limits aggregate net port power; the battery PCS P-Q envelope does not include PV inverter power.",
+            "Model fidelity is limited by generic PV timing, perfect foresight and inactive standby/physical-ageing parameters. A small solver optimality gap only certifies the mathematical model, not the real installation or agreement with an external product.",
             "Saved results become stale when evidence, design candidates or the approved tariff changes.",
         ],
     )
@@ -848,16 +859,11 @@ def _finance_module(
     ):
         parameters.append(_parameter(f"finance.assumption.{key}", label, assumptions.get(key), unit=unit, source_kind="analyst_input" if key not in {"price_source", "rebate_application_basis"} else "model_policy", source_label="Saved annual finance result", source_path=f"annual_financial.result.assumptions.{key}", edit_stage="tariff_replay"))
     one_click_fallbacks = (
-        ("discount_rate", "One-click fallback discount rate", 0.08, "fraction/year"),
-        ("annual_value_escalation_rate", "One-click fallback annual value escalation", 0.025, "fraction/year"),
-        ("annual_value_degradation_rate", "One-click fallback annual value degradation", 0.005, "fraction/year"),
-        ("annual_om_fraction_of_capex", "One-click fallback annual O&M fraction", 0.015, "fraction/year"),
-        ("analysis_term_years", "One-click fallback analysis term", 15, "years"),
-    )
-    one_click_fallback_active = (
-        assumptions.get("price_source")
-        == "analyst_entered_total_solution_price"
-        and all(assumptions.get(key) == value for key, _label, value, _unit in one_click_fallbacks)
+        ("discount_rate", "Legacy API default discount rate", 0.08, "fraction/year"),
+        ("annual_value_escalation_rate", "Legacy API default annual value escalation", 0.025, "fraction/year"),
+        ("annual_value_degradation_rate", "Legacy API default annual value degradation", 0.005, "fraction/year"),
+        ("annual_om_fraction_of_capex", "Legacy API default annual O&M fraction", 0.015, "fraction/year"),
+        ("analysis_term_years", "Legacy API default analysis term", 15, "years"),
     )
     for key, label, value, unit in one_click_fallbacks:
         parameters.append(
@@ -867,14 +873,15 @@ def _finance_module(
                 value,
                 unit=unit,
                 source_kind="model_default",
-                source_label="Python annual-finance fallback",
+                source_label="Legacy API defaults; not evidence of this run's input source",
                 source_path=(
                     "solar_battery/ci_annual_financial_comparison.py"
                     f"::_validated_assumptions.{key}"
                 ),
                 edit_stage="tariff_replay",
                 editable=False,
-                active=one_click_fallback_active,
+                # Equal numeric values do not prove that defaults were used.
+                active=False,
             )
         )
     for key, label, unit in (
@@ -948,12 +955,13 @@ def _finance_module(
         _calculation("finance.tariff_replay_provenance", "Tariff replay provenance", "finance.source_tariff_replay_sha256 = SHA256(saved_tariff_replay); finance.scenario_id and first_year_value = matching tariff_replay.scenario_id and annual_tariff_value", "Finance strictly consumes the saved tariff-aware optimized replay. Persistence fails closed when its embedded source digest differs from the saved replay digest, and every financial row must retain the matching scenario ID and tariff-derived annual value.", ["saved tariff replay", "tariff replay SHA-256", "scenario ID", "tariff-derived first-year value"], "solar_battery/ci_annual_financial_comparison.py::compare_ci_annual_financial_scenarios and solar_battery/ci_project_annual_financial.py::_validate_result"),
         _calculation("finance.first_year_value", "First-year tariff value", "first_year_value_ex_GST = baseline_annual_cost_ex_GST - optimized_post_dispatch_annual_cost_ex_GST", "Uses the baseline total and the matching scenario's stored tariff-aware optimized annual total; it is not a generic retail-bill estimate or the pre-tariff technical peak-day result.", ["baseline annual tariff total", "optimized post-dispatch annual tariff total"], "solar_battery/ci_scenario_analysis.py::_annual_tariff_value", example=_tariff_value_example(tariff_scenarios)),
         _calculation("finance.manual_quote", "Manual quote as final Net CAPEX", "gross_upfront_cost = upfront_cost = entered_quoted_Net_CAPEX; upfront_rebate = 0", "In the current one-click Analysis path, pricing_mode is manual_quotes. The saved theoretical rebate audit remains visible, but Python deliberately does not subtract it from an already-net quotation.", ["selected solution quote"], "solar_battery/ci_annual_financial_comparison.py::compare_ci_annual_financial_scenarios", example=_manual_quote_example(finance_solutions, assumptions)),
-        _calculation("finance.one_click_assumptions", "One-click finance fallback", "when omitted in manual_quotes mode: discount=8%; escalation=2.5%; degradation=0.5%; O&M=1.5%; term=15 years", "The current one-click Analysis request sends selected quoted Net CAPEX values but no finance assumption fields. Python therefore applies these fixed fallbacks. Device-profile finance defaults are used only in device_profile pricing mode.", ["pricing mode", "optional finance request fields"], "solar_battery/ci_annual_financial_comparison.py::_validated_assumptions", example=_assumption_example(assumptions)),
+        _calculation("finance.one_click_assumptions", "One-click finance assumptions", "request assumptions = current saved finance assumptions, otherwise configured workspace finance defaults", "Analysis captures and validates the chosen basis before dispatch and sends every financial assumption explicitly with the selected Net CAPEX quotes. Missing or invalid configuration blocks analysis. Python validates the request and remains calculation authority. Legacy API clients omitting fields still receive Python's documented defaults; the current UI no longer relies on them.", ["current saved finance assumptions", "workspace finance defaults", "explicit request fields"], "solar_battery/ci_annual_financial_comparison.py::_validated_assumptions", example=_assumption_example(assumptions)),
+        _calculation("finance.reference_comparison", "External model agreement check", "relative_error = abs(our_value - reference_value) / abs(reference_value); use absolute tolerances near zero", "The offline Python benchmark requires reviewed matching inputs and all seven metrics. Targets: baseline bill 2%, post-dispatch bill 5%, peak kVA 10%, Net CAPEX 1%, annual savings, NPV and payback 20%. These are engineering acceptance targets, not evidence of 80% real-world accuracy. Missing assumptions or metrics produce not_comparable, never a pass.", ["aligned input basis", "reference metrics", "our metrics"], "solar_battery/ci_reference_benchmark.py::compare_ci_reference_case"),
         _calculation("finance.annual_om", "Annual O&M", "annual_O&M = gross_upfront_cost * annual_O&M_fraction", "In manual quote mode, gross_upfront_cost equals the entered Net CAPEX quote. O&M remains constant in nominal AUD across the current annual cashflow model.", ["gross upfront cost", "O&M fraction"], "solar_battery/ci_annual_financial_comparison.py::_financial_solution", example=_annual_om_example(finance_solutions, assumptions)),
         _calculation("finance.year_cashflow", "Annual cashflow", "CF_y = value_1 * (1 + escalation)^(y-1) * (1 - degradation)^(y-1) - annual_O&M - replacements_y", "Builds one annual cashflow for each year of the analysis term. Current comparison supplies an empty replacement-event list and rounds displayed annual cashflows to cents.", ["first-year value", "escalation", "degradation", "O&M", "replacement events"], "solar_battery/ci_financial_solutions.py::calculate_metrics", example=_cashflow_example(finance_solutions, assumptions)),
         _calculation("finance.npv", "Net present value", "NPV = sum(CF_y / (1 + discount_rate)^y), including CF_0 = -Net_CAPEX", "Discounts all project cashflows to year zero and rounds the saved result to cents.", ["cashflows", "discount rate"], "solar_battery/ci_financial_solutions.py::calculate_metrics", example=_metric_example(finance_solutions, "net_present_value_aud", "AUD", "saved NPV")),
         _calculation("finance.payback", "Simple payback period", "payback = prior_year + (-cumulative_before / current_year_cashflow)", "Uses undiscounted cashflow and linear interpolation within the crossing year. The saved result is rounded to three decimals and is null if cumulative cashflow never reaches zero within the term.", ["annual undiscounted cashflows"], "solar_battery/ci_financial_solutions.py::_payback_years", example=_metric_example(finance_solutions, "payback_period_years", "years", "saved simple payback")),
-        _calculation("finance.irr", "Internal rate of return", "find r where sum(CF_y / (1 + r)^y) = 0", "Uses bisection from -99.9999% to 1000% for up to 120 iterations; returns null if no bracketed root exists and does not resolve multiple-root ambiguity. The saved result is rounded to six decimals.", ["cashflows"], "solar_battery/ci_financial_solutions.py::_irr", example=_metric_example(finance_solutions, "internal_rate_of_return", "fraction", "saved IRR")),
+        _calculation("finance.irr", "Internal rate of return", "find r where sum(CF_y / (1 + r)^y) = 0", "Uses bisection from -99.9999% to 1000% for up to 120 iterations. Returns null for multiple cashflow sign changes (potentially ambiguous roots) or no bracketed root; the saved status distinguishes these cases. Result rounded to six decimals.", ["cashflows"], "solar_battery/ci_financial_solutions.py::_irr", example=_metric_example(finance_solutions, "internal_rate_of_return", "fraction", "saved IRR")),
         _calculation("finance.lifetime_value", "Undiscounted lifetime net value", "lifetime_net_value = sum(CF_0 ... CF_N)", "Shows nominal total value without time-value discounting and rounds the saved result to cents.", ["all cashflows"], "solar_battery/ci_financial_solutions.py::calculate_metrics", example=_metric_example(finance_solutions, "lifetime_net_value_undiscounted_aud", "AUD", "saved undiscounted lifetime value")),
         _calculation("finance.roi", "Return on investment (ROI)", "undefined in the current authoritative model", "ROI is not calculated or persisted; do not infer it from NPV, IRR or lifetime value.", ["not implemented"], "solar_battery/ci_financial_solutions.py::calculate_metrics"),
         _calculation("finance.lcoe", "Levelised cost of energy (LCOE)", "undefined in the current authoritative model", "LCOE is not calculated because the current finance contract has no discounted lifetime generation-cost denominator model.", ["not implemented"], "solar_battery/ci_financial_solutions.py::calculate_metrics"),
@@ -1016,7 +1024,9 @@ def _finance_module(
             "Scenario IDs are the provenance join from generated candidate to tariff replay, quoted Net CAPEX and annual finance result; the Handbook only projects saved rows and never repairs a missing join.",
             "Finance is bound to the exact saved tariff replay by source_tariff_replay_sha256 and consumes that replay's tariff-aware optimized annual value. A changed or mismatched replay makes the financial result invalid or stale.",
             "The pre-tariff technical active-kW peak target is not a finance input. kVA reductions from battery dispatch or reactive support change demand charges only when the matching approved demand rate is greater than zero.",
-            "The current one-click Analysis flow uses manual quote mode and omits finance inputs, so its authoritative fallback is 8% discount, 2.5% value escalation, 0.5% value degradation, 1.5% annual O&M and 15 years.",
+            "One-click Analysis preserves current saved finance assumptions or uses configured workspace defaults and sends them explicitly. Changing the workspace defaults does not silently rewrite an already saved project's assumptions.",
+            "This is a representative-year dispatch plus annual cashflow projection, not a separate physical optimisation for every future year. Aggregate value degradation is not equivalent to separately simulating PV degradation, battery ageing and replacement.",
+            "External comparisons must align load and PV time series, reactive demand, tariffs, interval length, topology, efficiencies, controls, capital cost and finance assumptions. Agreement with another model alone cannot establish real-world accuracy.",
             "Manual quotations are already final Net CAPEX. The calculated rebate audit remains attached for traceability, while upfront_rebate_aud_ex_gst is zero to prevent a second deduction.",
             "Certificate prices and tariff rates are deterministic point assumptions. Expiry, price volatility, Monte Carlo uncertainty and future rules or tariff structures are not modelled.",
             "Suggested, draft and stale tariff fields are displayed as inactive working values. Only the current approved tariff calculation profile is authoritative for tariff replay and customer-dollar outputs.",

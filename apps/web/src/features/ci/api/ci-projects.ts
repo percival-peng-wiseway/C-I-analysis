@@ -56,6 +56,8 @@ export interface CiExistingBatteryAsset {
 }
 
 export interface CiTechnicalOptions {
+  dispatch_topology?: "shared_hybrid_dc" | "separate_ac";
+  battery_efficiency_basis?: "pack_plus_conversion" | "whole_system_ac";
   annual_specific_yield_kwh_per_kw: number;
   shading_loss_percent: number;
   soiling_loss_percent: number;
@@ -94,6 +96,11 @@ export interface CiSolutionRange {
 }
 
 export interface CiSiteFactors {
+  pv_timing_model?: "generic_normalized_solar_shape_v1" | "solar_geometry_screening_v1";
+  latitude_degrees?: number;
+  longitude_degrees?: number;
+  location_source_label?: string;
+  location_confirmed?: boolean;
   resource_basis: "gross_specific_yield_before_site_losses";
   resource_source: "analyst_assumption" | "site_assessment" | "imported_resource_study";
   resource_label: string;
@@ -109,6 +116,8 @@ export interface CiSiteFactors {
 }
 
 export interface CiConnectionOptions {
+  dispatch_topology?: "shared_hybrid_dc" | "separate_ac";
+  battery_efficiency_basis?: "pack_plus_conversion" | "whole_system_ac";
   inverter_block_size_kw: number;
   inverter_quantity?: number;
   site_ac_headroom_kw: number;

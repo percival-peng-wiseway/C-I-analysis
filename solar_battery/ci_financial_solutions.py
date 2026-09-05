@@ -48,23 +48,54 @@ def calculate_metrics(assumptions: dict[str, Any]) -> dict[str, object]:
         assumptions.get("replacement_events_aud"), term_years=term_years
     )
     cashflows = [-capex]
+    annual_projection: list[dict[str, object]] = []
+    cumulative_cashflow = -capex
     for year in range(1, term_years + 1):
-        cashflows.append(
-            annual_value
-            * ((1 + escalation_rate) ** (year - 1))
-            * ((1 - degradation_rate) ** (year - 1))
-            - annual_om
-            - replacement_by_year.get(year, 0.0)
+        escalation_factor = (1 + escalation_rate) ** (year - 1)
+        value_retention_factor = (1 - degradation_rate) ** (year - 1)
+        projected_value = annual_value * escalation_factor * value_retention_factor
+        replacement = replacement_by_year.get(year, 0.0)
+        cashflow = projected_value - annual_om - replacement
+        cashflows.append(cashflow)
+        cumulative_cashflow += cashflow
+        annual_projection.append(
+            {
+                "year": year,
+                "value_escalation_factor": escalation_factor,
+                "aggregate_value_retention_factor": value_retention_factor,
+                "projected_tariff_savings_aud": round(projected_value, 2),
+                "annual_om_cost_aud": round(annual_om, 2),
+                "replacement_cost_aud": round(replacement, 2),
+                "net_cashflow_aud": round(cashflow, 2),
+                "discounted_cashflow_aud": round(cashflow / ((1 + discount_rate) ** year), 2),
+                "cumulative_cashflow_aud": round(cumulative_cashflow, 2),
+            }
         )
     npv = sum(value / ((1 + discount_rate) ** year) for year, value in enumerate(cashflows))
     payback = _payback_years(cashflows)
     irr = _irr(cashflows)
+    irr_status = (
+        "non_conventional_cashflows"
+        if _cashflow_sign_changes(cashflows) > 1
+        else "calculated" if irr is not None else "no_bracketed_root"
+    )
     return {
         "net_present_value_aud": round(npv, 2),
         "payback_period_years": round(payback, 3) if payback is not None else None,
         "internal_rate_of_return": round(irr, 6) if irr is not None else None,
+        "internal_rate_of_return_status": irr_status,
         "lifetime_net_value_undiscounted_aud": round(sum(cashflows), 2),
         "annual_cashflows_aud": [round(value, 2) for value in cashflows[1:]],
+        "annual_projection": annual_projection,
+        "projection_method": "representative_year_aggregate_value_projection_v1",
+        "physical_redispatch_each_year": False,
+        "projection_disclosure": (
+            "One saved tariff-aware year is projected using aggregate value "
+            "escalation and degradation. These factors do not separately model "
+            "PV generation degradation or battery capacity ageing. Future-year "
+            "dispatch, demand peaks and tariffs are not re-optimised. O&M is "
+            "constant nominal AUD; replacement costs do not restore capacity."
+        ),
     }
 
 
@@ -91,6 +122,12 @@ def calculate_catalog_projection(
         raise CiFinancialSolutionError(
             "physical scenario capacity and power are invalid"
         ) from exc
+    separate_ac = authored_inputs.get("dispatch_topology") == "separate_ac"
+    battery_inverter_kw = (
+        _non_negative(authored_inputs, "battery_inverter_capacity_kw_ac")
+        if separate_ac
+        else None
+    )
     pricing = resolve_price(
         session,
         version_id=pricing_catalog_version_id,
@@ -100,6 +137,7 @@ def calculate_catalog_projection(
         discharge_kw=discharge_kw,
         pv_capacity_kw=pv_capacity_kw,
         pv_inverter_kw=pv_inverter_kw,
+        battery_inverter_kw=battery_inverter_kw,
         workspace_id=workspace_id,
         owner_id=owner_id,
     )
@@ -124,6 +162,9 @@ def calculate_catalog_projection(
         "currency": "AUD",
         "value_source": value_source,
         "pricing_resolution": pricing,
+        "dispatch_topology": "separate_ac" if separate_ac else "shared_hybrid_dc",
+        "pv_inverter_capacity_kw_ac": pv_inverter_kw,
+        "battery_inverter_capacity_kw_ac": battery_inverter_kw,
     }
     if tariff_value is not None:
         normalized["tariff_value"] = tariff_value
@@ -481,6 +522,11 @@ def _payback_years(cashflows: list[float]) -> float | None:
 
 
 def _irr(cashflows: list[float]) -> float | None:
+    # A later negative cashflow (for example a replacement) can create multiple
+    # IRRs. Do not return one arbitrary bracketed root as a unique project yield.
+    if _cashflow_sign_changes(cashflows) > 1:
+        return None
+
     def value(rate: float) -> float:
         return sum(cashflow / ((1 + rate) ** year) for year, cashflow in enumerate(cashflows))
 
@@ -498,3 +544,8 @@ def _irr(cashflows: list[float]) -> float | None:
         else:
             low, low_value = midpoint, midpoint_value
     return (low + high) / 2
+
+
+def _cashflow_sign_changes(cashflows: list[float]) -> int:
+    signs = [1 if value > 0 else -1 for value in cashflows if value != 0]
+    return sum(left != right for left, right in zip(signs, signs[1:]))
