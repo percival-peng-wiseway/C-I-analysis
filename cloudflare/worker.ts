@@ -273,11 +273,11 @@ export class E3ApiContainer extends Container<Env> {
   }
 }
 
-// The versioned name intentionally leaves earlier container/DO pairings behind.
-// Project records and evidence live in PostgreSQL/R2, so rotating this
-// infrastructure-only identity is data-safe and guarantees that requests
-// after the container rollout start against the current image.
-const PRIMARY_CONTAINER_NAME = "primary-v11";
+// Keep this identity stable: changing it does not guarantee a new image and
+// can exhaust max_instances while the old pairing is still draining.
+// Cloudflare rolls the image in place; verify /api/health source hashes after
+// rollout completion before considering a calculation release deployed.
+const PRIMARY_CONTAINER_NAME = "primary-v10";
 
 function primaryContainer(env: Env) {
   return env.E3_API.get(env.E3_API.idFromName(PRIMARY_CONTAINER_NAME));
