@@ -31,7 +31,7 @@ export interface CiScenarioInput {
 
 export interface CiPhysicalScenarioResult {
   contract_version: "ci_physical_scenario_review_v6";
-  calculation_revision: "ci_physical_scenario_planner_primary_seed_v2";
+  calculation_revision: "ci_physical_scenario_incremental_kva_planner_v3";
   analysis_status: "ready";
   analysis_mode: "evidence_limited_internal_review";
   customer_facing_permission: false;
@@ -93,7 +93,7 @@ export interface CiPhysicalScenarioResult {
     selected_monthly_thresholds_kw: Array<number | null>;
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2";
-      calculation_revision: "ci_optimizer_run_snapshot_planner_primary_seed_v2";
+      calculation_revision: "ci_optimizer_run_snapshot_incremental_kva_planner_v3";
       snapshot_sha256: string;
       algorithm_id: "ci_peak_shaving_rolling_replay_v2";
       customer_facing_permission: false;
@@ -180,14 +180,26 @@ export interface CiSavedTariffReplayState {
 export interface CiTariffReplayProgress {
   completedScenarioCount: number;
   totalScenarioCount: number;
+  phase?: "checkpoint_restored" | "running_batch" | "confirming_checkpoint" | "checkpoint_committed";
+  activeBatchScenarioCount?: number;
+  elapsedSeconds?: number;
 }
 
 export interface CiTariffReplayRunOptions {
   batchSize?: number;
+  batchRequestTimeoutMs?: number;
+  checkpointPollIntervalMs?: number;
+  checkpointReadTimeoutMs?: number;
+  checkpointRecoveryTimeoutMs?: number;
   onProgress?: (progress: CiTariffReplayProgress) => void;
 }
 
-const DEFAULT_TARIFF_REPLAY_BATCH_SIZE = 2;
+const DEFAULT_TARIFF_REPLAY_BATCH_SIZE = 1;
+const DEFAULT_TARIFF_REPLAY_BATCH_REQUEST_TIMEOUT_MS = 630_000;
+const DEFAULT_TARIFF_REPLAY_CHECKPOINT_POLL_INTERVAL_MS = 10_000;
+const DEFAULT_TARIFF_REPLAY_CHECKPOINT_READ_TIMEOUT_MS = 30_000;
+const DEFAULT_TARIFF_REPLAY_CHECKPOINT_RECOVERY_TIMEOUT_MS = 30_000;
+const MAX_TARIFF_REPLAY_TIMING_MS = 3_600_000;
 
 export type CiThreeCaseId = "no_system" | "pv_only" | "pv_battery";
 
@@ -288,9 +300,13 @@ export async function runCiProjectTariffReplay(
 ): Promise<CiPhysicalScenarioResult> {
   const url = `/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/tariff-replay`;
   if (scenarioIds === undefined) {
-    return postCiProjectTariffReplayBatch({
+    return runBoundedLegacyCiProjectTariffReplay({
+      batchRequestTimeoutMs: resolveTariffReplayTiming(
+        options.batchRequestTimeoutMs,
+        DEFAULT_TARIFF_REPLAY_BATCH_REQUEST_TIMEOUT_MS,
+        "Tariff replay batch timeout",
+      ),
       fetcher,
-      projectId,
       signal,
       url,
     });
@@ -306,6 +322,28 @@ export async function runCiProjectTariffReplay(
   if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 200) {
     throw new Error("Tariff replay batch size must be a whole number from one to 200.");
   }
+  const timing = {
+    batchRequestTimeoutMs: resolveTariffReplayTiming(
+      options.batchRequestTimeoutMs,
+      DEFAULT_TARIFF_REPLAY_BATCH_REQUEST_TIMEOUT_MS,
+      "Tariff replay batch timeout",
+    ),
+    checkpointPollIntervalMs: resolveTariffReplayTiming(
+      options.checkpointPollIntervalMs,
+      DEFAULT_TARIFF_REPLAY_CHECKPOINT_POLL_INTERVAL_MS,
+      "Tariff replay checkpoint poll interval",
+    ),
+    checkpointReadTimeoutMs: resolveTariffReplayTiming(
+      options.checkpointReadTimeoutMs,
+      DEFAULT_TARIFF_REPLAY_CHECKPOINT_READ_TIMEOUT_MS,
+      "Tariff replay checkpoint read timeout",
+    ),
+    checkpointRecoveryTimeoutMs: resolveTariffReplayTiming(
+      options.checkpointRecoveryTimeoutMs,
+      DEFAULT_TARIFF_REPLAY_CHECKPOINT_RECOVERY_TIMEOUT_MS,
+      "Tariff replay checkpoint recovery timeout",
+    ),
+  };
 
   const saved = await loadCiSavedTariffReplayState(projectId, fetcher, signal, true);
   let latestResult = saved.status === "ready" ? saved.result : null;
@@ -313,20 +351,29 @@ export async function runCiProjectTariffReplay(
   options.onProgress?.({
     completedScenarioCount: completedIds.size,
     totalScenarioCount: scenarioIds.length,
+    phase: "checkpoint_restored",
+    activeBatchScenarioCount: 0,
+    elapsedSeconds: 0,
   });
-  if (completedIds.size === scenarioIds.length && latestResult) return latestResult;
+  if (completedIds.size === scenarioIds.length && latestResult) {
+    return selectCiTariffReplayScenarios(latestResult, scenarioIds);
+  }
 
   const missingIds = scenarioIds.filter((scenarioId) => !completedIds.has(scenarioId));
   const batches = chunkScenarioIds(missingIds, batchSize);
   for (const batch of batches) {
     const expectedCheckpointIds = [...completedIds, ...batch];
-    latestResult = await postCiProjectTariffReplayBatch({
+    latestResult = await runMonitoredCiProjectTariffReplayBatch({
+      completedScenarioCount: completedIds.size,
+      expectedCheckpointIds,
       fetcher,
+      onProgress: options.onProgress,
       persistenceMode: "merge_checkpoint",
       projectId,
-      recoveryScenarioIds: batch,
       scenarioIds: batch,
       signal,
+      timing,
+      totalScenarioCount: scenarioIds.length,
       url,
     });
     if (!hasScenarioCoverage(latestResult, expectedCheckpointIds)) {
@@ -336,86 +383,283 @@ export async function runCiProjectTariffReplay(
     options.onProgress?.({
       completedScenarioCount: completedIds.size,
       totalScenarioCount: scenarioIds.length,
+      phase: "checkpoint_committed",
+      activeBatchScenarioCount: 0,
+      elapsedSeconds: 0,
     });
   }
   if (!latestResult || !hasScenarioCoverage(latestResult, scenarioIds)) {
     throw new Error("The tariff replay checkpoint did not cover every selected solution.");
   }
-  return latestResult;
+  return selectCiTariffReplayScenarios(latestResult, scenarioIds);
+}
+
+async function runBoundedLegacyCiProjectTariffReplay({
+  batchRequestTimeoutMs,
+  fetcher,
+  signal,
+  url,
+}: {
+  batchRequestTimeoutMs: number;
+  fetcher: typeof fetch;
+  signal?: AbortSignal;
+  url: string;
+}): Promise<CiPhysicalScenarioResult> {
+  throwIfAborted(signal);
+  const controller = new AbortController();
+  const detachCallerAbort = forwardAbortSignal(signal, controller);
+  const delay = createAbortableDelay(batchRequestTimeoutMs, signal);
+  const postOutcome: Promise<CiTariffReplayPostOutcome> = postCiProjectTariffReplayBatch({
+    fetcher,
+    signal: controller.signal,
+    url,
+  }).then(
+    (result) => ({ kind: "result" as const, result }),
+    (error: unknown) => ({ kind: "error" as const, error }),
+  );
+  try {
+    const outcome = await Promise.race([
+      postOutcome,
+      delay.promise.then(() => ({ kind: "timeout" as const })),
+    ]);
+    if (outcome.kind === "result") return outcome.result;
+    if (outcome.kind === "error") throw outcome.error;
+    controller.abort();
+    throw new Error(
+      `The tariff replay request could not be confirmed within ${formatElapsedDuration(batchRequestTimeoutMs)}. No duplicate calculation was submitted automatically.`,
+    );
+  } finally {
+    delay.cancel();
+    detachCallerAbort();
+    controller.abort();
+  }
 }
 
 async function postCiProjectTariffReplayBatch({
   fetcher,
   persistenceMode,
-  projectId,
-  recoveryScenarioIds,
   scenarioIds,
   signal,
   url,
 }: {
   fetcher: typeof fetch;
   persistenceMode?: "replace" | "merge_checkpoint";
-  projectId: string;
-  recoveryScenarioIds?: string[];
   scenarioIds?: string[];
   signal?: AbortSignal;
   url: string;
 }): Promise<CiPhysicalScenarioResult> {
-  const maximumAttempts = recoveryScenarioIds?.length ? 2 : 1;
-  let lastFailure: Error | null = null;
-  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
-    let response: Response;
-    try {
-      response = await fetcher(url, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          ...(scenarioIds === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(scenarioIds === undefined ? {} : {
-          body: JSON.stringify({
-            scenario_ids: scenarioIds,
-            persistence_mode: persistenceMode ?? "replace",
-          }),
-        }),
-        signal,
-      });
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      const recovered = await restoreCompletedTariffReplay(
-        projectId,
-        recoveryScenarioIds,
-        fetcher,
-        signal,
-      );
-      if (recovered) return recovered;
-      lastFailure = error instanceof Error ? error : new Error("The tariff replay connection was interrupted.");
-      if (attempt + 1 < maximumAttempts) continue;
-      throw lastFailure;
-    }
-    if (response.ok) return assertCiPhysicalScenarioResult(await response.json());
+  const response = await fetcher(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      ...(scenarioIds === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    ...(scenarioIds === undefined ? {} : {
+      body: JSON.stringify({
+        scenario_ids: scenarioIds,
+        persistence_mode: persistenceMode ?? "replace",
+      }),
+    }),
+    signal,
+  });
+  if (response.ok) return assertCiPhysicalScenarioResult(await response.json());
 
-    const payload = await readCiApiFailure(response);
-    lastFailure = new Error(
-      payload.message ??
-      (response.status === 503
-        ? "The cloud analysis service became temporarily unavailable before completion could be confirmed. Wait a moment, then run Analysis again."
-        : null) ??
-      `C&I tariff replay failed with status ${response.status}.`,
-    );
-    if (isRetryableInfrastructureFailure(response.status, payload.errorCode)) {
-      const recovered = await restoreCompletedTariffReplay(
-        projectId,
-        recoveryScenarioIds,
-        fetcher,
+  const payload = await readCiApiFailure(response);
+  throw new CiTariffReplayRequestError(
+    payload.message ??
+    (response.status === 503
+      ? "The cloud analysis service became temporarily unavailable before completion could be confirmed."
+      : null) ??
+    `C&I tariff replay failed with status ${response.status}.`,
+    isRetryableInfrastructureFailure(response.status, payload.errorCode),
+  );
+}
+
+interface CiTariffReplayTiming {
+  batchRequestTimeoutMs: number;
+  checkpointPollIntervalMs: number;
+  checkpointReadTimeoutMs: number;
+  checkpointRecoveryTimeoutMs: number;
+}
+
+class CiTariffReplayRequestError extends Error {
+  constructor(message: string, readonly retryableInfrastructure: boolean) {
+    super(message);
+    this.name = "CiTariffReplayRequestError";
+  }
+}
+
+type CiTariffReplayPostOutcome =
+  | { kind: "result"; result: CiPhysicalScenarioResult }
+  | { kind: "error"; error: unknown };
+
+async function runMonitoredCiProjectTariffReplayBatch({
+  completedScenarioCount,
+  expectedCheckpointIds,
+  fetcher,
+  onProgress,
+  persistenceMode,
+  projectId,
+  scenarioIds,
+  signal,
+  timing,
+  totalScenarioCount,
+  url,
+}: {
+  completedScenarioCount: number;
+  expectedCheckpointIds: string[];
+  fetcher: typeof fetch;
+  onProgress?: (progress: CiTariffReplayProgress) => void;
+  persistenceMode: "merge_checkpoint";
+  projectId: string;
+  scenarioIds: string[];
+  signal?: AbortSignal;
+  timing: CiTariffReplayTiming;
+  totalScenarioCount: number;
+  url: string;
+}): Promise<CiPhysicalScenarioResult> {
+  throwIfAborted(signal);
+  const startedAt = Date.now();
+  const requestController = new AbortController();
+  const detachCallerAbort = forwardAbortSignal(signal, requestController);
+  const reportProgress = (phase: "running_batch" | "confirming_checkpoint") => {
+    onProgress?.({
+      completedScenarioCount,
+      totalScenarioCount,
+      phase,
+      activeBatchScenarioCount: scenarioIds.length,
+      elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)),
+    });
+  };
+  const postOutcome: Promise<CiTariffReplayPostOutcome> = postCiProjectTariffReplayBatch({
+    fetcher,
+    persistenceMode,
+    scenarioIds,
+    signal: requestController.signal,
+    url,
+  }).then(
+    (result) => ({ kind: "result" as const, result }),
+    (error: unknown) => ({ kind: "error" as const, error }),
+  );
+
+  reportProgress("running_batch");
+  try {
+    while (true) {
+      throwIfAborted(signal);
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= timing.batchRequestTimeoutMs) {
+        requestController.abort();
+        reportProgress("confirming_checkpoint");
+        const recovered = await pollForCompletedTariffReplay({
+          fetcher,
+          onWait: () => reportProgress("confirming_checkpoint"),
+          projectId,
+          requiredScenarioIds: expectedCheckpointIds,
+          signal,
+          timing,
+        });
+        if (recovered) return recovered;
+        const elapsedLabel = formatElapsedDuration(timing.batchRequestTimeoutMs);
+        throw new Error(
+          `The tariff replay batch could not be confirmed within ${elapsedLabel}. It may still be finishing on the server. No duplicate calculation was submitted automatically; wait, then run Analysis again to resume from any saved checkpoint.`,
+        );
+      }
+
+      const delay = createAbortableDelay(
+        Math.min(timing.checkpointPollIntervalMs, timing.batchRequestTimeoutMs - elapsedMs),
         signal,
       );
-      if (recovered) return recovered;
-      if (attempt + 1 < maximumAttempts) continue;
+      let outcome: CiTariffReplayPostOutcome | { kind: "poll" };
+      try {
+        outcome = await Promise.race([
+          postOutcome,
+          delay.promise.then(() => ({ kind: "poll" as const })),
+        ]);
+      } finally {
+        delay.cancel();
+      }
+      if (outcome.kind === "result") return outcome.result;
+      if (outcome.kind === "error") {
+        if (isAbortError(outcome.error)) throw outcome.error;
+        if (
+          outcome.error instanceof CiTariffReplayRequestError
+          && !outcome.error.retryableInfrastructure
+        ) throw outcome.error;
+
+        reportProgress("confirming_checkpoint");
+        const recovered = await pollForCompletedTariffReplay({
+          fetcher,
+          onWait: () => reportProgress("confirming_checkpoint"),
+          projectId,
+          requiredScenarioIds: expectedCheckpointIds,
+          signal,
+          timing,
+        });
+        if (recovered) return recovered;
+        const failureMessage = outcome.error instanceof Error
+          ? outcome.error.message
+          : "The tariff replay connection was interrupted.";
+        throw new Error(
+          `${failureMessage} Completion was not confirmed, so no duplicate calculation was submitted automatically. Wait, then run Analysis again to resume from any saved checkpoint.`,
+        );
+      }
+
+      reportProgress("running_batch");
+      const remainingRequestMs = timing.batchRequestTimeoutMs - (Date.now() - startedAt);
+      if (remainingRequestMs <= 0) continue;
+      const recovered = await restoreCompletedTariffReplayWithin(
+        projectId,
+        expectedCheckpointIds,
+        fetcher,
+        signal,
+        Math.min(timing.checkpointReadTimeoutMs, remainingRequestMs),
+      );
+      if (recovered) {
+        requestController.abort();
+        return recovered;
+      }
     }
-    throw lastFailure;
+  } finally {
+    detachCallerAbort();
+    requestController.abort();
   }
-  throw lastFailure ?? new Error("Tariff replay failed before completion could be confirmed.");
+}
+
+async function pollForCompletedTariffReplay({
+  fetcher,
+  onWait,
+  projectId,
+  requiredScenarioIds,
+  signal,
+  timing,
+}: {
+  fetcher: typeof fetch;
+  onWait: () => void;
+  projectId: string;
+  requiredScenarioIds: string[];
+  signal?: AbortSignal;
+  timing: CiTariffReplayTiming;
+}): Promise<CiPhysicalScenarioResult | null> {
+  const recoveryDeadline = Date.now() + timing.checkpointRecoveryTimeoutMs;
+  let firstAttempt = true;
+  while (firstAttempt || Date.now() < recoveryDeadline) {
+    firstAttempt = false;
+    throwIfAborted(signal);
+    onWait();
+    const remainingMs = Math.max(1, recoveryDeadline - Date.now());
+    const recovered = await restoreCompletedTariffReplayWithin(
+      projectId,
+      requiredScenarioIds,
+      fetcher,
+      signal,
+      Math.min(timing.checkpointReadTimeoutMs, remainingMs),
+    );
+    if (recovered) return recovered;
+    const waitMs = recoveryDeadline - Date.now();
+    if (waitMs <= 0) return null;
+    await waitForDelay(Math.min(timing.checkpointPollIntervalMs, waitMs), signal);
+  }
+  return null;
 }
 
 async function readCiApiFailure(
@@ -470,6 +714,147 @@ async function restoreCompletedTariffReplay(
   }
 }
 
+async function restoreCompletedTariffReplayWithin(
+  projectId: string,
+  requiredScenarioIds: string[],
+  fetcher: typeof fetch,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<CiPhysicalScenarioResult | null> {
+  throwIfAborted(signal);
+  const controller = new AbortController();
+  let parentAbortListener: (() => void) | null = null;
+  let resolveParentAbort: (() => void) | null = null;
+  const parentAbortOutcome = new Promise<{ kind: "parent_abort" }>((resolve) => {
+    resolveParentAbort = () => resolve({ kind: "parent_abort" });
+  });
+  if (signal) {
+    parentAbortListener = () => {
+      controller.abort();
+      resolveParentAbort?.();
+    };
+    signal.addEventListener("abort", parentAbortListener, { once: true });
+  }
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutOutcome = new Promise<{ kind: "timeout" }>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      controller.abort();
+      resolve({ kind: "timeout" });
+    }, timeoutMs);
+  });
+  const readOutcome = restoreCompletedTariffReplay(
+    projectId,
+    requiredScenarioIds,
+    fetcher,
+    controller.signal,
+  ).then(
+    (result) => ({ kind: "result" as const, result }),
+    (error: unknown) => ({ kind: "error" as const, error }),
+  );
+
+  try {
+    const outcome = await Promise.race([readOutcome, timeoutOutcome, parentAbortOutcome]);
+    if (outcome.kind === "parent_abort") throw createAbortError();
+    if (outcome.kind === "timeout") return null;
+    if (outcome.kind === "error") {
+      if (signal?.aborted) throw createAbortError();
+      return null;
+    }
+    return outcome.result;
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (signal && parentAbortListener) signal.removeEventListener("abort", parentAbortListener);
+    controller.abort();
+  }
+}
+
+function resolveTariffReplayTiming(
+  value: number | undefined,
+  fallback: number,
+  label: string,
+): number {
+  const resolved = value ?? fallback;
+  if (
+    !Number.isSafeInteger(resolved)
+    || resolved < 1
+    || resolved > MAX_TARIFF_REPLAY_TIMING_MS
+  ) {
+    throw new Error(`${label} must be a whole number from one to ${MAX_TARIFF_REPLAY_TIMING_MS} milliseconds.`);
+  }
+  return resolved;
+}
+
+function forwardAbortSignal(
+  signal: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (!signal) return () => undefined;
+  const listener = () => controller.abort();
+  if (signal.aborted) listener();
+  else signal.addEventListener("abort", listener, { once: true });
+  return () => signal.removeEventListener("abort", listener);
+}
+
+function waitForDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  const delay = createAbortableDelay(ms, signal);
+  return delay.promise.finally(delay.cancel);
+}
+
+function createAbortableDelay(
+  ms: number,
+  signal: AbortSignal | undefined,
+): { cancel: () => void; promise: Promise<void> } {
+  throwIfAborted(signal);
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let abortListener: (() => void) | null = null;
+  let settled = false;
+  const cleanup = () => {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+    timeoutHandle = undefined;
+    abortListener = null;
+  };
+  const promise = new Promise<void>((resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      settled = true;
+      cleanup();
+      resolve();
+    }, ms);
+    abortListener = () => {
+      settled = true;
+      cleanup();
+      reject(createAbortError());
+    };
+    signal?.addEventListener("abort", abortListener, { once: true });
+  });
+  return {
+    cancel: () => {
+      if (!settled) cleanup();
+    },
+    promise,
+  };
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw createAbortError();
+}
+
+function createAbortError(): Error {
+  const error = new Error("The tariff replay request was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function formatElapsedDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(1, Math.ceil(milliseconds / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  if (seconds === 0) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  return `${minutes} minute${minutes === 1 ? "" : "s"} ${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
 function hasScenarioCoverage(
   result: CiPhysicalScenarioResult,
   scenarioIds: string[],
@@ -489,6 +874,25 @@ function completedRequestedScenarioIds(
       .map((scenario) => scenario.scenario_id)
       .filter((scenarioId) => requested.has(scenarioId)),
   );
+}
+
+export function selectCiTariffReplayScenarios(
+  result: CiPhysicalScenarioResult,
+  scenarioIds: string[],
+): CiPhysicalScenarioResult {
+  const scenariosById = new Map(
+    result.scenarios.map((scenario) => [scenario.scenario_id, scenario]),
+  );
+  return {
+    ...result,
+    scenarios: scenarioIds.map((scenarioId) => {
+      const scenario = scenariosById.get(scenarioId);
+      if (!scenario) {
+        throw new Error("The tariff replay checkpoint did not cover every selected solution.");
+      }
+      return scenario;
+    }),
+  };
 }
 
 function chunkScenarioIds(scenarioIds: string[], batchSize: number): string[][] {
@@ -567,8 +971,12 @@ async function loadCiSavedTariffReplayState(
       payload.status === "ready" &&
       payload.result !== null &&
       payload.result.contract_version === "ci_physical_scenario_review_v6" &&
-      (payload.result as unknown as { calculation_revision?: unknown }).calculation_revision ===
-        "ci_physical_scenario_planner_limits_primal_simplex_v1"
+      [
+        "ci_physical_scenario_planner_limits_primal_simplex_v1",
+        "ci_physical_scenario_planner_primary_seed_v2",
+      ].includes(String(
+        (payload.result as unknown as { calculation_revision?: unknown }).calculation_revision,
+      ))
     ) {
       return {
         ...payload,
@@ -592,7 +1000,7 @@ export function assertCiPhysicalScenarioResult(value: unknown): CiPhysicalScenar
   const payload = value as CiPhysicalScenarioResult;
   if (
     payload.contract_version !== "ci_physical_scenario_review_v6" ||
-    payload.calculation_revision !== "ci_physical_scenario_planner_primary_seed_v2" ||
+    payload.calculation_revision !== "ci_physical_scenario_incremental_kva_planner_v3" ||
     payload.analysis_status !== "ready" ||
     payload.analysis_mode !== "evidence_limited_internal_review" ||
     payload.customer_facing_permission !== false ||
@@ -821,7 +1229,7 @@ function hasSafeScenarioAuthority(
   }
   return item.post_dispatch?.authority_source === "ci_peak_shaving_rolling_replay_v2" &&
     item.optimizer_run_snapshot?.contract_version === "ci_optimizer_run_snapshot_v2" &&
-    item.optimizer_run_snapshot.calculation_revision === "ci_optimizer_run_snapshot_planner_primary_seed_v2" &&
+    item.optimizer_run_snapshot.calculation_revision === "ci_optimizer_run_snapshot_incremental_kva_planner_v3" &&
     item.optimizer_run_snapshot.customer_facing_permission === false &&
     item.optimizer_run_snapshot.recommendation_permitted === false &&
     item.optimizer_audit_projection?.contract_version === "ci_optimizer_audit_projection_v2" &&

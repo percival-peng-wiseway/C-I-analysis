@@ -287,7 +287,7 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     assert result["contract_version"] == "ci_physical_scenario_review_v6"
     assert (
         result["calculation_revision"]
-        == "ci_physical_scenario_planner_primary_seed_v2"
+        == "ci_physical_scenario_incremental_kva_planner_v3"
     )
     assert result["customer_facing_permission"] is False
     assert result["recommendation_permitted"] is False
@@ -357,7 +357,7 @@ def test_physical_scenario_review_is_ranked_without_commercial_claims(monkeypatc
     )
     assert all(
         row["optimizer_run_snapshot"]["calculation_revision"]
-        == "ci_optimizer_run_snapshot_planner_primary_seed_v2"
+        == "ci_optimizer_run_snapshot_incremental_kva_planner_v3"
         for row in result["scenarios"]
     )
     assert all(
@@ -666,6 +666,51 @@ def test_one_worker_keeps_complete_analysis_inline(monkeypatch) -> None:
             [{"scenario_id": "one"}],
         )
     ]
+
+
+@pytest.mark.parametrize("lock_acquired", [True, False])
+def test_coordinator_queue_wait_is_included_in_request_deadline(monkeypatch, lock_acquired):
+    clock = [100.0]
+    released = []
+    started = []
+
+    class BusyLock:
+        def acquire(self, *, timeout):
+            assert timeout == 30.0
+            clock[0] += 20.0 if lock_acquired else 30.0
+            return lock_acquired
+
+        def release(self):
+            released.append(True)
+
+    class Coordinator:
+        returncode = 0
+
+        def communicate(self, *, input, timeout):
+            assert timeout == 10.0
+            return scenario_module._encode_coordinator_frame(
+                (scenario_module._COORDINATOR_RESULT_READY, {"status": "ready"}),
+                max_payload_bytes=scenario_module._MAX_COORDINATOR_RESULT_BYTES,
+            ), None
+
+    def start():
+        started.append(True)
+        return Coordinator()
+
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_WORKERS", "2")
+    monkeypatch.setenv("CI_SCENARIO_PROCESS_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(scenario_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(scenario_module, "_SCENARIO_ANALYSIS_PROCESS_LOCK", BusyLock())
+    monkeypatch.setattr(scenario_module, "_start_analysis_coordinator_subprocess", start)
+    if lock_acquired:
+        assert analyze_ci_physical_scenarios(
+            b"evidence", profile={}, scenarios=[]
+        ) == {"status": "ready"}
+        assert started == released == [True]
+    else:
+        with pytest.raises(CiScenarioAnalysisError):
+            analyze_ci_physical_scenarios(b"evidence", profile={}, scenarios=[])
+        assert started == released == []
 
 
 def test_complete_analysis_timeout_terminates_coordinator_and_releases_lock(

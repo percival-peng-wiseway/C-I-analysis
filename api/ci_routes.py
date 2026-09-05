@@ -36,6 +36,7 @@ from api.dependencies import (
     get_object_store,
 )
 from solar_battery.ci_component_cost_library import ci_component_cost_library
+from solar_battery.ci_analysis_singleflight import run_ci_analysis_once
 from solar_battery.ci_annual_financial_demo import (
     analyze_ci_annual_financial_demo,
 )
@@ -1387,56 +1388,95 @@ def post_ci_project_tariff_replay(
             selected_scenario_count,
             time.perf_counter() - started_at,
         )
-        result = analyze_ci_physical_scenarios(
-            interval.data,
-            profile=profile,
-            scenarios=selected_candidates,
-        )
-        _LOGGER.info(
-            "ci_tariff_replay stage=analysis_complete scenarios=%d elapsed_s=%.3f",
-            selected_scenario_count,
-            time.perf_counter() - started_at,
-        )
-        stored_result = result
-        with session_factory() as session:
-            with session.begin():
+        def calculate_and_persist() -> dict[str, object]:
+            # Another identical request can finish between the first cache
+            # read and singleflight registration. Recheck as the owner before
+            # starting a solver, including the current approved tariff.
+            with session_factory() as session:
                 current_profile = approved_ci_project_tariff_calculation_profile(
-                    session,
-                    project_id=project_id,
-                    actor=actor,
+                    session, project_id=project_id, actor=actor,
                 )
                 if current_profile is None or tariff_profile_sha256(
                     current_profile
                 ) != expected_profile_sha256:
                     raise CiProjectError(
                         "ci_project_tariff_profile_changed",
-                        "The approved tariff changed while replay was running. Run it again.",
+                        "The approved tariff changed while replay was starting. Run it again.",
                     )
-                saved_state = record_ci_tariff_replay_result(
+                committed_result = reusable_ci_tariff_replay_result(
                     session,
                     project_id=project_id,
                     actor=actor,
                     expected_interval_sha256=expected_interval_sha256,
                     expected_design_candidates_sha256=expected_design_sha256,
                     expected_tariff_profile_sha256=expected_profile_sha256,
-                    expected_scenario_ids=(
-                        selected_scenario_ids_in_candidate_order
-                    ),
-                    active_tariff_profile=current_profile,
-                    result=result,
-                    merge_checkpoint=(
-                        payload is not None
-                        and payload.persistence_mode == "merge_checkpoint"
-                    ),
+                    expected_scenario_ids=selected_scenario_ids_in_candidate_order,
                 )
-                if payload is not None and payload.persistence_mode == "merge_checkpoint":
-                    stored_result = saved_state["result"]
-        _LOGGER.info(
-            "ci_tariff_replay stage=persisted scenarios=%d elapsed_s=%.3f",
-            selected_scenario_count,
-            time.perf_counter() - started_at,
+            if committed_result is not None:
+                return committed_result
+            result = analyze_ci_physical_scenarios(
+                interval.data,
+                profile=profile,
+                scenarios=selected_candidates,
+            )
+            _LOGGER.info(
+                "ci_tariff_replay stage=analysis_complete scenarios=%d elapsed_s=%.3f",
+                selected_scenario_count,
+                time.perf_counter() - started_at,
+            )
+            stored_result = result
+            with session_factory() as session:
+                with session.begin():
+                    current_profile = approved_ci_project_tariff_calculation_profile(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                    )
+                    if current_profile is None or tariff_profile_sha256(
+                        current_profile
+                    ) != expected_profile_sha256:
+                        raise CiProjectError(
+                            "ci_project_tariff_profile_changed",
+                            "The approved tariff changed while replay was running. Run it again.",
+                        )
+                    saved_state = record_ci_tariff_replay_result(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        expected_interval_sha256=expected_interval_sha256,
+                        expected_design_candidates_sha256=expected_design_sha256,
+                        expected_tariff_profile_sha256=expected_profile_sha256,
+                        expected_scenario_ids=selected_scenario_ids_in_candidate_order,
+                        active_tariff_profile=current_profile,
+                        result=result,
+                        merge_checkpoint=(
+                            payload is not None
+                            and payload.persistence_mode == "merge_checkpoint"
+                        ),
+                    )
+                    if payload is not None and payload.persistence_mode == "merge_checkpoint":
+                        stored_result = saved_state["result"]
+            _LOGGER.info(
+                "ci_tariff_replay stage=persisted scenarios=%d elapsed_s=%.3f",
+                selected_scenario_count,
+                time.perf_counter() - started_at,
+            )
+            return stored_result
+
+        return run_ci_analysis_once(
+            (
+                "tariff_replay",
+                actor.workspace_id,
+                actor.owner_id,
+                str(project_id),
+                expected_interval_sha256,
+                expected_design_sha256,
+                expected_profile_sha256,
+                payload.persistence_mode if payload is not None else "replace",
+                *selected_scenario_ids_in_candidate_order,
+            ),
+            calculate_and_persist,
         )
-        return stored_result
     except (CiEvidenceIntakeError, CiProjectError) as exc:
         _LOGGER.warning(
             "ci_tariff_replay stage=failed scenarios=%d error_type=%s elapsed_s=%.3f",
@@ -2264,6 +2304,7 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
                 "ci_project_annual_financial_inputs_changed",
                 "ci_design_price_preview_required",
                 "ci_design_price_preview_stale",
+                "ci_analysis_in_progress",
             }
             else status.HTTP_422_UNPROCESSABLE_ENTITY
         ),

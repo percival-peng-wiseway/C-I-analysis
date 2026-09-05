@@ -52,7 +52,7 @@ const reviewProjection = (battery: boolean, index = 0) => ({
 
 const physicalResultFor = (inputs: CiScenarioInput[]) => ({
   contract_version: "ci_physical_scenario_review_v6",
-  calculation_revision: "ci_physical_scenario_planner_primary_seed_v2",
+  calculation_revision: "ci_physical_scenario_incremental_kva_planner_v3",
   analysis_status: "ready",
   analysis_mode: "evidence_limited_internal_review",
   customer_facing_permission: false,
@@ -88,7 +88,7 @@ const physicalResultFor = (inputs: CiScenarioInput[]) => ({
     selected_monthly_thresholds_kw: Array(12).fill(1),
     optimizer_run_snapshot: {
       contract_version: "ci_optimizer_run_snapshot_v2",
-      calculation_revision: "ci_optimizer_run_snapshot_planner_primary_seed_v2",
+      calculation_revision: "ci_optimizer_run_snapshot_incremental_kva_planner_v3",
       snapshot_sha256: `${index}`.padStart(64, "0"),
       algorithm_id: "ci_peak_shaving_rolling_replay_v2",
       customer_facing_permission: false,
@@ -136,7 +136,7 @@ describe("analyzeCiPhysicalScenarios", () => {
     )).rejects.toThrow("Approved tariff evidence is required.");
   });
 
-  it("retries an uncommitted idempotent batch only once and reports an actionable 503", async () => {
+  it("does not resubmit an unconfirmed batch after a recoverable 503", async () => {
     const calls: string[] = [];
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(init?.method ?? "GET");
@@ -145,11 +145,18 @@ describe("analyzeCiPhysicalScenarios", () => {
     };
 
     await expect(
-      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"], {
+        checkpointPollIntervalMs: 1,
+        checkpointReadTimeoutMs: 1,
+        checkpointRecoveryTimeoutMs: 1,
+      }),
     ).rejects.toThrow(
-      "The cloud analysis service became temporarily unavailable before completion could be confirmed. Wait a moment, then run Analysis again.",
+      "no duplicate calculation was submitted automatically",
     );
-    expect(calls).toEqual(["GET", "POST", "GET", "POST", "GET"]);
+    expect(calls.filter((method) => method === "POST")).toEqual(["POST"]);
+    expect(calls[0]).toBe("GET");
+    expect(calls[1]).toBe("POST");
+    expect(calls.slice(2)).toContain("GET");
   });
 
   it("shows the structured Worker recovery message for a container 503", async () => {
@@ -211,31 +218,31 @@ describe("analyzeCiPhysicalScenarios", () => {
         ["b", "a"],
         { batchSize: 2 },
       ),
-    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }, { scenario_id: "b" }] });
+    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "b" }, { scenario_id: "a" }] });
     expect(calls).toEqual(["GET", "POST", "GET"]);
   });
 
-  it("retries the same merge batch once when the first 503 did not commit", async () => {
+  it("leaves an uncommitted merge batch for an explicit Analysis retry", async () => {
     const calls: string[] = [];
     let postCount = 0;
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(init?.method ?? "GET");
       if (init?.method === "POST") {
         postCount += 1;
-        if (postCount === 1) return new Response("Backend container unavailable", { status: 503 });
-        expect(JSON.parse(String(init.body))).toEqual({
-          scenario_ids: ["a"],
-          persistence_mode: "merge_checkpoint",
-        });
-        return new Response(JSON.stringify(physicalResultFor([scenarios[0]])), { status: 200 });
+        return new Response("Backend container unavailable", { status: 503 });
       }
       return new Response(JSON.stringify({ contract_version: "ci_project_tariff_replay_state_v1", status: "not_saved", saved_at: null, stale_reasons: [], result: null }), { status: 200 });
     };
 
     await expect(
-      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"]),
-    ).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
-    expect(calls).toEqual(["GET", "POST", "GET", "POST"]);
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["a"], {
+        checkpointPollIntervalMs: 1,
+        checkpointReadTimeoutMs: 1,
+        checkpointRecoveryTimeoutMs: 1,
+      }),
+    ).rejects.toThrow("no duplicate calculation was submitted automatically");
+    expect(postCount).toBe(1);
+    expect(calls.filter((method) => method === "POST")).toEqual(["POST"]);
   });
 
   it.each([
@@ -373,10 +380,10 @@ describe("analyzeCiPhysicalScenarios", () => {
       { persistence_mode: "merge_checkpoint", scenario_ids: ["b", "c"] },
       { persistence_mode: "merge_checkpoint", scenario_ids: ["d", "e"] },
     ]);
-    expect(progress).toEqual([[1, 5], [3, 5], [5, 5]]);
+    expect(progress).toEqual([[1, 5], [1, 5], [3, 5], [3, 5], [5, 5]]);
   });
 
-  it("checkpoints up to two tariff scenarios per request by default", async () => {
+  it("checkpoints one tariff scenario per request by default", async () => {
     const requested = ["a", "b", "c", "d", "e"].map((scenarioId) => ({
       ...scenarios[0],
       scenario_id: scenarioId,
@@ -410,7 +417,111 @@ describe("analyzeCiPhysicalScenarios", () => {
       requested.map((scenario) => scenario.scenario_id),
     );
 
-    expect(postedBatches).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    expect(postedBatches).toEqual([["a"], ["b"], ["c"], ["d"], ["e"]]);
+  });
+
+  it("polls a durable checkpoint while a single POST remains in flight", async () => {
+    const calls: string[] = [];
+    let getCount = 0;
+    const progress: Array<{ completed: number; phase: string | undefined }> = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") return new Promise<Response>(() => undefined);
+      getCount += 1;
+      const committed = getCount > 1;
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: committed ? "ready" : "not_saved",
+        saved_at: committed ? "2026-09-04T00:00:00+00:00" : null,
+        stale_reasons: [],
+        result: committed ? physicalResultFor([scenarios[0]]) : null,
+      }), { status: 200 });
+    };
+
+    await expect(runCiProjectTariffReplay(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      ["a"],
+      {
+        batchRequestTimeoutMs: 100,
+        checkpointPollIntervalMs: 1,
+        checkpointReadTimeoutMs: 10,
+        checkpointRecoveryTimeoutMs: 10,
+        onProgress: ({ completedScenarioCount, phase }) => {
+          progress.push({ completed: completedScenarioCount, phase });
+        },
+      },
+    )).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(calls.filter((method) => method === "POST")).toEqual(["POST"]);
+    expect(calls.filter((method) => method === "GET").length).toBeGreaterThanOrEqual(2);
+    expect(progress).toContainEqual({ completed: 0, phase: "running_batch" });
+    expect(progress.at(-1)).toEqual({ completed: 1, phase: "checkpoint_committed" });
+  });
+
+  it("bounds a hung POST and read-only checkpoint recovery without resubmitting", async () => {
+    const calls: string[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") return new Promise<Response>(() => undefined);
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "not_saved",
+        saved_at: null,
+        stale_reasons: [],
+        result: null,
+      }), { status: 200 });
+    };
+
+    await expect(runCiProjectTariffReplay(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      ["a"],
+      {
+        batchRequestTimeoutMs: 5,
+        checkpointPollIntervalMs: 1,
+        checkpointReadTimeoutMs: 1,
+        checkpointRecoveryTimeoutMs: 2,
+      },
+    )).rejects.toThrow("No duplicate calculation was submitted automatically");
+    expect(calls.filter((method) => method === "POST")).toEqual(["POST"]);
+  });
+
+  it("does not let a failed read-only poll fail an in-flight POST", async () => {
+    let getCount = 0;
+    let postCount = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        postCount += 1;
+        await new Promise((resolve) => setTimeout(resolve, 8));
+        return new Response(JSON.stringify(physicalResultFor([scenarios[0]])), { status: 200 });
+      }
+      getCount += 1;
+      if (getCount > 1) throw new TypeError("Checkpoint read failed");
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "not_saved",
+        saved_at: null,
+        stale_reasons: [],
+        result: null,
+      }), { status: 200 });
+    };
+
+    await expect(runCiProjectTariffReplay(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      ["a"],
+      {
+        batchRequestTimeoutMs: 100,
+        checkpointPollIntervalMs: 1,
+        checkpointReadTimeoutMs: 2,
+        checkpointRecoveryTimeoutMs: 2,
+      },
+    )).resolves.toMatchObject({ scenarios: [{ scenario_id: "a" }] });
+    expect(postCount).toBe(1);
+    expect(getCount).toBeGreaterThan(1);
   });
 
   it("uses the same read-only recovery after a non-abort network disconnect", async () => {
@@ -474,6 +585,32 @@ describe("analyzeCiPhysicalScenarios", () => {
     expect(progress).toEqual([2]);
   });
 
+  it("returns exactly the selected scenarios when the durable checkpoint is a superset", async () => {
+    const calls: string[] = [];
+    const requested = ["a", "b", "c"].map((scenarioId) => ({
+      ...scenarios[0],
+      scenario_id: scenarioId,
+      label: `Scenario ${scenarioId}`,
+    }));
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      return new Response(JSON.stringify({
+        contract_version: "ci_project_tariff_replay_state_v1",
+        status: "ready",
+        saved_at: "2026-09-04T00:00:00+00:00",
+        stale_reasons: [],
+        result: physicalResultFor(requested),
+      }), { status: 200 });
+    };
+
+    await expect(
+      runCiProjectTariffReplay("project-1", fetcher as typeof fetch, undefined, ["c", "a"]),
+    ).resolves.toMatchObject({
+      scenarios: [{ scenario_id: "c" }, { scenario_id: "a" }],
+    });
+    expect(calls).toEqual(["GET"]);
+  });
+
   it("restores the project tariff replay state without starting a new run", async () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBe("/api/commercial-industrial/projects/project-1/tariff-replay");
@@ -489,10 +626,13 @@ describe("analyzeCiPhysicalScenarios", () => {
     await expect(fetchCiSavedTariffReplay("project-1", fetcher as typeof fetch)).resolves.toMatchObject({ status: "not_saved" });
   });
 
-  it("marks a legacy saved tariff replay calculation revision stale during a mixed rollout", async () => {
+  it.each([
+    "ci_physical_scenario_planner_limits_primal_simplex_v1",
+    "ci_physical_scenario_planner_primary_seed_v2",
+  ])("marks legacy saved tariff replay revision %s stale during a mixed rollout", async (calculationRevision) => {
     const legacyResult = {
       ...physicalResultFor(scenarios),
-      calculation_revision: "ci_physical_scenario_planner_limits_primal_simplex_v1",
+      calculation_revision: calculationRevision,
     };
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_project_tariff_replay_state_v1",
@@ -551,10 +691,27 @@ describe("analyzeCiPhysicalScenarios", () => {
     ).rejects.toThrow("unsafe result contract");
   });
 
+  it("bounds the legacy full-run compatibility request without retrying it", async () => {
+    let postCount = 0;
+    const fetcher = async () => {
+      postCount += 1;
+      return new Promise<Response>(() => undefined);
+    };
+
+    await expect(runCiProjectTariffReplay(
+      "project-1",
+      fetcher as typeof fetch,
+      undefined,
+      undefined,
+      { batchRequestTimeoutMs: 2 },
+    )).rejects.toThrow("No duplicate calculation was submitted automatically");
+    expect(postCount).toBe(1);
+  });
+
   it("rejects a contract that grants recommendation permission", async () => {
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_physical_scenario_review_v6",
-      calculation_revision: "ci_physical_scenario_planner_primary_seed_v2",
+      calculation_revision: "ci_physical_scenario_incremental_kva_planner_v3",
       analysis_status: "ready",
       analysis_mode: "evidence_limited_internal_review",
       customer_facing_permission: false,
@@ -577,7 +734,7 @@ describe("analyzeCiPhysicalScenarios", () => {
     };
     const fetcher = async () => new Response(JSON.stringify({
       contract_version: "ci_physical_scenario_review_v6",
-      calculation_revision: "ci_physical_scenario_planner_primary_seed_v2",
+      calculation_revision: "ci_physical_scenario_incremental_kva_planner_v3",
       analysis_status: "ready",
       analysis_mode: "evidence_limited_internal_review",
       customer_facing_permission: false,

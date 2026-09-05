@@ -1,6 +1,7 @@
 import { Container, type StopParams } from "@cloudflare/containers";
 export { ContainerProxy } from "@cloudflare/containers";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { canPrepareContainerRetry, canRetryContainerFailure } from "./container-retry";
 
 interface Env {
   ASSETS: Fetcher;
@@ -167,31 +168,6 @@ function operationForRequest(request: Request): string {
   return "api_request";
 }
 
-function canRetryContainerProvisioning(
-  request: Request,
-  operation: string,
-): boolean {
-  // Every PUT exposed by this service is a transactional replace/upsert. Keep
-  // a clone so an interrupted cold start or rollout can replay the exact body
-  // once without creating duplicate records. Business 4xx responses and
-  // non-container 5xx responses are never retried below.
-  return request.method === "GET"
-    || request.method === "HEAD"
-    || request.method === "PUT"
-    || [
-      "dispatch_run",
-      "tariff_replay_run",
-      "finance_run",
-    ].includes(operation);
-}
-
-function canRecoverContainerFailure(
-  failureCode: InfrastructureErrorCode,
-): boolean {
-  return failureCode === "container_provisioning"
-    || failureCode === "container_unavailable";
-}
-
 export class E3ApiContainer extends Container<Env> {
   private lifecycleRequestId: string = crypto.randomUUID();
   private lifecycleStartedAt = Date.now();
@@ -301,7 +277,7 @@ export class E3ApiContainer extends Container<Env> {
 // Project records and evidence live in PostgreSQL/R2, so rotating this
 // infrastructure-only identity is data-safe and guarantees that requests
 // after the container rollout start against the current image.
-const PRIMARY_CONTAINER_NAME = "primary-v8";
+const PRIMARY_CONTAINER_NAME = "primary-v9";
 
 function primaryContainer(env: Env) {
   return env.E3_API.get(env.E3_API.idFromName(PRIMARY_CONTAINER_NAME));
@@ -434,7 +410,7 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
   headers.set(REQUEST_ID_HEADER, requestId);
   headers.set(OPERATION_HEADER, operation);
   headers.delete("Cf-Access-Jwt-Assertion");
-  const retrySource = canRetryContainerProvisioning(request, operation)
+  const retrySource = canPrepareContainerRetry(request.method, operation)
     ? request.clone()
     : null;
   const upstreamRequest = new Request(request, { headers });
@@ -449,7 +425,7 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
     if (
       retryRequest !== null &&
       initialFailureCode !== null &&
-      canRecoverContainerFailure(initialFailureCode)
+      canRetryContainerFailure(request.method, operation, initialFailureCode)
     ) {
       didRetry = true;
       logOperation("info", {
@@ -489,7 +465,7 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
     if (
       retryRequest !== null &&
       !didRetry &&
-      canRecoverContainerFailure(failureCode)
+      canRetryContainerFailure(request.method, operation, failureCode)
     ) {
       didRetry = true;
       logOperation("info", {

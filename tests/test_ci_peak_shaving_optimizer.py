@@ -498,8 +498,8 @@ def test_redundant_reactive_pq_facets_are_elided_without_changing_result(
 
     monkeypatch.setattr(
         optimizer_module,
-        "_reactive_pq_facets_are_redundant",
-        lambda *_args, **_kwargs: False,
+        "_binding_reactive_pq_facets",
+        lambda *_args, **_kwargs: optimizer_module.PQ_CAPABILITY_WEIGHTS,
     )
     reference_model = optimizer_module._build_model(
         problem,
@@ -556,6 +556,57 @@ def test_circle_containment_alone_does_not_elide_a_binding_inner_facet():
         problem,
         problem.intervals[0],
         forced_idle=False,
+    )
+
+
+@pytest.mark.parametrize("binary", [False, True])
+def test_individual_reactive_facets_preserve_binding_pq_dispatch(monkeypatch, binary):
+    problem = _problem(
+        intervals=_intervals(
+            (100.0, 250.0, 250.0, 100.0),
+            pv=(0.0, 150.0, 250.0, 0.0),
+            kvar=(100.0, 165.0, 165.0, 100.0),
+            rates=(0.1, 0.3, 0.3, 0.1),
+        ),
+        battery=_battery(
+            nominal_capacity_kwh=390.0,
+            max_charge_kw=250.0,
+            max_discharge_kw=250.0,
+            ac_round_trip_efficiency=0.95,
+        ),
+        demand_charges=(CiDemandCharge("kva", 20.0, (0, 1, 2, 3), basis="kva"),),
+        reactive_support=CiReactiveSupportSpec(
+            enabled=True,
+            max_reactive_support_kvar=165.0,
+            inverter_apparent_power_limit_kva=275.0,
+        ),
+    )
+    retained = tuple(
+        optimizer_module._binding_reactive_pq_facets(
+            problem, row, forced_idle=False
+        )
+        for row in problem.intervals
+    )
+    assert any(0 < len(facets) < optimizer_module.PQ_CAPABILITY_SEGMENTS for facets in retained)
+    compact_model = optimizer_module._build_model(problem, cuts={}, binary=binary)
+    compact = optimizer_module._solve_two_stage(problem, cuts={}, binary=binary)
+    monkeypatch.setattr(
+        optimizer_module,
+        "_binding_reactive_pq_facets",
+        lambda *_args, **_kwargs: optimizer_module.PQ_CAPABILITY_WEIGHTS,
+    )
+    full_model = optimizer_module._build_model(problem, cuts={}, binary=binary)
+    full = optimizer_module._solve_two_stage(problem, cuts={}, binary=binary)
+    assert full_model.highs.getNumRow() - compact_model.highs.getNumRow() == sum(
+        optimizer_module.PQ_CAPABILITY_SEGMENTS - len(facets) for facets in retained
+    )
+    assert compact.model_status == full.model_status == highspy.HighsModelStatus.kOptimal
+    assert compact.objective == pytest.approx(full.objective, abs=0.01)
+    assert not optimizer_module._physical_dispatch_violation(problem, compact)
+    compact_demand = optimizer_module._exact_demand_results(problem, compact)
+    full_demand = optimizer_module._exact_demand_results(problem, full)
+    assert optimizer_module._exact_bill(problem, compact, compact_demand) == pytest.approx(
+        optimizer_module._exact_bill(problem, full, full_demand), abs=0.01
     )
 
 
@@ -1886,6 +1937,66 @@ def test_planner_primary_seed_omits_only_the_secondary_tiebreak(monkeypatch):
 
     assert result is primary
     assert calls == 1
+
+
+def test_annual_planner_reuses_basis_and_appends_equivalent_kva_rows(monkeypatch):
+    problem = _problem(
+        intervals=_intervals((6.0, 12.0, 6.0), kvar=(8.0, 0.0, 8.0)),
+        battery=_battery(),
+        demand_charges=(
+            CiDemandCharge("kva", 20.0, (0, 1, 2), basis="kva"),
+            CiDemandCharge("kw", 10.0, (0, 1, 2), basis="kw"),
+        ),
+    )
+    cache = optimizer_module._PlannerModelCache()
+    cuts = {"kva": []}
+    first = optimizer_module._solve_two_stage(
+        problem, cuts=cuts, binary=False, run_secondary_tiebreak=False,
+        planner_model_cache=cache,
+    )
+    original_model = cache.model
+    initial_row_count = original_model.highs.getNumRow()
+    assert original_model.kva_active_only == (False, True, False)
+    assert optimizer_module._new_kva_cuts(
+        problem, first, optimizer_module._exact_demand_results(problem, first), cuts
+    )
+    assert "kw" not in cuts
+    # A kW component must still retain the cold model's linear kW meaning if
+    # an internal caller accidentally includes an unrelated tangent entry.
+    cuts["kw"] = [(3.0, 4.0)]
+    real_build = optimizer_module._build_model
+    monkeypatch.setattr(
+        optimizer_module, "_build_model",
+        lambda *_args, **_kwargs: pytest.fail("refinement must retain the annual LP"),
+    )
+    warm = optimizer_module._solve_two_stage(
+        problem, cuts=cuts, binary=False, run_secondary_tiebreak=False,
+        planner_model_cache=cache,
+    )
+    assert cache.model is original_model
+    assert cache.cut_counts == {"kva": len(cuts["kva"])}
+    assert cache.model.highs.getNumRow() - initial_row_count == 2 * len(cuts["kva"])
+    assert cache.model.highs.getOptionValue("time_limit")[1] >= problem.config.time_limit_seconds
+    monkeypatch.setattr(optimizer_module, "_build_model", real_build)
+    cold_model = real_build(problem, cuts=cuts, binary=False)
+    cold = optimizer_module._run_model(cold_model, binary=False)
+    assert cache.model.highs.getNumRow() == cold_model.highs.getNumRow()
+    assert cache.model.highs.getNumCol() == cold_model.highs.getNumCol()
+    assert warm.model_status == cold.model_status == highspy.HighsModelStatus.kOptimal
+    assert warm.objective == pytest.approx(cold.objective, abs=1e-7)
+    assert warm.demand_peaks == pytest.approx(cold.demand_peaks, abs=1e-7)
+    assert not optimizer_module._physical_dispatch_violation(problem, warm)
+    assert optimizer_module._exact_bill(
+        problem, warm, optimizer_module._exact_demand_results(problem, warm)
+    ) == pytest.approx(optimizer_module._exact_bill(
+        problem, cold, optimizer_module._exact_demand_results(problem, cold)
+    ), abs=1e-7)
+    for invalid in ({"binary": True}, {"run_secondary_tiebreak": True}):
+        options = {"binary": False, "run_secondary_tiebreak": False, **invalid}
+        with pytest.raises(ValueError, match="primary annual LP"):
+            optimizer_module._solve_two_stage(
+                problem, cuts=cuts, planner_model_cache=cache, **options
+            )
 
 
 def test_secondary_milp_timeout_preserves_timeout_status(monkeypatch):

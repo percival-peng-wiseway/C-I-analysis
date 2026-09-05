@@ -100,7 +100,7 @@ export function CiDesignFeasibility({ projectId, result }: { projectId: string; 
           {view === "energy_battery" ? <EnergyBatteryView energy={energy} performance={performance} result={result} scenario={selected} /> : null}
           {view === "peak_events" ? <PeakEventsView energy={energy} performance={performance} /> : null}
           {view === "carbon" ? <CarbonView energy={energy} year={year} /> : null}
-          <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-950"><div className="flex gap-3"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><p>Physical dispatch only. Tariff, billing-demand and customer-dollar conclusions are handled later.</p></div></div>
+          <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-950"><div className="flex gap-3"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><p>Pre-tariff physical screening only. These charts do not supply tariff or financial results; Finance uses the separate tariff-aware replay after this stage.</p></div></div>
         </div>
       </div>
     </section>

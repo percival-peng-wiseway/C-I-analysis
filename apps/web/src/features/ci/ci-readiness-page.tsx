@@ -44,6 +44,7 @@ import {
   ciProjectTariffReplayQueryKey,
   fetchCiSavedTariffReplay,
   runCiProjectTariffReplay,
+  selectCiTariffReplayScenarios,
 } from "@/features/ci/api/ci-scenarios";
 import {
   ciWorkspaceReadinessQueryKey,
@@ -53,7 +54,11 @@ import { CiDesignFeasibility } from "@/features/ci/ci-design-feasibility";
 import { CiEvidenceIntake } from "@/features/ci/ci-evidence-intake";
 import { CiRebateProfilePanel, type CiRebateProfilePanelHandle } from "@/features/ci/ci-rebate-profile-panel";
 import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
-import { CI_ANALYSIS_MUTATION_KEY, CiTariffReplay } from "@/features/ci/ci-tariff-replay";
+import {
+  CI_ANALYSIS_MUTATION_KEY,
+  CiTariffReplay,
+  formatCiTariffReplayProgressLabel,
+} from "@/features/ci/ci-tariff-replay";
 import {
   ciAnalysisPriceSnapshotMatchesPreview,
   ciDesignPricePreviewRevision,
@@ -556,18 +561,19 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
       const tariffResult = savedTariffReplay.status === "ready"
         && savedTariffReplay.result !== null
         && resultCoversScenarios(savedTariffReplay.result, scenarioIds)
-        ? savedTariffReplay.result
+        ? selectCiTariffReplayScenarios(savedTariffReplay.result, scenarioIds)
         : await (async () => {
           setProgress({ projectId, percent: 52, label: `Reconstructing tariffs (0/${scenarioIds.length})` });
           return runCiProjectTariffReplay(projectId, fetch, undefined, scenarioIds, {
-            onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+            onProgress: (progress) => {
+              const { completedScenarioCount, totalScenarioCount } = progress;
               const fraction = totalScenarioCount > 0
                 ? completedScenarioCount / totalScenarioCount
                 : 0;
               setProgress({
                 projectId,
                 percent: Math.min(74, 52 + Math.round(fraction * 22)),
-                label: `Reconstructing tariffs (${completedScenarioCount}/${totalScenarioCount})`,
+                label: formatCiTariffReplayProgressLabel(progress),
               });
             },
           });

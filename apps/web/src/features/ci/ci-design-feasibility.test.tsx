@@ -27,6 +27,8 @@ describe("C&I design feasibility visuals", () => {
     const user = userEvent.setup();
     render(<CiDesignFeasibility projectId="project-1" result={result} />);
 
+    expect(screen.getByText(/Pre-tariff physical screening only/)).toBeTruthy();
+
     expect(screen.getByRole("heading", { name: "12 simulated scenarios" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "100.123456789 kWp PV · 200.987654321 kWh battery · 80.111222333 kW hybrid inverter / PCS" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "Annual grid import comparison" })).toBeTruthy();

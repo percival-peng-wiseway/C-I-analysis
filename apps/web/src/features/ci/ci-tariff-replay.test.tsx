@@ -7,7 +7,30 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { CiPhysicalScenarioResult } from "./api/ci-scenarios";
 import type { CiDesignFeasibilityResult } from "./api/ci-design-feasibility";
 import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiSavedAnnualFinancialState, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
-import { CiTariffReplayResult, resolveCiFinanceAnalysisSelection } from "./ci-tariff-replay";
+import {
+  CiTariffReplayResult,
+  formatCiTariffReplayProgressLabel,
+  resolveCiFinanceAnalysisSelection,
+} from "./ci-tariff-replay";
+
+describe("formatCiTariffReplayProgressLabel", () => {
+  it("keeps the active batch and elapsed wait visible while tariff replay is synchronous", () => {
+    expect(formatCiTariffReplayProgressLabel({
+      completedScenarioCount: 0,
+      totalScenarioCount: 6,
+      phase: "running_batch",
+      activeBatchScenarioCount: 1,
+      elapsedSeconds: 75,
+    })).toBe("Reconstructing tariffs (0/6) · current batch: 1 solution · 1m 15s elapsed");
+    expect(formatCiTariffReplayProgressLabel({
+      completedScenarioCount: 2,
+      totalScenarioCount: 6,
+      phase: "confirming_checkpoint",
+      activeBatchScenarioCount: 1,
+      elapsedSeconds: 630,
+    })).toBe("Reconstructing tariffs (2/6) · confirming saved checkpoint · 10m 30s elapsed");
+  });
+});
 
 const result = {
   assumptions: ["Representative-year tariff quantities use the approved bill rates."],

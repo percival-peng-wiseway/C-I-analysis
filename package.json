@@ -10,6 +10,7 @@
     "cloudflare:preview": "pnpm frontend:build && wrangler dev",
     "cloudflare:deploy": "pnpm frontend:build && wrangler deploy",
     "cloudflare:types": "wrangler types",
+    "cloudflare:test": "node --experimental-strip-types --test cloudflare/*.test.ts",
     "cloudflare:typecheck": "wrangler types && tsc --noEmit -p cloudflare/tsconfig.json"
   },
   "dependencies": {

@@ -458,6 +458,13 @@ class _ModelArtifacts:
     primary_cost_block_totals: tuple[int, ...]
     primary_offset: float
     secondary_objective: bool
+    kva_active_only: tuple[bool, ...]
+
+
+@dataclass
+class _PlannerModelCache:
+    model: _ModelArtifacts | None = None
+    cut_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -567,6 +574,9 @@ def _optimize_ci_peak_shaving(
     simultaneous_detected = False
     kva_iterations = 0
     trace_large_model = len(problem.intervals) >= PRIMAL_SIMPLEX_REUSE_MIN_INTERVALS
+    planner_model_cache = (
+        _PlannerModelCache() if planner_primary_only and trace_large_model else None
+    )
 
     while True:
         solve_started_at = time.perf_counter()
@@ -578,6 +588,11 @@ def _optimize_ci_peak_shaving(
                 binary,
                 problem.reactive_support.enabled,
             )
+        planner_cache_options = (
+            {"planner_model_cache": planner_model_cache}
+            if planner_model_cache is not None and not binary
+            else {}
+        )
         solved = _solve_two_stage(
             problem,
             cuts=cuts,
@@ -593,6 +608,7 @@ def _optimize_ci_peak_shaving(
                 != SERIAL_HIGHS_THREADS
                 and not binary
             ),
+            **planner_cache_options,
         )
         if trace_large_model:
             _LOGGER.info(
@@ -1718,16 +1734,29 @@ def _reactive_pq_facets_are_redundant(
     *,
     forced_idle: bool,
 ) -> bool:
-    """Prove that the interval's P-Q capability rows cannot bind.
+    if not problem.reactive_support.enabled:
+        return False
+    return not _binding_reactive_pq_facets(
+        problem, row, forced_idle=forced_idle
+    )
 
-    The circular-envelope test is necessary but not sufficient because this
-    optimizer deliberately uses a conservative 16-facet inner approximation.
-    The second test proves redundancy against that existing polygon too, so
-    elision preserves the exact feasible set and result semantics.
+
+def _binding_reactive_pq_facets(
+    problem: CiOptimizerProblem,
+    row: CiOptimizerInterval,
+    *,
+    forced_idle: bool,
+) -> tuple[tuple[float, float], ...]:
+    """Retain only polygon facets not already implied by interval bounds.
+
+    Each facet is bounded independently over |P| <= active_bound and
+    0 <= Q <= reactive_bound. Even when a few facets bind, most of the
+    16-facet polygon is redundant. Omitting those rows preserves the exact
+    feasible set, including its conservative inner-circle approximation.
     """
 
     if not problem.reactive_support.enabled:
-        return False
+        return ()
     apparent_limit = problem.reactive_support.inverter_apparent_power_limit_kva
     if apparent_limit is None:
         raise ValueError("reactive apparent-power limit is missing")
@@ -1740,14 +1769,13 @@ def _reactive_pq_facets_are_redundant(
         row.reactive_kvar,
         problem.reactive_support.max_reactive_support_kvar,
     )
-    if math.hypot(active_bound, reactive_bound) > apparent_limit:
-        return False
     conservative_radius = apparent_limit * PQ_CAPABILITY_RADIUS_FACTOR
-    return all(
-        abs(active_weight) * active_bound
-        + reactive_weight * reactive_bound
-        <= conservative_radius
+    return tuple(
+        (active_weight, reactive_weight)
         for active_weight, reactive_weight in PQ_CAPABILITY_WEIGHTS
+        if abs(active_weight) * active_bound
+        + reactive_weight * reactive_bound
+        > conservative_radius
     )
 
 
@@ -2099,22 +2127,44 @@ def _solve_two_stage(
     run_secondary_tiebreak: bool = True,
     highs_threads: int = SERIAL_HIGHS_THREADS,
     parallel_simplex: bool = False,
+    planner_model_cache: _PlannerModelCache | None = None,
 ) -> _SolvedDispatch:
     if parallel_simplex and run_secondary_tiebreak:
         raise ValueError(
             "parallel simplex is restricted to a primary-only annual solve"
         )
-    primary_model = _build_model(
-        problem,
-        cuts=cuts,
-        binary=binary,
-        fixed_soc_boundaries=fixed_soc_boundaries,
-        minimum_soc_boundaries=minimum_soc_boundaries,
-        fixed_demand_limits=fixed_demand_limits,
-        forced_idle_period_ids=forced_idle_period_ids,
-        highs_threads=highs_threads,
-        parallel_simplex=parallel_simplex,
-    )
+    if planner_model_cache is not None and (
+        binary or run_secondary_tiebreak or fixed_soc_boundaries is not None
+        or minimum_soc_boundaries is not None or fixed_demand_limits is not None
+        or forced_idle_period_ids is not None
+    ):
+        raise ValueError("model reuse is restricted to the primary annual LP")
+    if planner_model_cache is not None and planner_model_cache.model is not None:
+        primary_model = planner_model_cache.model
+        _append_planner_kva_cuts(problem, cuts, planner_model_cache)
+        # HiGHS accumulates runtime on a reused instance. Keep the established
+        # per-solve limit; the coordinator still owns the whole-request limit.
+        primary_model.highs.setOptionValue(
+            "time_limit",
+            problem.config.time_limit_seconds + primary_model.highs.getRunTime(),
+        )
+    else:
+        primary_model = _build_model(
+            problem,
+            cuts=cuts,
+            binary=binary,
+            fixed_soc_boundaries=fixed_soc_boundaries,
+            minimum_soc_boundaries=minimum_soc_boundaries,
+            fixed_demand_limits=fixed_demand_limits,
+            forced_idle_period_ids=forced_idle_period_ids,
+            highs_threads=highs_threads,
+            parallel_simplex=parallel_simplex,
+        )
+        if planner_model_cache is not None:
+            planner_model_cache.model = primary_model
+            planner_model_cache.cut_counts = {
+                key: len(values) for key, values in cuts.items()
+            }
     primary = _run_model(primary_model, binary=binary)
     if primary.objective is None or primary.model_status not in {
         highspy.HighsModelStatus.kOptimal,
@@ -2206,6 +2256,61 @@ def _solve_two_stage(
         soc=secondary.soc,
         demand_peaks=secondary.demand_peaks,
     )
+
+
+def _append_planner_kva_cuts(
+    problem: CiOptimizerProblem,
+    cuts: dict[str, list[tuple[float, float]]],
+    cache: _PlannerModelCache,
+) -> None:
+    """Append the same tangent rows as a rebuild while retaining its LP basis.
+
+    Only annual primary LPs enter here: their objective, bounds and existing
+    rows remain unchanged between exact-kVA refinements. HiGHS can repair the
+    new violated rows with dual simplex instead of cold-solving the year again.
+    """
+    model = cache.model
+    if model is None or model.secondary_objective:
+        raise ValueError("annual primary model is unavailable")
+    for component in problem.demand_charges:
+        if component.basis != "kva":
+            continue
+        previous_count = cache.cut_counts.get(component.component_id, 0)
+        component_cuts = cuts.get(component.component_id, [])
+        if len(component_cuts) < previous_count:
+            raise ValueError("annual planner tangent cuts must be append-only")
+        new_cuts = component_cuts[previous_count:]
+        if not new_cuts:
+            continue
+        upper: list[float] = []
+        starts = [0]
+        indexes: list[int] = []
+        values: list[float] = []
+        peak = model.demand_peaks[component.component_id]
+        for index in component.interval_indexes:
+            if model.kva_active_only[index]:
+                continue
+            row = problem.intervals[index]
+            for reference_import, reference_post_kvar in new_cuts:
+                radius = math.hypot(reference_import, reference_post_kvar)
+                if radius <= 0.0:
+                    continue
+                active = reference_import / radius
+                reactive = reference_post_kvar / radius
+                indexes.extend((
+                    model.grid_charge[index], model.pv_export[index],
+                    model.pv_to_ac[index], model.discharge[index],
+                    model.reactive_support[index], peak,
+                ))
+                values.extend((active, active, -active, -active, -reactive, -1.0))
+                starts.append(len(indexes))
+                upper.append(-(row.reactive_kvar * reactive + row.load_kw * active))
+        if upper and model.highs.addRows(
+            len(upper), [-highspy.kHighsInf] * len(upper), upper,
+            len(indexes), starts, indexes, values,
+        ) != highspy.HighsStatus.kOk:
+            raise RuntimeError("HiGHS rejected the annual planner tangent rows")
+        cache.cut_counts[component.component_id] = len(component_cuts)
 
 
 def _build_model(
@@ -2307,6 +2412,7 @@ def _build_model(
     discharge: list[int] = []
     reactive_support: list[int] = []
     pq_facets_redundant: list[bool] = []
+    kva_active_only: list[bool] = []
     modes: list[int] = []
     primary_offset = 0.0
     for index, row in enumerate(problem.intervals):
@@ -2392,6 +2498,10 @@ def _build_model(
             )
             if problem.reactive_support.enabled
             else 0.0
+        )
+        kva_active_only.append(
+            row.reactive_kvar == 0.0
+            or (interval_pq_facets_redundant and reactive_upper == row.reactive_kvar)
         )
         reactive_support.append(
             add_column(
@@ -2503,7 +2613,9 @@ def _build_model(
             if apparent_limit is None:
                 raise ValueError("reactive apparent-power limit is missing")
             conservative_radius = apparent_limit * PQ_CAPABILITY_RADIUS_FACTOR
-            for active_weight, reactive_weight in PQ_CAPABILITY_WEIGHTS:
+            for active_weight, reactive_weight in _binding_reactive_pq_facets(
+                problem, row, forced_idle=index in forced_idle_indexes
+            ):
                 add_row(
                     (
                         (pv_to_ac[index], active_weight),
@@ -2630,7 +2742,7 @@ def _build_model(
                 )
                 component_cuts = (
                     ()
-                    if exact_fixed_reactive_limit
+                    if exact_fixed_reactive_limit or kva_active_only[index]
                     else cuts.get(component.component_id, [])
                 )
                 for reference_import, reference_post_kvar in component_cuts:
@@ -2731,6 +2843,7 @@ def _build_model(
         primary_cost_block_totals=tuple(primary_cost_block_totals),
         primary_offset=primary_offset,
         secondary_objective=secondary_objective,
+        kva_active_only=tuple(kva_active_only),
     )
 
 

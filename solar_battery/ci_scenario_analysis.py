@@ -53,7 +53,7 @@ from solar_battery.solar_profile import build_pv_profile
 
 CI_PHYSICAL_SCENARIO_CONTRACT_VERSION = "ci_physical_scenario_review_v6"
 CI_PHYSICAL_SCENARIO_CALCULATION_REVISION = (
-    "ci_physical_scenario_planner_primary_seed_v2"
+    "ci_physical_scenario_incremental_kva_planner_v3"
 )
 CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
     "ci_dispatch_review_projection_v2"
@@ -61,7 +61,7 @@ CI_DISPATCH_REVIEW_PROJECTION_CONTRACT_VERSION = (
 CI_THREE_CASE_COMPARISON_CONTRACT_VERSION = "ci_three_case_peak_day_comparison_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CONTRACT_VERSION = "ci_optimizer_run_snapshot_v2"
 CI_OPTIMIZER_RUN_SNAPSHOT_CALCULATION_REVISION = (
-    "ci_optimizer_run_snapshot_planner_primary_seed_v2"
+    "ci_optimizer_run_snapshot_incremental_kva_planner_v3"
 )
 CI_OPTIMIZER_AUDIT_PROJECTION_CONTRACT_VERSION = "ci_optimizer_audit_projection_v2"
 CI_PV_ONLY_EXACT_ID = "ci_pv_only_shared_pq_v1"

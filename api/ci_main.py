@@ -7,7 +7,7 @@ from fastapi import APIRouter, FastAPI
 
 from api.ci_routes import router as ci_router
 from api.schemas import HealthResponse
-from solar_battery import ci_scenario_analysis
+from solar_battery import ci_peak_shaving_optimizer, ci_scenario_analysis
 
 
 def _scenario_analysis_source_sha256() -> str:
@@ -19,6 +19,9 @@ def _scenario_analysis_source_sha256() -> str:
 
 
 SCENARIO_ANALYSIS_SOURCE_SHA256 = _scenario_analysis_source_sha256()
+OPTIMIZER_SOURCE_SHA256 = hashlib.sha256(
+    Path(ci_peak_shaving_optimizer.__file__).read_bytes()
+).hexdigest()
 
 
 def create_ci_app() -> FastAPI:
@@ -39,6 +42,7 @@ def create_ci_app() -> FastAPI:
             scenario_analysis_source_sha256=(
                 SCENARIO_ANALYSIS_SOURCE_SHA256
             ),
+            optimizer_source_sha256=OPTIMIZER_SOURCE_SHA256,
         )
 
     app.include_router(api_router)

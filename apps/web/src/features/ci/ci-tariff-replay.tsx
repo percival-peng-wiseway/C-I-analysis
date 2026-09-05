@@ -46,7 +46,9 @@ import {
   ciProjectTariffReplayQueryKey,
   fetchCiSavedTariffReplay,
   runCiProjectTariffReplay,
+  selectCiTariffReplayScenarios,
   type CiPhysicalScenarioResult,
+  type CiTariffReplayProgress,
 } from "@/features/ci/api/ci-scenarios";
 import {
   ciAnnualFinancialComparisonQueryKey,
@@ -84,6 +86,22 @@ type TariffFinancePair = {
 };
 
 export const CI_ANALYSIS_MUTATION_KEY = ["ci-project-full-analysis"] as const;
+
+export function formatCiTariffReplayProgressLabel(progress: CiTariffReplayProgress): string {
+  const base = `Reconstructing tariffs (${progress.completedScenarioCount}/${progress.totalScenarioCount})`;
+  if (progress.phase !== "running_batch" && progress.phase !== "confirming_checkpoint") return base;
+  const elapsedSeconds = Math.max(0, Math.floor(progress.elapsedSeconds ?? 0));
+  const elapsedLabel = elapsedSeconds < 60
+    ? `${elapsedSeconds}s`
+    : `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s`;
+  if (progress.phase === "confirming_checkpoint") {
+    return `${base} · confirming saved checkpoint · ${elapsedLabel} elapsed`;
+  }
+  const batchLabel = progress.activeBatchScenarioCount
+    ? `current batch: ${progress.activeBatchScenarioCount} solution${progress.activeBatchScenarioCount === 1 ? "" : "s"}`
+    : "current batch running";
+  return `${base} · ${batchLabel} · ${elapsedLabel} elapsed`;
+}
 
 const emptyFinanceState = (): CiSavedAnnualFinancialState => ({
   contract_version: "ci_project_annual_financial_state_v1",
@@ -273,11 +291,12 @@ export function CiTariffReplay({
       });
       setAnalysisProgress({ percent: 52, label: `Reconstructing tariffs (0/${scenarioIds.length})` });
       const tariffResult = await runCiProjectTariffReplay(project.project_id, fetch, undefined, scenarioIds, {
-        onProgress: ({ completedScenarioCount, totalScenarioCount }) => {
+        onProgress: (progress) => {
+          const { completedScenarioCount, totalScenarioCount } = progress;
           const fraction = totalScenarioCount > 0 ? completedScenarioCount / totalScenarioCount : 0;
           setAnalysisProgress({
             percent: Math.min(74, 52 + Math.round(fraction * 22)),
-            label: `Reconstructing tariffs (${completedScenarioCount}/${totalScenarioCount})`,
+            label: formatCiTariffReplayProgressLabel(progress),
           });
         },
       });
@@ -414,7 +433,16 @@ export function CiTariffReplay({
   const savedDispatchResult = completedRun?.feasibilityResult ?? dispatch.data.result;
   const savedResult = completedRun?.tariffResult ?? replay.data.result;
   const savedFinanceResult = completedRun?.financeResult ?? (finance.data.status === "ready" ? finance.data.result : null);
-  const result = tariffApproved ? savedResult : null;
+  const savedScenarios = savedResult && Array.isArray(savedResult.scenarios)
+    ? savedResult.scenarios
+    : null;
+  const selectedSavedResult = savedResult && savedScenarios && resolvedSelection
+    && resolvedSelection.scenarioIds.every((scenarioId) => (
+      savedScenarios.some((scenario) => scenario.scenario_id === scenarioId)
+    ))
+    ? selectCiTariffReplayScenarios(savedResult, resolvedSelection.scenarioIds)
+    : savedResult;
+  const result = tariffApproved ? selectedSavedResult : null;
   const financeResult = tariffApproved ? savedFinanceResult : null;
   const error = runReplay.error instanceof Error ? runReplay.error.message : null;
   const analysisScenarioCount = resolvedSelection?.scenarioIds.length ?? 0;
