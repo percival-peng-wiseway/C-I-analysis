@@ -63,6 +63,7 @@ from solar_battery.ci_design_context import (
 )
 from solar_battery.ci_device_profile import (
     ci_device_profile_state,
+    compatible_device_profile_sha256s,
     device_profile_sha256,
     save_ci_device_profile,
 )
@@ -2399,6 +2400,14 @@ def _validate_saved_ci_design_price_preview(
         if rebate_profile is not None
         else None
     )
+    active_device_profile = device_state.get("profile")
+    compatible_device_digests = (
+        compatible_device_profile_sha256s(active_device_profile)
+        if device_state.get("status") == "ready"
+        and isinstance(active_device_profile, dict)
+        else frozenset()
+    )
+    preview_device_digest = preview.get("device_profile_sha256")
     stale = (
         preview.get("contract_version")
         != CI_DESIGN_PRICE_PREVIEW_CONTRACT_VERSION
@@ -2408,8 +2417,8 @@ def _validate_saved_ci_design_price_preview(
         or preview.get("design_candidates_sha256")
         != canonical_sha256(candidates)
         or device_state.get("status") != "ready"
-        or preview.get("device_profile_sha256")
-        != device_state.get("profile_sha256")
+        or not isinstance(preview_device_digest, str)
+        or preview_device_digest not in compatible_device_digests
         or _rebate_profile_blocks_finance(rebate_state)
         or preview.get("rebate_profile_sha256") != rebate_digest
     )

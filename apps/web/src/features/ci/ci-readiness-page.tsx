@@ -316,7 +316,14 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
     return <ModulePrerequisite description="Complete Evidence, then confirm the site-resource assumptions and choose published Solar and Battery profiles." project={project} title="Physical feasibility" />;
   }
   if (savedDesign.isPending || evidence.isPending || deviceProfile.isPending) return <PageState title="Loading solution generator" description="Restoring the site evidence, profile library and saved solution search space." />;
-  if (savedDesign.isError || evidence.isError || deviceProfile.isError) return <Card><CardHeader><CardTitle as="h2" className="text-xl">Physical feasibility unavailable</CardTitle><CardDescription>The site evidence, profiles or saved technical design could not be loaded safely.</CardDescription></CardHeader><CardContent><Button onClick={onBack} type="button">Return to Evidence</Button></CardContent></Card>;
+  if (savedDesign.isError || evidence.isError || deviceProfile.isError) {
+    const loadErrors: Array<[string, unknown]> = [];
+    if (savedDesign.isError) loadErrors.push(["Saved solutions", savedDesign.error]);
+    if (evidence.isError) loadErrors.push(["Project evidence", evidence.error]);
+    if (deviceProfile.isError) loadErrors.push(["Device profile", deviceProfile.error]);
+    const retrying = savedDesign.isFetching || evidence.isFetching || deviceProfile.isFetching;
+    return <Card><CardHeader><CardTitle as="h2" className="text-xl">Physical feasibility unavailable</CardTitle><CardDescription>The Solution Generator could not safely restore its saved inputs.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{loadErrors.map(([label, loadError]) => <p key={label}><strong>{label}:</strong> {loadError instanceof Error ? loadError.message : "Unknown loading error."}</p>)}</div><div className="flex flex-wrap gap-3"><Button disabled={retrying} onClick={() => { void Promise.all([savedDesign.refetch(), evidence.refetch(), deviceProfile.refetch()]); }} type="button">{retrying ? <RefreshCw className="size-4 animate-spin" /> : null}{retrying ? "Retrying…" : "Retry loading"}</Button><Button onClick={onBack} type="button" variant="outline">Return to Evidence</Button></div></CardContent></Card>;
+  }
   const activeDeviceProfile = deviceProfile.data.profile ?? deviceProfile.data.suggested_profile;
   const siteAddress = evidence.data.status === "saved" ? evidence.data.evidence?.inspection.bill.site_address ?? null : null;
   return <div className="space-y-8">

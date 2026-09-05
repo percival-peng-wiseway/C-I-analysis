@@ -144,11 +144,12 @@ const approvedSolarStcState: CiProjectRebateProfileState = {
 
 afterEach(() => { cleanup(); window.sessionStorage.clear(); vi.unstubAllGlobals(); });
 
-function renderPage() {
-  return render(<QueryClientProvider client={createCiQueryClient()}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
+function renderPage(queryClient = createCiQueryClient()) {
+  return render(<QueryClientProvider client={queryClient}><CiWorkspaceProvider><CiProductShell><CiReadinessPage /></CiProductShell></CiWorkspaceProvider></QueryClientProvider>);
 }
 
 type MockApiOverrides = {
+  deviceProfile?: (readNumber: number, payload: Record<string, unknown>) => Response | Promise<Response>;
   feasibilityPost?: () => Response | Promise<Response>;
   pricePreview?: (readNumber: number, payload: Record<string, unknown>) => Response | Promise<Response>;
 };
@@ -169,6 +170,7 @@ function fullAnalysisPosts(fetchMock: ReturnType<typeof vi.fn>) {
 function mockApi(projects = [project], savedDesign: typeof generatedDesign | null = null, rebateState: CiProjectRebateProfileState = rebateStateFixture, holdAnalysis = false, failStcSave = false, nextGeneratedDesign: typeof generatedDesign | null = null, overrides: MockApiOverrides = {}) {
   let currentSavedDesign = savedDesign;
   let currentRebateState = rebateState;
+  let deviceProfileReads = 0;
   let pricePreviewReads = 0;
   const applyStcSettings = (body: Record<string, unknown>) => {
     const nextProfile = structuredClone(currentRebateState.profile ?? currentRebateState.suggested_profile);
@@ -190,7 +192,9 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
     if (path.endsWith("/settings/device-profile")) {
       const suggested = deviceProfileFixture;
       if (init?.method === "PUT") return new Response(JSON.stringify({ contract_version: "ci_device_profile_state_v1", status: "ready", updated_at: "2026-08-19", profile_sha256: "a".repeat(64), profile: JSON.parse(String(init.body)), suggested_profile: suggested }), { status: 200 });
-      return new Response(JSON.stringify({ contract_version: "ci_device_profile_state_v1", status: "not_configured", updated_at: null, profile_sha256: null, profile: null, suggested_profile: suggested }), { status: 200 });
+      const payload = { contract_version: "ci_device_profile_state_v1", status: "not_configured", updated_at: null, profile_sha256: null, profile: null, suggested_profile: suggested };
+      deviceProfileReads += 1;
+      return overrides.deviceProfile?.(deviceProfileReads, payload) ?? new Response(JSON.stringify(payload), { status: 200 });
     }
     if (path.endsWith("/workspace-readiness")) return new Response(JSON.stringify(readiness), { status: 200 });
     if (path.endsWith("/site-material")) return new Response(JSON.stringify({ contract_version: "ci_project_site_material_v1", photos: [] }), { status: 200 });
@@ -326,6 +330,41 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("heading", { name: "Configure solutions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Previous: Evidence" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next: Scenario Analysis" })).toBeTruthy();
+  });
+
+  it("shows the exact Solution Generator load error and retries every required query", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 6 } as const;
+    const fetchMock = mockApi(
+      [readyProject],
+      generatedDesign,
+      rebateStateFixture,
+      false,
+      false,
+      null,
+      {
+        deviceProfile: (readNumber, payload) => {
+          if (readNumber > 1) return new Response(JSON.stringify(payload), { status: 200 });
+          const legacy = structuredClone(payload);
+          (legacy.suggested_profile as { contract_version: string }).contract_version = "ci_device_profile_v4";
+          return new Response(JSON.stringify(legacy), { status: 200 });
+        },
+      },
+    );
+    const queryClient = createCiQueryClient();
+    queryClient.setQueryDefaults(["ci-device-profile"], { retry: false });
+    renderPage(queryClient);
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    expect(await screen.findByRole("heading", { name: "Physical feasibility unavailable" })).toBeTruthy();
+    expect(screen.getByText(/Device profile returned an unsafe contract/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Retry loading" }));
+    expect(await screen.findByRole("heading", { name: "Configure solutions" })).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/settings/device-profile") && !init?.method)).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/evidence-intake") && !init?.method)).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/design-candidates") && !init?.method)).toHaveLength(2);
   });
 
   it("resets the generator form when switching projects", async () => {

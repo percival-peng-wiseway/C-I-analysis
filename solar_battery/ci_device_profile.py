@@ -398,6 +398,43 @@ def device_profile_sha256(profile: dict[str, object]) -> str:
     ).hexdigest()
 
 
+def compatible_device_profile_sha256s(
+    profile: dict[str, object],
+) -> frozenset[str]:
+    """Return only hashes proven equivalent across a known schema migration.
+
+    The v5 contract adds an inverter reactive-support policy but does not alter
+    the equipment-price operands used by an already saved design-price
+    preview.  A v4 predecessor is compatible only when removing that one field
+    and round-tripping through the authoritative v4->v5 migration reproduces
+    the current normalized profile exactly.  Any other edit remains stale.
+    """
+
+    normalized = validate_ci_device_profile(profile)
+    compatible = {device_profile_sha256(normalized)}
+    predecessor = json.loads(json.dumps(normalized, allow_nan=False))
+    predecessor["contract_version"] = CI_V4_DEVICE_PROFILE_CONTRACT_VERSION
+    solution_profiles = predecessor.get("solution_profiles")
+    inverter_profiles = (
+        solution_profiles.get("inverter_profiles")
+        if isinstance(solution_profiles, dict)
+        else None
+    )
+    if not isinstance(inverter_profiles, list):
+        return frozenset(compatible)
+    for inverter in inverter_profiles:
+        if not isinstance(inverter, dict):
+            return frozenset(compatible)
+        inverter.pop("reactive_support_enabled", None)
+    try:
+        round_tripped = validate_ci_device_profile(predecessor)
+    except CiProjectError:
+        return frozenset(compatible)
+    if round_tripped == normalized:
+        compatible.add(device_profile_sha256(predecessor))
+    return frozenset(compatible)
+
+
 def validate_ci_device_profile(profile: dict[str, object]) -> dict[str, object]:
     if isinstance(profile, dict) and profile.get("contract_version") == CI_LEGACY_DEVICE_PROFILE_CONTRACT_VERSION:
         return _upgrade_legacy_profile(profile)

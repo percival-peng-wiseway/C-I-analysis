@@ -556,7 +556,11 @@ function restoreBuilderState(
       batteryRange: rangeFromValues(solutions.map((item) => item.nominal_capacity_kwh)),
     };
   }
-  if (context.contract_version === "ci_design_context_v2") return restoreV2(context);
+  if (context.contract_version === "ci_design_context_v2") {
+    return isRestorableV2Context(context)
+      ? restoreV2(context)
+      : restoreRangesFromSolutions(defaults, solutions);
+  }
   const options = context.technical_options;
   return {
     ...defaults,
@@ -565,6 +569,69 @@ function restoreBuilderState(
     site: siteFormFromTechnical(options),
     connection: connectionFormFromTechnical(options),
   };
+}
+
+function restoreRangesFromSolutions(
+  defaults: RestoredBuilderState,
+  solutions: CiScenarioInput[] | undefined,
+): RestoredBuilderState {
+  if (!solutions?.length) return defaults;
+  return {
+    ...defaults,
+    pvRange: rangeFromValues(solutions.map((item) => item.pv_capacity_kwp_dc).filter((value) => value > 0)),
+    batteryRange: rangeFromValues(solutions.map((item) => item.nominal_capacity_kwh)),
+  };
+}
+
+function isRestorableV2Context(context: CiDesignContextV2): boolean {
+  const candidate = context as unknown as Record<string, unknown>;
+  const searchSpace = recordValue(candidate.search_space);
+  const pvRange = recordValue(searchSpace?.pv_range);
+  const batteryRange = recordValue(searchSpace?.battery_range);
+  const siteFactors = recordValue(candidate.site_factors);
+  const selection = recordValue(candidate.profile_selection);
+  const technical = recordValue(candidate.technical_options);
+  if (!pvRange || !batteryRange || !siteFactors || !selection || !technical) return false;
+
+  const rangesAreFinite = [
+    pvRange.minimum_kwp_dc,
+    pvRange.maximum_kwp_dc,
+    pvRange.step_kwp_dc,
+    batteryRange.minimum_kwh,
+    batteryRange.maximum_kwh,
+    batteryRange.step_kwh,
+  ].every(isFiniteNumber);
+  const siteNumbersAreFinite = [
+    siteFactors.annual_specific_yield_kwh_per_kw,
+    siteFactors.array_azimuth_degrees,
+    siteFactors.array_tilt_degrees,
+    siteFactors.shading_loss_percent,
+    siteFactors.soiling_loss_percent,
+    siteFactors.temperature_loss_percent,
+    siteFactors.wiring_mismatch_loss_percent,
+    siteFactors.other_system_loss_percent,
+    siteFactors.system_availability_percent,
+  ].every(isFiniteNumber);
+  const emissions = technical.grid_emissions_factor_kg_co2e_per_kwh;
+  return rangesAreFinite && siteNumbersAreFinite &&
+    typeof siteFactors.resource_source === "string" &&
+    typeof siteFactors.resource_label === "string" &&
+    typeof selection.solar_profile_id === "string" &&
+    typeof selection.battery_profile_id === "string" &&
+    (selection.inverter_profile_id === undefined || typeof selection.inverter_profile_id === "string") &&
+    isFiniteNumber(technical.inverter_block_size_kw) &&
+    isFiniteNumber(technical.site_ac_headroom_kw) &&
+    (emissions === undefined || emissions === null || isFiniteNumber(emissions));
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function restoreV2(context: CiDesignContextV2): RestoredBuilderState {

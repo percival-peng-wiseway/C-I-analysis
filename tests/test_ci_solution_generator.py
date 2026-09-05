@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from uuid import UUID
 
@@ -22,7 +23,10 @@ from solar_battery.ci_solution_generator import (
     generate_ci_custom_solution,
     generate_ci_solutions,
 )
-from solar_battery.durable_cockpit.orm import CiProjectModel
+from solar_battery.durable_cockpit.orm import (
+    CiProjectModel,
+    CiProjectRebateProfileModel,
+)
 from tests.durable_test_helpers import (
     create_sqlite_session_factory,
     create_test_client,
@@ -727,6 +731,43 @@ def test_v2_design_context_rejects_tampered_derived_values() -> None:
         validate_ci_design_context(context)
 
 
+def test_v2_design_context_normalizes_legacy_inverter_reactive_switch_without_mutation() -> None:
+    request = _request(maximum_pv=100.0, headroom=250.0)
+    request["inverter_profile_id"] = "inverter-125"
+    generated = generate_ci_solutions(
+        request,
+        device_profile=_device_profile(),
+        device_profile_sha256="b" * 64,
+    )
+    legacy_context = copy.deepcopy(generated["design_context"])
+    legacy_inverter = legacy_context["profile_selection"]["inverter_profile"]
+    legacy_inverter.pop("reactive_support_enabled")
+
+    normalized = validate_ci_design_context(legacy_context)
+
+    assert "reactive_support_enabled" not in legacy_inverter
+    assert normalized["profile_selection"]["inverter_profile"][
+        "reactive_support_enabled"
+    ] is True
+    assert normalized["technical_options"]["reactive_support_enabled"] is True
+
+
+def test_generator_keeps_new_inverter_profile_validation_strict() -> None:
+    profile = _device_profile()
+    profile["solution_profiles"]["inverter_profiles"][0].pop(
+        "reactive_support_enabled"
+    )
+    request = _request(maximum_pv=100.0, headroom=250.0)
+    request["inverter_profile_id"] = "inverter-125"
+
+    with pytest.raises(CiProjectError, match="reactive-support policy"):
+        generate_ci_solutions(
+            request,
+            device_profile=profile,
+            device_profile_sha256="b" * 64,
+        )
+
+
 def test_design_request_requires_exactly_one_candidate_source() -> None:
     with pytest.raises(ValidationError, match="exactly one"):
         CiDesignCandidatesRequest()
@@ -803,6 +844,109 @@ def test_generation_route_records_design_before_saving_stc_in_one_transaction(
         ).json()
         assert restored["status"] == "ready"
         assert restored["design"]["candidate_count"] == 6
+
+
+def test_routes_restore_and_extend_legacy_v2_inverter_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(
+        tmp_path / "legacy-v2-inverter-snapshot.sqlite3"
+    )
+    profile = _device_profile()
+
+    def device_state(_session, *, actor):
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": "c" * 64,
+            "profile": profile,
+            "suggested_profile": profile,
+        }
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    monkeypatch.setattr(
+        "api.ci_routes.save_ci_project_stc_settings",
+        lambda _session, **_kwargs: {"status": "approved"},
+    )
+    monkeypatch.setattr(
+        "api.ci_routes._calculate_ci_design_price_preview_if_ready",
+        lambda _session, **_kwargs: None,
+    )
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "Legacy inverter snapshot project"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        generation_request = _request(maximum_pv=100.0, headroom=250.0)
+        generation_request["inverter_profile_id"] = "inverter-125"
+        generated = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={"generation_request": generation_request},
+        )
+        assert generated.status_code == 200, generated.json()
+
+        # Reproduce the immutable v2 context shape saved before the v5
+        # inverter-profile switch existed.
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            legacy_context = copy.deepcopy(project.design_context_json)
+            legacy_context["profile_selection"]["inverter_profile"].pop(
+                "reactive_support_enabled"
+            )
+            project.design_context_json = legacy_context
+
+        restored = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates"
+        )
+        assert restored.status_code == 200, restored.json()
+        assert restored.json()["design"]["design_context"]["profile_selection"][
+            "inverter_profile"
+        ]["reactive_support_enabled"] is True
+
+        # A GET normalizes only its response; it does not rewrite the stored
+        # context or trigger a candidate calculation.
+        with session_factory() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            assert "reactive_support_enabled" not in project.design_context_json[
+                "profile_selection"
+            ]["inverter_profile"]
+
+        custom = client.post(
+            f"/api/commercial-industrial/projects/{project_id}"
+            "/design-candidates/custom",
+            json={
+                "contract_version": "ci_custom_design_candidate_request_v1",
+                "label": "Legacy context custom option",
+                "pv_capacity_kwp_dc": 120.0,
+                "battery_capacity_kwh": 14.0,
+                "inverter_capacity_kw_ac": 106.0,
+                "quoted_net_capex_aud_ex_gst": 245000.0,
+                "stc_settings": _stc_settings(),
+            },
+        )
+        assert custom.status_code == 200, custom.json()
+        added = next(
+            candidate
+            for candidate in custom.json()["candidates"]
+            if candidate["scenario_id"] == custom.json()["added_scenario_id"]
+        )
+        assert added["reactive_support_enabled"] is True
+        assert added["reactive_support_max_kvar"] == pytest.approx(69.96)
+        assert added["shared_inverter_apparent_power_limit_kva"] == pytest.approx(
+            116.6
+        )
 
 
 def test_generation_route_atomically_binds_stc_to_the_new_design(
@@ -1040,6 +1184,165 @@ def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready
             project.design_candidates_json
         )
         assert project.design_price_preview_json == preview.json()
+
+
+def test_v4_price_preview_and_rebate_binding_survive_only_reversible_v5_migration(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = sqlite_url_for_path(
+        tmp_path / "v4-price-preview-compatibility.sqlite3"
+    )
+    profile = suggested_ci_device_profile()
+    inverter = profile["solution_profiles"]["inverter_profiles"][0]
+    inverter["status"] = "published"
+    current = {"profile": profile}
+
+    def device_state(_session, *, actor):
+        active = current["profile"]
+        return {
+            "contract_version": "ci_device_profile_state_v1",
+            "status": "ready",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+            "profile_sha256": device_profile_sha256(active),
+            "profile": active,
+            "suggested_profile": active,
+        }
+
+    monkeypatch.setattr("api.ci_routes.ci_device_profile_state", device_state)
+    monkeypatch.setattr(
+        "solar_battery.ci_project_rebate_profile.ci_device_profile_state",
+        device_state,
+    )
+    monkeypatch.setattr(
+        "solar_battery.ci_project_rebate_profile._site_address",
+        lambda _evidence: "10 Collins Street Melbourne VIC, 3000",
+    )
+    selection = profile["default_solution_profile_selection"]
+    generation_request = _request(maximum_pv=60.0, headroom=250.0)
+    generation_request.update(
+        {
+            "pv_range": {
+                "minimum_kwp_dc": 60.0,
+                "maximum_kwp_dc": 60.0,
+                "step_kwp_dc": 1.0,
+            },
+            "battery_range": {
+                "minimum_kwh": 0.0,
+                "maximum_kwh": 0.0,
+                "step_kwh": 1.0,
+            },
+            "solar_profile_id": selection["solar_profile_id"],
+            "battery_profile_id": selection["battery_profile_id"],
+            "inverter_profile_id": inverter["profile_id"],
+        }
+    )
+
+    with create_test_client(database_url) as client:
+        created = client.post(
+            "/api/commercial-industrial/projects",
+            json={"display_name": "V4 price preview compatibility"},
+        )
+        assert created.status_code == 201
+        project_id = created.json()["project_id"]
+        session_factory = create_sqlite_session_factory(database_url)
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            project.setup_status = "ready"
+            project.current_stage = "system_design"
+
+        generated = client.post(
+            f"/api/commercial-industrial/projects/{project_id}/design-candidates",
+            json={
+                "generation_request": generation_request,
+                "stc_settings": _stc_settings(),
+            },
+        )
+        assert generated.status_code == 200, generated.json()
+        current_preview = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
+        )
+        assert current_preview.status_code == 200, current_preview.json()
+        assert current_preview.json()["solutions"][0][
+            "upfront_rebate_aud_ex_gst"
+        ] > 0
+
+        predecessor = copy.deepcopy(profile)
+        predecessor["contract_version"] = "ci_device_profile_v4"
+        for item in predecessor["solution_profiles"]["inverter_profiles"]:
+            item.pop("reactive_support_enabled")
+        predecessor_digest = device_profile_sha256(predecessor)
+
+        # Recreate the hashes held by a v4 design, approved rebate calculation
+        # and price preview without touching their economic payloads.
+        with session_factory.begin() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            legacy_context = copy.deepcopy(project.design_context_json)
+            legacy_context["profile_selection"][
+                "device_profile_sha256"
+            ] = predecessor_digest
+            legacy_context["profile_selection"]["inverter_profile"].pop(
+                "reactive_support_enabled"
+            )
+            project.design_context_json = legacy_context
+
+            rebate_row = session.query(CiProjectRebateProfileModel).one()
+            calculation_profile = copy.deepcopy(
+                rebate_row.calculation_profile_json
+            )
+            calculation_profile["design_context_sha256"] = canonical_sha256(
+                legacy_context
+            )
+            calculation_profile[
+                "device_profile_sha256"
+            ] = predecessor_digest
+            calculation_digest = canonical_sha256(calculation_profile)
+            rebate_row.calculation_profile_json = calculation_profile
+            rebate_row.calculation_profile_sha256 = calculation_digest
+
+            legacy_preview = copy.deepcopy(project.design_price_preview_json)
+            legacy_preview["device_profile_sha256"] = predecessor_digest
+            legacy_preview["rebate_profile_sha256"] = calculation_digest
+            project.design_price_preview_json = legacy_preview
+            expected_preview = copy.deepcopy(legacy_preview)
+
+        preview_calls = 0
+
+        def unexpected_preview(**_kwargs):
+            nonlocal preview_calls
+            preview_calls += 1
+            raise AssertionError("GET must not recalculate a compatible preview")
+
+        monkeypatch.setattr(
+            "api.ci_routes.preview_ci_design_candidate_prices",
+            unexpected_preview,
+        )
+        restored = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
+        )
+        assert restored.status_code == 200, restored.json()
+        assert restored.json() == expected_preview
+        assert preview_calls == 0
+        with session_factory() as session:
+            project = session.get(CiProjectModel, UUID(project_id))
+            assert project is not None
+            assert project.design_price_preview_json == expected_preview
+            assert "reactive_support_enabled" not in project.design_context_json[
+                "profile_selection"
+            ]["inverter_profile"]
+
+        repriced = copy.deepcopy(profile)
+        repriced["equipment_catalog"]["pv_products"][0][
+            "capital_cost_aud_per_kwp_dc"
+        ] += 0.01
+        current["profile"] = repriced
+        stale = client.get(
+            f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
+        )
+        assert stale.status_code == 409, stale.json()
+        assert stale.json()["detail"]["code"] == "ci_design_price_preview_stale"
+        assert preview_calls == 0
 
 
 def test_price_preview_get_never_calculates_when_snapshot_is_missing(

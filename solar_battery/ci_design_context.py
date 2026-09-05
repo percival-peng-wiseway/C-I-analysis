@@ -131,6 +131,9 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             ),
         )
         site = _site_factors(value.get("site_factors"))
+        options = _validate_technical_options(
+            value.get("technical_options"), require_initial_soc_basis=True
+        )
         selection = value.get("profile_selection")
         if not isinstance(selection, dict):
             raise ValueError
@@ -165,6 +168,16 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             inverter_id = _profile_id(inverter_profile)
             if selection.get("inverter_profile_id") != inverter_id:
                 raise ValueError
+            if "reactive_support_enabled" not in inverter_profile:
+                # Compatibility for immutable v2 design contexts generated
+                # from the v4 device-profile contract.  Reactive enablement was
+                # then authored in technical_options, so copy that already
+                # validated historical switch into the returned snapshot.  Do
+                # not mutate the saved JSON or relax current v5 profile input
+                # validation.
+                inverter_profile["reactive_support_enabled"] = options[
+                    "reactive_support_enabled"
+                ]
             inverter_performance = _inverter_performance(inverter_profile)
         profile_digest = selection.get("device_profile_sha256")
         if profile_digest is not None and (
@@ -175,9 +188,6 @@ def _validate_v2_design_context(value: dict[str, object]) -> dict[str, object]:
             raise ValueError
         solar_performance = _solar_performance(solar_profile)
         battery_performance = _battery_performance(battery_profile)
-        options = _validate_technical_options(
-            value.get("technical_options"), require_initial_soc_basis=True
-        )
         if inverter_performance is not None and not _same_number(
             options.get("inverter_block_size_kw"),
             inverter_performance["rated_active_power_kw"],

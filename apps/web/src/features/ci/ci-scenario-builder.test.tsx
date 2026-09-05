@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CiDeviceProfile } from "./api/ci-device-profile";
 import type { CiDesignContextV2 } from "./api/ci-projects";
+import type { CiScenarioInput } from "./api/ci-scenarios";
 import { CiScenarioBuilder } from "./ci-scenario-builder";
 
 afterEach(cleanup);
@@ -198,6 +199,29 @@ describe("CiScenarioBuilder", () => {
       battery_range: { minimum_kwh: 350.000000001, maximum_kwh: 350.000000002, step_kwh: 0.000000001 },
       connection_options: { reactive_support_enabled: true, reactive_support_max_kvar: 82.5 },
     });
+  });
+
+  it("falls back to saved solution ranges when a historical v2 context is incomplete", () => {
+    const incompleteContext = {
+      contract_version: "ci_design_context_v2",
+      search_space: null,
+      site_factors: null,
+      profile_selection: null,
+      technical_options: null,
+    } as unknown as CiDesignContextV2;
+    const savedSolutions = [
+      { pv_capacity_kwp_dc: 100, nominal_capacity_kwh: 300 },
+      { pv_capacity_kwp_dc: 150, nominal_capacity_kwh: 400 },
+    ] as unknown as CiScenarioInput[];
+
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} initialContext={incompleteContext} initialSolutions={savedSolutions} isPending={false} onSubmit={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "Configure solutions" })).toBeTruthy();
+    const minimums = screen.getAllByRole("spinbutton", { name: "Minimum" }) as HTMLInputElement[];
+    const maximums = screen.getAllByRole("spinbutton", { name: "Maximum" }) as HTMLInputElement[];
+    expect([minimums[0].value, maximums[0].value]).toEqual(["100", "150"]);
+    expect([minimums[1].value, maximums[1].value]).toEqual(["300", "400"]);
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", false);
   });
 
   it("updates reactive compensation when another published inverter profile is selected", async () => {

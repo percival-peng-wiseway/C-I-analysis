@@ -12,6 +12,7 @@ from solar_battery.ci_device_profile import (
     CI_V3_DEVICE_PROFILE_CONTRACT_VERSION,
     CI_V2_DEVICE_PROFILE_CONTRACT_VERSION,
     ci_device_profile_state,
+    compatible_device_profile_sha256s,
     device_profile_sha256,
     suggested_ci_device_profile,
     validate_ci_device_profile,
@@ -415,6 +416,31 @@ def test_integrity_valid_stored_v4_profile_is_read_as_v5_without_mutating_row(
     assert state["profile_sha256"] != stored_digest
     assert row.profile_contract_version == CI_V4_DEVICE_PROFILE_CONTRACT_VERSION
     assert row.profile_sha256 == stored_digest
+
+
+def test_v5_profile_accepts_only_its_strictly_reversible_v4_predecessor_digest() -> None:
+    raw_v4 = _v4_profile(battery_cost_aud_per_kwh=488.5)
+    normalized_v5 = validate_ci_device_profile(raw_v4)
+    raw_v4_digest = device_profile_sha256(raw_v4)
+    current_v5_digest = device_profile_sha256(normalized_v5)
+
+    compatible = compatible_device_profile_sha256s(normalized_v5)
+
+    assert compatible == frozenset({raw_v4_digest, current_v5_digest})
+
+    repriced = copy.deepcopy(normalized_v5)
+    repriced["equipment_catalog"]["pv_products"][0][
+        "capital_cost_aud_per_kwp_dc"
+    ] += 0.01
+    assert raw_v4_digest not in compatible_device_profile_sha256s(repriced)
+
+    changed_reactive_policy = copy.deepcopy(normalized_v5)
+    changed_reactive_policy["solution_profiles"]["inverter_profiles"][0][
+        "reactive_support_enabled"
+    ] = False
+    assert raw_v4_digest not in compatible_device_profile_sha256s(
+        changed_reactive_policy
+    )
 
 
 def test_v1_upgrade_preserves_legacy_price_and_finance_values() -> None:

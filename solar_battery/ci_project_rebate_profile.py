@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from solar_battery.ci_device_profile import (
     ci_device_profile_state,
+    compatible_device_profile_sha256s,
     device_profile_sha256,
 )
 from solar_battery.ci_project_feasibility import canonical_sha256
@@ -914,17 +915,37 @@ def _current_rebate_binding(
         if isinstance(device_profile, dict)
         else None
     )
+    try:
+        compatible_device_digests = (
+            compatible_device_profile_sha256s(device_profile)
+            if isinstance(device_profile, dict)
+            else frozenset()
+        )
+    except CiProjectError:
+        # The real device-profile state is already validated.  Preserve the
+        # historical exact-digest behavior for isolated callers/test doubles,
+        # but never grant them predecessor compatibility.
+        compatible_device_digests = (
+            frozenset({current_device_digest})
+            if current_device_digest is not None
+            else frozenset()
+        )
     context_selection = (
         context.get("profile_selection")
         if isinstance(context, dict)
         and context.get("contract_version") == "ci_design_context_v2"
         else None
     )
+    context_device_digest = (
+        context_selection.get("device_profile_sha256")
+        if isinstance(context_selection, dict)
+        else None
+    )
     context_matches_device = (
         isinstance(context_selection, dict)
         and current_device_digest is not None
-        and context_selection.get("device_profile_sha256")
-        == current_device_digest
+        and isinstance(context_device_digest, str)
+        and context_device_digest in compatible_device_digests
     )
     return {
         "design_candidates_sha256": (
@@ -937,7 +958,11 @@ def _current_rebate_binding(
             if isinstance(context, dict) and context and context_matches_device
             else None
         ),
-        "device_profile_sha256": current_device_digest,
+        "device_profile_sha256": (
+            str(context_device_digest)
+            if context_matches_device
+            else current_device_digest
+        ),
     }
 
 
