@@ -135,10 +135,16 @@ def generate_ci_solutions(
             )
         for battery_capacity, battery_power in feasible_battery_options:
             separate_ac = connection["dispatch_topology"] == "separate_ac"
+            # A separate-AC PV-only candidate has no battery PCS.  Its PV
+            # inverter was already checked against site headroom above; do not
+            # reject it using the fixed PCS quantity intended for battery rows.
+            candidate_inverter_capacity = (
+                0.0 if separate_ac and battery_capacity == 0 else inverter_capacity
+            )
             required_pcs = battery_power if separate_ac else max(
                 pv_capacity / solar_performance["default_dc_ac_ratio"], battery_power
             )
-            if inverter_capacity + 1e-9 < required_pcs or inverter_capacity > connection["site_ac_headroom_kw"] + 1e-9:
+            if candidate_inverter_capacity + 1e-9 < required_pcs or candidate_inverter_capacity > connection["site_ac_headroom_kw"] + 1e-9:
                 rejected_requested += 1
                 rejection_counts["inverter_capacity_outside_limits"] += 1
                 continue
@@ -151,7 +157,7 @@ def generate_ci_solutions(
                 battery=battery,
                 inverter=inverter,
                 pv_capacity_kwp_dc=pv_capacity,
-                inverter_capacity_kw_ac=inverter_capacity,
+                inverter_capacity_kw_ac=candidate_inverter_capacity,
                 battery_performance_scale=battery_performance_scale,
                 battery_capacity_kwh=battery_capacity,
                 battery_power_kw=battery_power,

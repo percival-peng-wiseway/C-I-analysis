@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -57,7 +57,7 @@ describe("CiScenarioBuilder", () => {
     expect(screen.queryByText(/Python will snap & validate/)).toBeNull();
     expect(screen.queryByText("Python auto-sizing")).toBeNull();
     expect(screen.queryByText("PCS block from selected inverter")).toBeNull();
-    expect(screen.queryByLabelText(/Inverter quantity/)).toBeNull();
+    expect(screen.getByLabelText("Inverter quantity")).toHaveProperty("value", "");
     expect(screen.queryByText("Configured PCS")).toBeNull();
     expect(screen.queryByRole("checkbox", { name: "Model inverter reactive support" })).toBeNull();
     expect(screen.queryByLabelText("Reactive support cap (kvar)")).toBeNull();
@@ -91,10 +91,53 @@ describe("CiScenarioBuilder", () => {
       },
     });
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("scenarios");
+    expect(onSubmit.mock.calls[0][0].connection_options).not.toHaveProperty("inverter_quantity");
     expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("existing_solar");
     expect(screen.queryByLabelText("Allow grid charging")).toBeNull();
     expect(screen.getByText("5 candidates:").parentElement?.textContent).toBe("5 candidates: 100, 200, 300, 400, 500 kWp");
     expect(screen.getByText("6 candidates:").parentElement?.textContent).toBe("6 candidates: 0, 100, 200, 300, 400, 500 kWh");
+  });
+
+  it("submits a fixed quantity and displays total active, apparent and reactive capacity without auto-running", async () => {
+    const onSubmit = vi.fn();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Inverter quantity"), "2");
+    expect(onSubmit).not.toHaveBeenCalled();
+    const totals = screen.getByLabelText("Configured inverter totals");
+    expect(totals.textContent).toContain("2 × 125 kW = 250 kW");
+    expect(totals.textContent).toContain("Total apparent power275 kVA");
+    expect(totals.textContent).toContain("Total reactive cap165 kvar");
+    await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+    expect(onSubmit.mock.calls[0][0].connection_options).toMatchObject({ inverter_quantity: 2, inverter_block_size_kw: 125 });
+    // Profile reactive fields remain per-unit references; Python scales them once.
+    expect(onSubmit.mock.calls[0][0].connection_options.reactive_support_max_kvar).toBe(82.5);
+    await user.clear(screen.getByLabelText("Inverter quantity"));
+    expect(screen.queryByLabelText("Configured inverter totals")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+    expect(onSubmit.mock.calls[1][0].connection_options).not.toHaveProperty("inverter_quantity");
+  });
+
+  it.each(["0", "-1", "1.5", "10001"])("rejects invalid inverter quantity %s", (quantity) => {
+    const onSubmit = vi.fn();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByLabelText("Inverter quantity"), { target: { value: quantity } });
+    expect(screen.getByText("Inverter quantity must be a whole number from 1 to 10,000.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
+    expect(screen.queryByLabelText("Configured inverter totals")).toBeNull();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("labels fixed quantity as battery PCS in separate AC without changing the quantity", async () => {
+    const onSubmit = vi.fn();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Inverter quantity"), "2");
+    await user.selectOptions(screen.getByLabelText("Electrical topology"), "separate_ac");
+    expect(screen.getByLabelText("Battery PCS quantity")).toHaveProperty("value", "2");
+    expect(screen.getByText("Battery PCS total · PV inverter sized separately")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+    expect(onSubmit.mock.calls[0][0].connection_options).toMatchObject({ dispatch_topology: "separate_ac", inverter_quantity: 2 });
   });
 
   it("uses another published profile selected from the workspace library", async () => {
@@ -200,6 +243,7 @@ describe("CiScenarioBuilder", () => {
       },
       technical_options: {
         inverter_block_size_kw: 125,
+        inverter_quantity: 2,
         site_ac_headroom_kw: 250,
         reactive_support_enabled: true,
         reactive_support_max_kvar: 57,
@@ -214,12 +258,14 @@ describe("CiScenarioBuilder", () => {
     expect([minimums[0].value, maximums[0].value, steps[0].value]).toEqual(["100.000000001", "100.000000002", "0.000000001"]);
     expect([minimums[1].value, maximums[1].value, steps[1].value]).toEqual(["350.000000001", "350.000000002", "0.000000001"]);
     expect(screen.queryByLabelText("Reactive support cap (kvar)")).toBeNull();
+    expect(screen.getByLabelText("Inverter quantity")).toHaveProperty("value", "2");
+    expect(screen.getByLabelText("Configured inverter totals").textContent).toContain("2 × 125 kW = 250 kW");
 
     await userEvent.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
     expect(onSubmit.mock.calls[0][0]).toMatchObject({
       pv_range: { minimum_kwp_dc: 100.000000001, maximum_kwp_dc: 100.000000002, step_kwp_dc: 0.000000001 },
       battery_range: { minimum_kwh: 350.000000001, maximum_kwh: 350.000000002, step_kwh: 0.000000001 },
-      connection_options: { reactive_support_enabled: true, reactive_support_max_kvar: 82.5 },
+      connection_options: { inverter_quantity: 2, reactive_support_enabled: true, reactive_support_max_kvar: 82.5 },
     });
   });
 
@@ -262,15 +308,19 @@ describe("CiScenarioBuilder", () => {
     const onSubmit = vi.fn();
     render(<CiScenarioBuilder deviceProfile={profiles} error={null} isPending={false} onSubmit={onSubmit} />);
 
+    await user.type(screen.getByLabelText("Inverter quantity"), "2");
     await user.selectOptions(screen.getByLabelText("Inverter performance profile"), "inverter-100");
     const inverterCard = screen.getByRole("region", { name: "Inverter / PCS profile" });
     expect(inverterCard.textContent).toContain("Reactive compensationOff");
     expect(inverterCard.textContent).toContain("Cap per inverter66 kvar");
+    expect(screen.getByLabelText("Inverter quantity")).toHaveProperty("value", "2");
+    expect(screen.getByLabelText("Configured inverter totals").textContent).toContain("2 × 100 kW = 200 kW");
+    expect(screen.getByLabelText("Configured inverter totals").textContent).toContain("Total reactive cap0 kvar");
 
     await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
     expect(onSubmit.mock.calls[0][0]).toMatchObject({
       inverter_profile_id: "inverter-100",
-      connection_options: { reactive_support_enabled: false, reactive_support_max_kvar: 0 },
+      connection_options: { inverter_quantity: 2, reactive_support_enabled: false, reactive_support_max_kvar: 0 },
     });
   });
 

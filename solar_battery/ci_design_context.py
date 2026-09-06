@@ -514,7 +514,9 @@ def _validate_technical_options(
     ):
         raise ValueError
     inverter_quantity = None
-    if "inverter_quantity" in value:
+    # An explicit null is the API's automatic-sizing mode, just like an
+    # omitted quantity.  Persist the canonical context without an empty field.
+    if value.get("inverter_quantity") is not None:
         inverter_quantity = _integer(value, "inverter_quantity", positive=True)
         if inverter_quantity > 10_000:
             raise ValueError

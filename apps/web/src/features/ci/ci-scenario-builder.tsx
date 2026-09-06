@@ -57,6 +57,7 @@ type ConnectionOptionsForm = {
   dispatch_topology: "shared_hybrid_dc" | "separate_ac";
   battery_efficiency_basis: "pack_plus_conversion" | "whole_system_ac";
   inverter_block_size_kw: string;
+  inverter_quantity: string;
   site_ac_headroom_kw: string;
   allow_grid_charging: boolean;
   grid_emissions_factor_kg_co2e_per_kwh: string;
@@ -98,6 +99,7 @@ const defaultConnectionOptions = (): ConnectionOptionsForm => ({
   dispatch_topology: "shared_hybrid_dc",
   battery_efficiency_basis: "pack_plus_conversion",
   inverter_block_size_kw: "5",
+  inverter_quantity: "",
   site_ac_headroom_kw: "250",
   allow_grid_charging: true,
   grid_emissions_factor_kg_co2e_per_kwh: "",
@@ -204,7 +206,8 @@ export function CiScenarioBuilder({
         : candidateUpperBound > MAX_SOLUTIONS
           ? `Maximum ${MAX_SOLUTIONS} solutions. Current configuration: ${candidateUpperBound}.`
           : null;
-  const generationBlocker = candidateLimitError ?? (!request
+  const quantityError = inverterQuantityError(connection.inverter_quantity);
+  const generationBlocker = candidateLimitError ?? quantityError ?? (!request
     ? "Complete the site resource, published profiles, capacity ranges and connection limits."
     : null);
   const effectiveYield = effectiveSpecificYield(site);
@@ -288,7 +291,7 @@ export function CiScenarioBuilder({
           <div className="grid gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
-            <InverterProfileCard onProfileChange={selectInverterProfile} profile={inverterProfile} profiles={publishedInverter} />
+            <InverterProfileCard onProfileChange={selectInverterProfile} onQuantityChange={(inverter_quantity) => setConnection({ ...connection, inverter_quantity })} profile={inverterProfile} profiles={publishedInverter} quantity={connection.inverter_quantity} separateAc={connection.dispatch_topology === "separate_ac"} />
           </div>
           {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Published Solar, AC Battery and Inverter profiles are required.</p>
@@ -388,16 +391,23 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
   );
 }
 
-function InverterProfileCard({ onProfileChange, profile, profiles }: {
+function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profiles, quantity, separateAc }: {
   onProfileChange: (profileId: string) => void;
+  onQuantityChange: (value: string) => void;
   profile: CiInverterSolutionProfile | null;
   profiles: CiInverterSolutionProfile[];
+  quantity: string;
+  separateAc: boolean;
 }) {
+  const count = quantity.trim() && !inverterQuantityError(quantity) ? Number(quantity) : null;
   return (
     <ProfileCard icon={Cpu} title="Inverter / PCS">
       <SelectField label="Inverter performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      <NumberField label={separateAc ? "Battery PCS quantity" : "Inverter quantity"} min={1} max={10_000} step={1} placeholder="Auto" onChange={onQuantityChange} value={quantity} />
       {profile ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3 xl:grid-cols-2">
+          <ProfileFact label="Power per inverter" value={`${formatNumber(profile.rated_active_power_kw)} kW`} />
+          <ProfileFact label="Apparent power per inverter" value={`${formatNumber(profile.rated_apparent_power_kva)} kVA`} />
           <ProfileFact label="Reactive compensation" value={profile.reactive_support_enabled ? "On" : "Off"} />
           <ProfileFact label="Cap per inverter" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
           <ProfileFact label="Apparent / active ratio" value={formatNumber(profile.rated_apparent_power_kva / profile.rated_active_power_kw)} />
@@ -407,6 +417,14 @@ function InverterProfileCard({ onProfileChange, profile, profiles }: {
           <ProfileFact label="Source" value={profile.source_label} />
         </dl>
       ) : <MissingProfile />}
+      {profile && count !== null ? <div aria-label="Configured inverter totals" className="rounded-lg bg-cyan-50 p-3 text-xs text-cyan-950">
+        <p className="font-semibold tabular-nums">{count} × {formatNumber(profile.rated_active_power_kw)} kW = {formatNumber(count * profile.rated_active_power_kw)} kW</p>
+        <dl className="mt-3 grid grid-cols-2 gap-3">
+          <ProfileFact label="Total apparent power" value={`${formatNumber(count * profile.rated_apparent_power_kva)} kVA`} />
+          <ProfileFact label="Total reactive cap" value={`${formatNumber(profile.reactive_support_enabled ? count * profile.maximum_reactive_power_kvar : 0)} kvar`} />
+        </dl>
+        {separateAc ? <p className="mt-2">Battery PCS total · PV inverter sized separately</p> : null}
+      </div> : !quantity.trim() ? <p className="text-xs text-slate-600">Automatic capacity sizing</p> : null}
     </ProfileCard>
   );
 }
@@ -454,8 +472,8 @@ function OptionGroup({ children, title }: { children: ReactNode; title: string }
   return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>;
 }
 
-function NumberField({ allowBlank = false, min = 0, label, onChange, value }: { allowBlank?: boolean; min?: number; label: string; onChange: (value: string) => void; value: string }) {
-  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min={min} onChange={(event) => onChange(event.target.value)} placeholder={allowBlank ? "Not modelled" : undefined} step="any" type="number" value={value} /></label>;
+function NumberField({ allowBlank = false, min = 0, max, step = "any", placeholder, label, onChange, value }: { allowBlank?: boolean; min?: number; max?: number; step?: number | "any"; placeholder?: string; label: string; onChange: (value: string) => void; value: string }) {
+  return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min={min} max={max} onChange={(event) => onChange(event.target.value)} placeholder={placeholder ?? (allowBlank ? "Not modelled" : undefined)} step={step} type="number" value={value} /></label>;
 }
 
 function TextField({ className = "", label, onChange, value }: { className?: string; label: string; onChange: (value: string) => void; value: string }) {
@@ -510,6 +528,8 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
   const other = parseNumber(site.other_system_loss_percent);
   const availability = parseNumber(site.system_availability_percent);
   const block = parseNumber(connection.inverter_block_size_kw);
+  if (inverterQuantityError(connection.inverter_quantity)) return null;
+  const quantity = connection.inverter_quantity.trim() ? Number(connection.inverter_quantity) : null;
   const headroom = parseNumber(connection.site_ac_headroom_kw);
   const reactiveEnabled = inverterProfile.reactive_support_enabled;
   const reactive = reactiveEnabled ? inverterProfile.maximum_reactive_power_kvar : 0;
@@ -559,6 +579,7 @@ function buildGenerationRequest({ batteryProfile, batteryRange, connection, inve
       dispatch_topology: connection.dispatch_topology,
       battery_efficiency_basis: connection.battery_efficiency_basis,
       inverter_block_size_kw: block,
+      ...(quantity === null ? {} : { inverter_quantity: quantity }),
       site_ac_headroom_kw: headroom,
       allow_grid_charging: true,
       reactive_support_enabled: reactiveEnabled,
@@ -727,10 +748,19 @@ function connectionFormFromTechnical(options: CiDesignContext["technical_options
     dispatch_topology: options.dispatch_topology ?? "shared_hybrid_dc",
     battery_efficiency_basis: options.battery_efficiency_basis ?? "pack_plus_conversion",
     inverter_block_size_kw: formatNumber(options.inverter_block_size_kw),
+    inverter_quantity: options.inverter_quantity == null ? "" : String(options.inverter_quantity),
     site_ac_headroom_kw: formatNumber(options.site_ac_headroom_kw),
     allow_grid_charging: true,
     grid_emissions_factor_kg_co2e_per_kwh: options.grid_emissions_factor_kg_co2e_per_kwh ? formatNumber(options.grid_emissions_factor_kg_co2e_per_kwh) : "",
   };
+}
+
+function inverterQuantityError(value: string): string | null {
+  if (!value.trim()) return null;
+  const quantity = Number(value);
+  return Number.isInteger(quantity) && quantity >= 1 && quantity <= 10_000
+    ? null
+    : "Inverter quantity must be a whole number from 1 to 10,000.";
 }
 
 function publishedId<T extends { profile_id: string }>(preferred: string, profiles: T[]) {

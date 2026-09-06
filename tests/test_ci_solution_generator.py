@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from api import ci_routes
 from api.ci_schemas import CiDesignCandidatesRequest
+from solar_battery.ci_annual_financial_comparison import _profile_inverter_pricing
 from solar_battery.ci_design_context import validate_ci_design_context
 from solar_battery.ci_device_profile import (
     device_profile_sha256,
@@ -366,6 +367,119 @@ def test_python_generator_uses_and_persists_selected_inverter_limits() -> None:
         "reactive_support_enabled"
     ] is True
     assert validate_ci_design_context(result["design_context"]) == result["design_context"]
+
+
+@pytest.mark.parametrize("topology", ["shared_hybrid_dc", "separate_ac"])
+@pytest.mark.parametrize("quantity", [1, 2, 3])
+def test_inverter_quantity_scales_total_limits_pricing_and_restores(
+    topology: str, quantity: int,
+) -> None:
+    request = _request(maximum_pv=100.0, headroom=500.0)
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        dispatch_topology=topology, inverter_quantity=quantity,
+    )
+    result = generate_ci_solutions(
+        request, device_profile=_device_profile(), device_profile_sha256=None,
+    )
+    restored = validate_ci_design_context(result["design_context"])
+    assert restored["technical_options"]["inverter_quantity"] == quantity
+    assert restored["technical_options"]["reactive_support_max_kvar"] == 82.5
+    pricing_profile = {
+        "equipment_catalog": {"inverter_products": [{
+            "product_id": "synthetic-inverter-price",
+            "sizing_unit_kw_ac": 125.0,
+            "cost_curve": [{"capacity_kw_ac": 125.0, "capital_cost_aud": 12_500.0}],
+        }]},
+    }
+    for candidate in result["candidates"]:
+        separate_pv_only = topology == "separate_ac" and candidate["nominal_capacity_kwh"] == 0
+        pcs_capacity = 0.0 if separate_pv_only else quantity * 125.0
+        assert candidate["pv_inverter_capacity_kw_ac"] == pytest.approx(
+            100 / 1.2 if topology == "separate_ac" else pcs_capacity
+        )
+        assert candidate["battery_inverter_capacity_kw_ac"] == (
+            pcs_capacity if topology == "separate_ac" else None
+        )
+        assert candidate["reactive_support_max_kvar"] == pytest.approx(
+            0.0 if separate_pv_only else quantity * 82.5
+        )
+        assert candidate["shared_inverter_apparent_power_limit_kva"] == (
+            None if separate_pv_only else pytest.approx(quantity * 137.5)
+        )
+        # Extra inverters change the port limits, not the battery's own power.
+        assert candidate["max_discharge_kw"] == candidate["nominal_capacity_kwh"] / 2
+        pricing = _profile_inverter_pricing(
+            candidate, profile=pricing_profile,
+            equipment_selection={"inverter_product_id": "synthetic-inverter-price"},
+        )
+        expected_cost = pcs_capacity * 100
+        if topology == "separate_ac":
+            expected_cost += round(100 / 1.2 * 100, 2)
+        assert pricing["total_inverter_aud_ex_gst"] == pytest.approx(expected_cost)
+
+
+def test_separate_ac_pv_only_ignores_uninstalled_fixed_battery_pcs() -> None:
+    request = _request(maximum_pv=100.0, headroom=200.0)
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        dispatch_topology="separate_ac", inverter_quantity=2,
+    )
+    result = generate_ci_solutions(
+        request, device_profile=_device_profile(), device_profile_sha256=None,
+    )
+    assert len(result["candidates"]) == 1
+    candidate = result["candidates"][0]
+    assert candidate["nominal_capacity_kwh"] == 0
+    assert candidate["pv_inverter_capacity_kw_ac"] == pytest.approx(100 / 1.2)
+    assert candidate["battery_inverter_capacity_kw_ac"] == 0
+    assert candidate["reactive_support_enabled"] is False
+    assert candidate["reactive_support_max_kvar"] == 0
+    assert candidate["shared_inverter_apparent_power_limit_kva"] is None
+    summary = result["design_context"]["generation_summary"]
+    assert summary["rejected_count"] == 2
+    assert summary["rejection_reasons"] == [{"code": "inverter_capacity_outside_limits", "count": 2}]
+    assert validate_ci_design_context(result["design_context"]) == result["design_context"]
+
+
+@pytest.mark.parametrize("topology,pv", [
+    ("shared_hybrid_dc", 100.0),
+    ("separate_ac", 250.0),
+])
+def test_fixed_quantity_keeps_actual_installed_inverter_site_limits(
+    topology: str, pv: float,
+) -> None:
+    request = _request(maximum_pv=pv, headroom=200.0)
+    request["pv_range"]["minimum_kwp_dc"] = pv
+    request["battery_range"]["maximum_kwh"] = 0
+    request["inverter_profile_id"] = "inverter-125"
+    request["connection_options"].update(
+        dispatch_topology=topology, inverter_quantity=2,
+    )
+    with pytest.raises(CiProjectError, match="one to 200 screening candidates"):
+        generate_ci_solutions(
+            request, device_profile=_device_profile(), device_profile_sha256=None,
+        )
+
+
+def test_design_context_null_inverter_quantity_is_automatic_sizing() -> None:
+    result = generate_ci_solutions(
+        _request(), device_profile=_device_profile(), device_profile_sha256=None,
+    )
+    context = copy.deepcopy(result["design_context"])
+    context["technical_options"]["inverter_quantity"] = None
+    assert validate_ci_design_context(context) == result["design_context"]
+
+
+@pytest.mark.parametrize("quantity", [0, -1, 1.5, True, 10_001, "2"])
+def test_design_context_rejects_invalid_explicit_inverter_quantities(quantity) -> None:
+    result = generate_ci_solutions(
+        _request(), device_profile=_device_profile(), device_profile_sha256=None,
+    )
+    context = copy.deepcopy(result["design_context"])
+    context["technical_options"]["inverter_quantity"] = quantity
+    with pytest.raises(CiProjectError, match="context is inconsistent"):
+        validate_ci_design_context(context)
 
 
 def test_python_generator_scales_profile_reactive_cap_without_legacy_override() -> None:
