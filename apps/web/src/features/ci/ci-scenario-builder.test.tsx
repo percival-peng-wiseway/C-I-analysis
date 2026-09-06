@@ -8,10 +8,87 @@ import type { CiDeviceProfile } from "./api/ci-device-profile";
 import type { CiDesignContextV2 } from "./api/ci-projects";
 import type { CiScenarioInput } from "./api/ci-scenarios";
 import { CiScenarioBuilder } from "./ci-scenario-builder";
+import type { CiSolarResource } from "./api/ci-solar-resource";
 
 afterEach(cleanup);
 
 describe("CiScenarioBuilder", () => {
+  it("uses 1000 as fallback and applies PVGIS without multiplying or double temperature loss", async () => {
+    const onSubmit = vi.fn();
+    const resource: CiSolarResource = {
+      version: "ci_solar_resource_v1", status: "ready", message: "Climate-based estimate",
+      address: "Example", matched_address: "Example, Australia", queried_at: "2026-09-06T00:00:00Z",
+      annual_specific_yield_kwh_per_kw: 1440, tilt_degrees: 20, azimuth_degrees: 0,
+      latitude: -37.8, longitude: 144.9, monthly_kwh_per_kwp: Array(12).fill(120),
+      source: "PVGIS 5.3 / ERA5", customer_facing_permission: false,
+    };
+    const first = render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1000");
+    first.unmount();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} solarResource={resource} siteAddress="Example" projectId="example-project" />);
+    expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1440");
+    expect(screen.getByLabelText("Temperature loss (%)")).toHaveProperty("value", "0");
+    const save = screen.getByRole("button", { name: "Save configuration & generate solutions" });
+    expect(save).toHaveProperty("disabled", true);
+    await userEvent.click(screen.getByLabelText("Coordinates confirmed"));
+    await userEvent.click(save);
+    expect(onSubmit.mock.calls[0][0].site_factors).toMatchObject({ annual_specific_yield_kwh_per_kw: 1440, temperature_loss_percent: 0 });
+    fireEvent.change(screen.getByLabelText("Array tilt (°)"), { target: { value: "30" } });
+    expect(save).toHaveProperty("disabled", true);
+    expect(screen.getByRole("status").textContent).toContain("Refresh PVGIS");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ...resource, tilt_degrees: 30 })));
+    try {
+      await userEvent.click(screen.getByRole("button", { name: "Refresh & apply PVGIS" }));
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+      expect(JSON.parse(String(fetchSpy.mock.calls[0][1]?.body))).toEqual({ tilt_degrees: 30, azimuth_degrees: 0 });
+      await userEvent.click(screen.getByLabelText("Coordinates confirmed"));
+      expect(save).toHaveProperty("disabled", false);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ ...resource, status: "service_unavailable", tilt_degrees: 30, annual_specific_yield_kwh_per_kw: 1000 })));
+      await userEvent.click(screen.getByRole("button", { name: "Refresh & apply PVGIS" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Refresh & apply PVGIS" })).toHaveProperty("disabled", false));
+      expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1440");
+      expect(save).toHaveProperty("disabled", true);
+    } finally { fetchSpy.mockRestore(); }
+  });
+
+  it("identifies invalid environmental values even after their section is collapsed", async () => {
+    const onSubmit = vi.fn();
+    const user = userEvent.setup();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    const summary = screen.getByText("Environmental assumptions");
+    await user.click(summary);
+    const factor = screen.getByLabelText("Grid emissions factor (kg CO2-e/kWh)");
+    await user.type(factor, "6");
+    await user.click(summary);
+    expect(summary.closest("details")?.open).toBe(false);
+    expect(screen.getByRole("status").textContent).toContain("Grid emissions factor must be between 0 and 5");
+    expect(screen.getByRole("button", { name: "Save configuration & generate solutions" })).toHaveProperty("disabled", true);
+    await user.click(summary);
+    await user.clear(factor);
+    expect(screen.queryByText(/Grid emissions factor must/)).toBeNull();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps capacity controls visible while performance details open without generating solutions", async () => {
+    const onSubmit = vi.fn();
+    render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);
+    const user = userEvent.setup();
+
+    expect(screen.getByLabelText("Configured candidate ranges").textContent).toBe("5 PV × 6 battery candidates");
+    expect(screen.getAllByRole("spinbutton", { name: "Minimum" })).toHaveLength(2);
+    expect(screen.getByRole("spinbutton", { name: "Inverter quantity" })).toBeTruthy();
+    for (const label of ["Solar performance details", "Battery performance details", "Inverter performance details"]) {
+      const summary = screen.getByText(label);
+      expect(summary.closest("details")?.open).toBe(false);
+      await user.click(summary);
+      expect(summary.closest("details")?.open).toBe(true);
+    }
+    expect(onSubmit).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0].connection_options.allow_grid_charging).toBe(true);
+  });
+
   it("requires confirmed coordinates for geometry timing and submits independent topology and RTE basis", async () => {
     const onSubmit = vi.fn();
     render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} />);

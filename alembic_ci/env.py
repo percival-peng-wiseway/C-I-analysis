@@ -11,7 +11,8 @@ from solar_battery.durable_cockpit.orm import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Migrations can run in-process; keep API/analysis loggers observable.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 config.set_main_option(
     "sqlalchemy.url",

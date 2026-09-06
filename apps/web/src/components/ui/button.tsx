@@ -6,9 +6,9 @@ type ButtonVariant = "default" | "secondary" | "outline" | "ghost";
 type ButtonSize = "default" | "sm" | "lg" | "icon";
 
 const variants: Record<ButtonVariant, string> = {
-  default: "border border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90",
+  default: "rounded-full border border-primary bg-primary text-primary-foreground hover:bg-brand-700 hover:border-brand-700",
   secondary: "border border-transparent bg-muted text-foreground hover:bg-muted/75",
-  outline: "border border-border bg-background text-foreground shadow-sm hover:border-slate-300 hover:bg-surface-subtle",
+  outline: "border border-border bg-white text-foreground hover:border-slate-300 hover:bg-surface-subtle",
   ghost: "border border-transparent text-foreground hover:bg-muted",
 };
 

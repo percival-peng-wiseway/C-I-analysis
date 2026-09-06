@@ -93,15 +93,22 @@ export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { pro
   };
 
   return (
-    <section aria-labelledby="rebate-profile-title">
-      <h4 className="mb-3 font-semibold text-slate-950" id="rebate-profile-title" tabIndex={-1}>STC</h4>
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <header className="flex justify-end border-b border-slate-200 px-5 py-3 sm:px-6">
-        <StatusBadge dirty={isDirty} enabledCount={enabledCount} status={state.data.status} />
+    <section aria-labelledby="rebate-profile-title" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-3"><h4 className="text-sm font-semibold text-slate-950" id="rebate-profile-title" tabIndex={-1}>STC</h4><StatusBadge dirty={isDirty} enabledCount={enabledCount} status={state.data.status} /></div>
+          <Button
+            disabled={save.isPending || invalidPrice || !needsSave}
+            onClick={() => save.mutate({ settings: draft, targetProjectId: projectId })}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Save className="size-3.5" />{save.isPending ? "Saving…" : "Save STC settings"}
+          </Button>
         </header>
 
-        <div className="space-y-5 p-5 sm:p-6">
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="space-y-3 p-4">
+        <div className="grid gap-3 lg:grid-cols-2">
           <StcCard
             checked={draft.solarStcEnabled}
             label="Solar STCs"
@@ -123,29 +130,19 @@ export const CiRebateProfilePanel = forwardRef<CiRebateProfilePanelHandle, { pro
         {save.error instanceof Error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{save.error.message}</p> : null}
         {save.isSuccess && !needsSave ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />Saved</p> : null}
 
-        <div className="flex justify-end border-t border-slate-200 pt-5">
-          <Button
-            disabled={save.isPending || invalidPrice || !needsSave}
-            onClick={() => save.mutate({ settings: draft, targetProjectId: projectId })}
-            type="button"
-          >
-            <Save className="size-4" />{save.isPending ? "Saving…" : "Save STC settings"}
-          </Button>
         </div>
-        </div>
-      </div>
     </section>
   );
 });
 
 function StcCard({ checked, label, onChecked, onPrice, price }: { checked: boolean; label: string; onChecked: (checked: boolean) => void; onPrice: (price: number) => void; price: number }) {
   return (
-    <section aria-label={`${label} settings`} className={`rounded-xl border p-4 ${checked ? "border-emerald-200 bg-emerald-50/35" : "border-slate-200 bg-slate-50/60"}`}>
+    <section aria-label={`${label} settings`} className={`rounded-lg border p-3.5 ${checked ? "border-cyan-200 bg-cyan-50/35" : "border-slate-200 bg-slate-50/40"}`}>
       <label className="flex items-center justify-between gap-3 text-sm font-semibold text-slate-900">
         <span>Include {label}</span>
         <span className="inline-flex items-center gap-2 text-xs text-slate-600"><input aria-label={`Include ${label}`} checked={checked} className="size-4" onChange={(event) => onChecked(event.target.checked)} type="checkbox" />{checked ? "Yes" : "No"}</span>
       </label>
-      <label className="mt-4 grid gap-1 text-xs font-medium text-slate-600">
+      <label className="mt-3 grid gap-1 text-xs font-medium text-slate-600">
         <span>{label} price (AUD ex GST / certificate)</span>
         <span className="relative"><span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span><input aria-label={`${label} price`} className={`${inputClass} w-full pl-7`} min="0.01" onChange={(event) => onPrice(Number(event.target.value))} onKeyDown={preventParentFormSubmit} step="0.01" type="number" value={price} /></span>
       </label>
@@ -159,7 +156,7 @@ function BlockerList({ blockers }: { blockers: CiProjectRebateProfileState["bloc
 
 function StatusBadge({ dirty, enabledCount, status }: { dirty: boolean; enabledCount: number; status: CiProjectRebateProfileState["status"] }) {
   const label = dirty ? "Unsaved changes" : enabledCount === 0 ? "No STCs included" : status === "approved" ? "Saved for pricing" : status === "stale" ? "Re-save required" : "Not applied";
-  return <span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${dirty ? "bg-cyan-100 text-cyan-900" : status === "approved" ? "bg-emerald-100 text-emerald-800" : status === "stale" ? "bg-amber-100 text-amber-900" : "bg-slate-100 text-slate-600"}`}>{label}</span>;
+  return <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${dirty ? "bg-cyan-100 text-cyan-900" : status === "approved" ? "bg-emerald-100 text-emerald-800" : status === "stale" ? "bg-amber-100 text-amber-900" : "bg-slate-100 text-slate-600"}`}>{label}</span>;
 }
 
 function settingsFromProfile(profile: CiProjectRebateProfile): CiProjectStcSettings {

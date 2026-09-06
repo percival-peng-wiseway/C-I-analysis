@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { addCiCustomDesignCandidate, createCiProject, fetchCiSavedDesign, generateCiDesignCandidates, listCiProjects, validateCiDesignCandidates, type CiDesignContext, type CiSolutionGenerationRequest } from "./ci-projects";
+import { addCiCustomDesignCandidate, createCiProject, deleteCiProject, restoreCiProject, fetchCiSavedDesign, generateCiDesignCandidates, listCiProjects, validateCiDesignCandidates, type CiDesignContext, type CiSolutionGenerationRequest } from "./ci-projects";
 import type { CiScenarioInput } from "./ci-scenarios";
 
 const project = {
@@ -10,6 +10,20 @@ const project = {
 };
 
 describe("C&I project API", () => {
+  it("uses validated deletion and restore contracts and requests the trash separately", async () => {
+    const deleted = vi.fn().mockResolvedValue(new Response(JSON.stringify({ contract_version: "ci_project_deletion_v1", project_id: "project-1", status: "trashed" })));
+    await expect(deleteCiProject("project-1", deleted)).resolves.toBeUndefined();
+    expect(deleted).toHaveBeenCalledWith("/api/commercial-industrial/projects/project-1", expect.objectContaining({ method: "DELETE" }));
+    const restored = vi.fn().mockResolvedValue(new Response(JSON.stringify({ contract_version: "ci_project_v1", ...project })));
+    await expect(restoreCiProject("project-1", restored)).resolves.toMatchObject(project);
+    expect(restored).toHaveBeenCalledWith("/api/commercial-industrial/projects/project-1/restore", expect.objectContaining({ method: "POST" }));
+    const trash = vi.fn().mockResolvedValue(new Response(JSON.stringify({ contract_version: "ci_project_registry_v1", projects: [] })));
+    await listCiProjects(trash, true);
+    expect(trash).toHaveBeenCalledWith("/api/commercial-industrial/projects?deleted_only=true", expect.anything());
+    await expect(deleteCiProject("project-1", vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "ok" }))))).rejects.toThrow("unexpected contract");
+    await expect(restoreCiProject("project-1", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Not found" }), { status: 404 })))).rejects.toThrow("Not found");
+  });
+
   it("lists and creates project records", async () => {
     const listFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ contract_version: "ci_project_registry_v1", projects: [project] }), { status: 200 }));
     await expect(listCiProjects(listFetch)).resolves.toEqual([project]);

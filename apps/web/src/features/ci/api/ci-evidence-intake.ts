@@ -1,4 +1,7 @@
+import type { CiSolarResource } from "./ci-solar-resource";
+
 export interface CiEvidenceIntakeResult {
+  solar_resource?: CiSolarResource;
   contract_version: "ci_evidence_intake_v7" | "ci_evidence_intake_v8" | "ci_evidence_intake_v9" | "ci_evidence_intake_v10";
   intake_status: "ready_for_profile_review" | "action_required";
   bill: {

@@ -271,7 +271,7 @@ function ScenarioValueMap({ result }: { result: CiPhysicalScenarioResult }) {
           </svg>
         </div>
         <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-500">
-          <span className="flex items-center gap-2"><span className="size-2.5 rounded-full bg-cyan-500" />Physical ranks 1–3</span>
+          <span className="flex items-center gap-2"><span className="size-2.5 rounded-full bg-[#06b6d4]" />Physical ranks 1–3</span>
           <span className="flex items-center gap-2"><span className="size-2.5 rounded-full bg-violet-500" />Other returned scenarios</span>
         </div>
       </CardContent>

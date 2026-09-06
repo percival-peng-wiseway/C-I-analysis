@@ -202,10 +202,11 @@ export interface CiCustomDesignCandidateResult extends CiDesignCandidateResult {
 }
 
 export const ciProjectsQueryKey = ["ci-projects"] as const;
+export const ciDeletedProjectsQueryKey = ["ci-deleted-projects"] as const;
 export const ciSavedDesignQueryKey = (projectId: string) => ["ci-saved-design", projectId] as const;
 
-export async function listCiProjects(fetcher: typeof fetch = fetch): Promise<CiProject[]> {
-  const response = await fetcher("/api/commercial-industrial/projects", {
+export async function listCiProjects(fetcher: typeof fetch = fetch, deletedOnly = false): Promise<CiProject[]> {
+  const response = await fetcher(`/api/commercial-industrial/projects${deletedOnly ? "?deleted_only=true" : ""}`, {
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new Error(`Project list failed with status ${response.status}.`);
@@ -243,6 +244,29 @@ export async function validateCiDesignCandidates(
   });
   if (!response.ok) throw new Error(await errorMessage(response, "Design validation failed."));
   return assertCiDesignCandidateResult(await response.json());
+}
+
+export async function deleteCiProject(projectId: string, fetcher: typeof fetch = fetch): Promise<void> {
+  const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE", headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, "Project could not be deleted."));
+  const payload = await response.json();
+  if (payload.contract_version !== "ci_project_deletion_v1" || payload.project_id !== projectId || payload.status !== "trashed") {
+    throw new Error("Project deletion returned an unexpected contract.");
+  }
+}
+
+export async function restoreCiProject(projectId: string, fetcher: typeof fetch = fetch): Promise<CiProject> {
+  const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/restore`, {
+    method: "POST", headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, "Project could not be restored."));
+  const payload = await response.json();
+  if (payload.contract_version !== "ci_project_v1" || payload.project_id !== projectId || !payload.display_name) {
+    throw new Error("Project restore returned an unexpected contract.");
+  }
+  return payload;
 }
 
 export async function generateCiDesignCandidates(

@@ -8,6 +8,7 @@ interface Env {
   E3_API: DurableObjectNamespace<E3ApiContainer>;
   E3_OBJECTS: R2Bucket;
   DATABASE_URL: string;
+  GEOAPIFY_API_KEY?: string;
   DURABLE_API_BEARER_TOKEN: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
@@ -178,6 +179,7 @@ export class E3ApiContainer extends Container<Env> {
       sleepAfter: "2h",
       envVars: {
         DATABASE_URL: env.DATABASE_URL,
+        GEOAPIFY_API_KEY: env.GEOAPIFY_API_KEY ?? "",
         OBJECT_STORE_BACKEND: "http",
         OBJECT_STORE_HTTP_BASE_URL: "http://e3-r2.internal",
         DURABLE_API_AUTH_MODE: "restricted",

@@ -13,6 +13,7 @@ interface CiWorkspaceState {
   stage: CiWorkspaceStage;
   openProjectStage: (project: NonNullable<ActiveProject>, stage?: CiWorkspaceStage) => void;
   setStage: (stage: CiWorkspaceStage) => void;
+  clearProject: () => void;
 }
 
 const CiWorkspaceContext = createContext<CiWorkspaceState | null>(null);
@@ -25,6 +26,11 @@ export function CiWorkspaceProvider({ children }: { children: ReactNode }) {
   const value = useMemo<CiWorkspaceState>(() => ({
     activeProject,
     stage,
+    clearProject: () => {
+      setActiveProject(null);
+      setStageState("evidence");
+      try { window.sessionStorage.removeItem(WORKSPACE_STORAGE_KEY); } catch { /* Storage is optional. */ }
+    },
     openProjectStage: (project, nextStage = "evidence") => {
       setActiveProject(project);
       setStageState(nextStage);

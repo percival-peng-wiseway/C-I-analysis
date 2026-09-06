@@ -48,6 +48,8 @@ class CiProjectModel(Base):
     workspace_id: Mapped[str] = mapped_column(String(120), nullable=False)
     owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by_actor_id: Mapped[str | None] = mapped_column(String(120))
     current_stage: Mapped[str] = mapped_column(
         String(32), nullable=False, default="setup"
     )

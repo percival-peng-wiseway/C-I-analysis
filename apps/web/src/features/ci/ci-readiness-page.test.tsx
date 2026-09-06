@@ -277,6 +277,7 @@ describe("C&I project workspace", () => {
     const fetchMock = mockApi();
     renderPage();
     expect(await screen.findByRole("region", { name: "Evidence sources" })).toBeTruthy();
+    await userEvent.setup().click(screen.getByLabelText("Switch project"));
     expect(screen.getByRole("button", { name: "Open project Commercial feasibility" })).toBeTruthy();
     expect(screen.getByRole("complementary", { name: "Project workspace" }).className).toContain("lg:sticky");
     expect(screen.getAllByRole("button", { name: "New project" }).length).toBeGreaterThan(0);
@@ -384,6 +385,7 @@ describe("C&I project workspace", () => {
     await user.type(firstPvMinimum, "321");
     expect(firstPvMinimum.value).toBe("321");
 
+    await user.click(screen.getByLabelText("Switch project"));
     await user.click(screen.getByRole("button", { name: "Open project Warehouse two" }));
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
     expect((screen.getAllByRole("spinbutton", { name: "Minimum" })[0] as HTMLInputElement).value).toBe("100");
@@ -521,7 +523,10 @@ describe("C&I project workspace", () => {
     expect(screen.getByText("2 / 2 selected")).toBeTruthy();
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 1") as HTMLInputElement).value).toBe("90000");
     expect((screen.getByLabelText("Quoted Net CAPEX for Solution 2") as HTMLInputElement).value).toBe("100000");
+    expect((screen.getByLabelText("Select all solutions") as HTMLInputElement).indeterminate).toBe(false);
+    expect(screen.getByRole("button", { name: "Clear selection" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Add custom solution" }));
+    expect(screen.getByRole("button", { name: "Add custom solution" }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("heading", { name: "Custom solution & quotation" })).toBeTruthy();
     expect(screen.getByLabelText("Custom solution name")).toBeTruthy();
     expect(screen.getByLabelText("PV capacity")).toBeTruthy();
@@ -554,12 +559,23 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("button", { name: "Analysis" }).hasAttribute("disabled")).toBe(false);
     await user.click(screen.getByLabelText("Select Solution 2"));
     expect(screen.getByText("2 / 3 selected")).toBeTruthy();
+    expect((screen.getByLabelText("Select all solutions") as HTMLInputElement).indeterminate).toBe(true);
+    expect(screen.getByRole("button", { name: /^Select all$/ })).toBeTruthy();
     await user.click(screen.getByLabelText("Select all solutions"));
     expect(screen.getByText("3 / 3 selected")).toBeTruthy();
+    expect((screen.getByLabelText("Select all solutions") as HTMLInputElement).indeterminate).toBe(false);
     await user.click(screen.getByLabelText("Select all solutions"));
     expect(screen.getByText("0 / 3 selected")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Analysis" }).hasAttribute("disabled")).toBe(true);
     await user.click(screen.getByLabelText("Select all solutions"));
+    expect(screen.getByText("3 / 3 selected")).toBeTruthy();
+    await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 1"));
+    expect(screen.getByLabelText("Quoted Net CAPEX for Solution 1").getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByRole("button", { name: "Analysis" }).hasAttribute("disabled")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.getByText("0 / 3 selected")).toBeTruthy();
+    expect(screen.getByLabelText("Quoted Net CAPEX for Solution 1").getAttribute("aria-invalid")).toBeNull();
+    await user.click(screen.getByRole("button", { name: /^Select all$/ }));
     expect(screen.getByText("3 / 3 selected")).toBeTruthy();
   });
 

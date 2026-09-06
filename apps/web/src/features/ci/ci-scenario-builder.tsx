@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BatteryCharging,
+  ChevronDown,
   Cpu,
   ExternalLink,
   MapPin,
@@ -21,6 +22,7 @@ import type {
   CiSolutionGenerationRequest,
 } from "@/features/ci/api/ci-projects";
 import type { CiScenarioInput } from "@/features/ci/api/ci-scenarios";
+import { refreshCiSolarResource, type CiSolarResource } from "@/features/ci/api/ci-solar-resource";
 
 type NumericRange = { minimum: string; maximum: string; step: string };
 type CompleteBatterySolutionProfile = CiBatterySolutionProfile & {
@@ -85,7 +87,7 @@ const defaultSiteFactors = (): SiteFactorsForm => ({
   location_confirmed: false,
   resource_source: "analyst_assumption",
   resource_label: "Workspace screening assumption",
-  annual_specific_yield_kwh_per_kw: "1500",
+  annual_specific_yield_kwh_per_kw: "1000",
   array_azimuth_degrees: "0",
   array_tilt_degrees: "20",
   shading_loss_percent: "3",
@@ -95,6 +97,24 @@ const defaultSiteFactors = (): SiteFactorsForm => ({
   other_system_loss_percent: "0",
   system_availability_percent: "99",
 });
+function applySolarResource(site: SiteFactorsForm, resource: CiSolarResource): SiteFactorsForm {
+  return {
+    ...site,
+    pv_timing_model: "solar_geometry_screening_v1",
+    latitude_degrees: String(resource.latitude),
+    longitude_degrees: String(resource.longitude),
+    location_source_label: `Geoapify building match: ${resource.matched_address}`.slice(0, 240),
+    location_confirmed: false,
+    resource_source: "imported_resource_study",
+    resource_label: `${resource.source}; ${resource.queried_at.slice(0, 10)}; 1 kWp; loss=0; free-mounted crystalline silicon`,
+    annual_specific_yield_kwh_per_kw: String(resource.annual_specific_yield_kwh_per_kw),
+    array_tilt_degrees: String(resource.tilt_degrees),
+    array_azimuth_degrees: String(resource.azimuth_degrees),
+    // PVGIS already includes temperature losses even when its system loss is zero.
+    temperature_loss_percent: "0",
+  };
+}
+
 const defaultConnectionOptions = (): ConnectionOptionsForm => ({
   dispatch_topology: "shared_hybrid_dc",
   battery_efficiency_basis: "pack_plus_conversion",
@@ -113,6 +133,9 @@ export function CiScenarioBuilder({
   isPending,
   onSubmit,
   siteAddress,
+  projectId,
+  solarResource,
+  onSolarResourceUpdated,
   stcSettings,
 }: {
   deviceProfile: CiDeviceProfile;
@@ -122,6 +145,9 @@ export function CiScenarioBuilder({
   isPending: boolean;
   onSubmit: (request: CiSolutionGenerationRequest) => void;
   siteAddress?: string | null;
+  projectId?: string;
+  solarResource?: CiSolarResource;
+  onSolarResourceUpdated?: () => void;
   stcSettings?: ReactNode;
 }) {
   const publishedSolar = useMemo(
@@ -145,7 +171,29 @@ export function CiScenarioBuilder({
   );
   const [pvRange, setPvRange] = useState(restored.pvRange);
   const [batteryRange, setBatteryRange] = useState(restored.batteryRange);
-  const [site, setSite] = useState(restored.site);
+  const [site, setSite] = useState(() => !initialContext && solarResource?.status === "ready"
+    ? applySolarResource(restored.site, solarResource) : restored.site);
+  const [resource, setResource] = useState(solarResource);
+  const [resourcePending, setResourcePending] = useState(false);
+  const [resourceError, setResourceError] = useState<string | null>(null);
+  const resourceStale = site.resource_label.startsWith("PVGIS 5.3 / ERA5") && (!resource || resource.status !== "ready" ||
+    resource.address !== siteAddress || resource.tilt_degrees !== Number(site.array_tilt_degrees) ||
+    resource.azimuth_degrees !== Number(site.array_azimuth_degrees) % 360 ||
+    resource.annual_specific_yield_kwh_per_kw !== Number(site.annual_specific_yield_kwh_per_kw) || Number(site.temperature_loss_percent) !== 0 ||
+    resource.latitude !== Number(site.latitude_degrees) || resource.longitude !== Number(site.longitude_degrees));
+  const refreshResource = async () => {
+    if (!projectId) return;
+    setResourcePending(true);
+    setResourceError(null);
+    try {
+      const next = await refreshCiSolarResource(projectId, Number(site.array_tilt_degrees), Number(site.array_azimuth_degrees));
+      setResource(next);
+      onSolarResourceUpdated?.();
+      if (next.status === "ready") setSite((current) => Number(current.array_tilt_degrees) === next.tilt_degrees && Number(current.array_azimuth_degrees) % 360 === next.azimuth_degrees ? applySolarResource(current, next) : current);
+    } catch (error) {
+      setResourceError(error instanceof Error ? error.message : "Solar lookup failed.");
+    } finally { setResourcePending(false); }
+  };
   const initialInverterProfile = publishedInverter.find((profile) => profile.profile_id === restored.inverterProfileId) ?? publishedInverter[0] ?? null;
   const [connection, setConnection] = useState(() => restored.inverterProfileId || !initialInverterProfile ? restored.connection : {
     ...restored.connection,
@@ -207,7 +255,11 @@ export function CiScenarioBuilder({
           ? `Maximum ${MAX_SOLUTIONS} solutions. Current configuration: ${candidateUpperBound}.`
           : null;
   const quantityError = inverterQuantityError(connection.inverter_quantity);
-  const generationBlocker = candidateLimitError ?? quantityError ?? (!request
+  const emissionsValue = connection.grid_emissions_factor_kg_co2e_per_kwh.trim();
+  const emissionsError = emissionsValue && !between(parseNumber(emissionsValue), 0, 5)
+    ? "Grid emissions factor must be between 0 and 5 kg CO2-e/kWh, or blank. Check Environmental assumptions."
+    : null;
+  const generationBlocker = (resourcePending ? "Solar resource lookup in progress." : resourceStale ? "Location or orientation changed. Refresh PVGIS before generating, or choose an explicitly labelled manual assumption." : null) ?? candidateLimitError ?? quantityError ?? emissionsError ?? (!request
     ? "Complete the site resource, published profiles, capacity ranges and connection limits."
     : null);
   const effectiveYield = effectiveSpecificYield(site);
@@ -223,31 +275,49 @@ export function CiScenarioBuilder({
   };
 
   return (
-    <section aria-labelledby="search-space-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
-      <h2 className="text-xl font-semibold text-slate-950" id="search-space-title">Configure solutions</h2>
+    <section aria-labelledby="search-space-title" className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
+        <h2 className="text-xl font-semibold tracking-tight text-slate-950" id="search-space-title">Configure solutions</h2>
+        <span aria-label="Configured candidate ranges" className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium tabular-nums text-slate-600">{pvCandidateCount} PV × {batteryCandidateCount} battery candidates</span>
+      </header>
 
       <form
         aria-busy={isPending}
-        className="mt-7 space-y-8"
+        className="space-y-6 p-5 sm:p-6"
         onSubmit={(event) => {
           event.preventDefault();
-          if (request && !candidateLimitError) onSubmit(request);
+          if (request && !generationBlocker) onSubmit(request);
         }}
       >
         <WorkflowSection title="Location & solar resource">
-          <div className="grid gap-4 xl:grid-cols-[minmax(260px,.8fr)_minmax(0,2.2fr)]">
+          <div className="space-y-3">
             <LocationCard address={siteAddress} />
-            <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+            <div className="rounded-xl border border-cyan-200 bg-cyan-50/40 p-4 text-sm" aria-live="polite">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h4 className="font-semibold">{resource?.status === "ready" ? "PVGIS solar resource" : "Solar resource · 1000 kWh/kWp default"}</h4>
+                {projectId ? <Button type="button" variant="outline" disabled={resourcePending || isPending || !siteAddress} onClick={() => { void refreshResource(); }}>{resourcePending ? "Looking up location & PVGIS…" : "Refresh & apply PVGIS"}</Button> : null}
+              </div>
+              <p className="mt-2">{resource?.message ?? "Upload a bill to automatically look up its site address and solar resource. No lookup result: 1000 kWh/kWp screening assumption."}</p>
+              {resourceError ? <p className="mt-2 text-red-800" role="alert">{resourceError}</p> : null}
+              {resource?.status === "ready" ? <>
+                <p className="mt-2 font-medium">{resource.annual_specific_yield_kwh_per_kw.toFixed(1)} kWh/kWp/year · {resource.tilt_degrees}° tilt · {resource.azimuth_degrees}° azimuth</p>
+                <p className="mt-1 text-xs">{resource.matched_address} · {resource.latitude}, {resource.longitude} · Retrieved {resource.queried_at.slice(0, 10)}</p>
+                <details className="mt-3"><summary className="cursor-pointer">Monthly generation per 1 kWp</summary><div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{resource.monthly_kwh_per_kwp.map((value, index) => <div className="rounded border bg-white p-2 text-xs" key={index}>{["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][index]}<strong className="block">{value.toFixed(1)} kWh</strong></div>)}</div></details>
+                <p className="mt-2 text-xs">PVGIS replaces the 1000 default; it does not multiply it. Model includes temperature and terrain horizon, not nearby trees or buildings. Existing saved designs are unchanged until you apply and regenerate.</p>
+              </> : null}
+              <p className="mt-2 text-xs">Address geocoding: <a href="https://www.geoapify.com/" target="_blank" rel="noreferrer" className="underline">Geoapify</a> / <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline">OpenStreetMap</a>. Solar model: <a href="https://re.jrc.ec.europa.eu/pvg_tools/en/" target="_blank" rel="noreferrer" className="underline">European Commission JRC PVGIS</a>. Only the address is sent to Geoapify; PVGIS receives coordinates and system assumptions.</p>
+            </div>
+            <section className="rounded-xl border border-slate-200 bg-slate-50/40 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h4 className="font-semibold text-slate-950">Site performance factors</h4>
                 </div>
-                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">Source required</span>
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">{site.resource_source === "analyst_assumption" ? "Analyst assumption" : site.resource_source === "site_assessment" ? "Site assessment" : "Imported resource study"}</span>
               </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <SelectField
                   label="Resource source"
-                  onChange={(resource_source) => setSite({ ...site, resource_source: resource_source as SiteFactorsForm["resource_source"] })}
+                  onChange={(resource_source) => setSite({ ...site, resource_source: resource_source as SiteFactorsForm["resource_source"], ...(resource_source === "analyst_assumption" ? { resource_label: "Manual screening assumption" } : {}) })}
                   options={[
                     ["analyst_assumption", "Analyst assumption"],
                     ["site_assessment", "Site assessment"],
@@ -265,11 +335,11 @@ export function CiScenarioBuilder({
                   <NumberField min={-180} label="Longitude (°)" value={site.longitude_degrees} onChange={(longitude_degrees) => setSite({ ...site, longitude_degrees, location_confirmed: false })} />
                   <TextField label="Coordinate source" value={site.location_source_label} onChange={(location_source_label) => setSite({ ...site, location_source_label })} />
                   <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={site.location_confirmed} onChange={(event) => setSite({ ...site, location_confirmed: event.target.checked })} />Coordinates confirmed</label>
-                  <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Geometry-only screening, not measured or weather-based PV. Annual yield remains the entered assumption.</p>
+                  <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Interval timing uses solar geometry, not hourly weather. Annual yield uses the selected resource above; PVGIS monthly values are reference values, not an hourly time series.</p>
                 </> : <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Legacy timing does not use location, tilt or azimuth.</p>}
               </div>
               <details className="mt-4 rounded-lg border border-slate-200 bg-white">
-                <summary className="cursor-pointer list-none px-3 py-2.5 text-xs font-semibold text-slate-700">Site losses & availability</summary>
+                <summary className="cursor-pointer px-3 py-2.5 text-xs font-semibold text-slate-700">Site losses & availability</summary>
                 <div className="grid gap-3 border-t border-slate-200 p-3 sm:grid-cols-2 lg:grid-cols-3">
                   <NumberField label="Shading loss (%)" onChange={(shading_loss_percent) => setSite({ ...site, shading_loss_percent })} value={site.shading_loss_percent} />
                   <NumberField label="Soiling loss (%)" onChange={(soiling_loss_percent) => setSite({ ...site, soiling_loss_percent })} value={site.soiling_loss_percent} />
@@ -288,7 +358,7 @@ export function CiScenarioBuilder({
         </WorkflowSection>
 
         <WorkflowSection title="Setup Solar, Battery, Inverter & STC">
-          <div className="grid gap-4 xl:grid-cols-3">
+          <div className="grid items-start gap-4 xl:grid-cols-3">
             <SolarProfileCard onProfileChange={setSolarProfileId} onRangeChange={setPvRange} profile={solarProfile} profiles={publishedSolar} range={pvRange} />
             <BatteryProfileCard onProfileChange={setBatteryProfileId} onRangeChange={setBatteryRange} profile={batteryProfile} profiles={publishedBattery} range={batteryRange} />
             <InverterProfileCard onProfileChange={selectInverterProfile} onQuantityChange={(inverter_quantity) => setConnection({ ...connection, inverter_quantity })} profile={inverterProfile} profiles={publishedInverter} quantity={connection.inverter_quantity} separateAc={connection.dispatch_topology === "separate_ac"} />
@@ -296,27 +366,27 @@ export function CiScenarioBuilder({
           {publishedSolar.length === 0 || publishedBattery.length === 0 || publishedInverter.length === 0 ? (
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">Published Solar, AC Battery and Inverter profiles are required.</p>
           ) : null}
-          <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-            <h4 className="font-semibold text-slate-950">Connection &amp; environment</h4>
-            <div className="mt-4 grid gap-4 xl:grid-cols-2">
-              <OptionGroup title="Connection capacity">
+          <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50/40 p-4">
+            <h4 className="text-sm font-semibold text-slate-950">Connection capacity</h4>
+            <div className="mt-3 grid gap-3 lg:grid-cols-3">
                 <SelectField label="Electrical topology" value={connection.dispatch_topology} onChange={(dispatch_topology) => setConnection({ ...connection, dispatch_topology: dispatch_topology as ConnectionOptionsForm["dispatch_topology"] })} options={[["shared_hybrid_dc", "Shared hybrid / DC charging (legacy)"], ["separate_ac", "Separate AC PV inverter & battery PCS"]]} />
                 <SelectField label="Battery RTE basis" value={connection.battery_efficiency_basis} onChange={(battery_efficiency_basis) => setConnection({ ...connection, battery_efficiency_basis: battery_efficiency_basis as ConnectionOptionsForm["battery_efficiency_basis"] })} options={[["pack_plus_conversion", "Pack RTE + converter losses"], ["whole_system_ac", "Whole-system AC RTE (converter included)"]]} />
                 <NumberField label="Site AC headroom (kW)" onChange={(site_ac_headroom_kw) => setConnection({ ...connection, site_ac_headroom_kw })} value={connection.site_ac_headroom_kw} />
-              </OptionGroup>
-              <OptionGroup title="Environmental assumptions">
-                <NumberField allowBlank label="Grid emissions factor (kg CO2-e/kWh)" onChange={(grid_emissions_factor_kg_co2e_per_kwh) => setConnection({ ...connection, grid_emissions_factor_kg_co2e_per_kwh })} value={connection.grid_emissions_factor_kg_co2e_per_kwh} />
-              </OptionGroup>
             </div>
+            <details className="mt-4 border-t border-slate-200 pt-3">
+              <summary className="cursor-pointer text-xs font-medium text-slate-600">Environmental assumptions{emissionsError ? <span className="ml-2 text-red-700">· Check emissions factor</span> : null}</summary>
+              <div className="mt-3 max-w-sm"><NumberField allowBlank label="Grid emissions factor (kg CO2-e/kWh)" max={5} onChange={(grid_emissions_factor_kg_co2e_per_kwh) => setConnection({ ...connection, grid_emissions_factor_kg_co2e_per_kwh })} value={connection.grid_emissions_factor_kg_co2e_per_kwh} /></div>
+            </details>
           </section>
           {stcSettings ? <div className="mt-4">{stcSettings}</div> : null}
         </WorkflowSection>
 
-        <div className="flex flex-wrap items-center justify-end gap-4 border-t border-slate-200 pt-5">
-          <div className="flex flex-wrap items-center justify-end gap-3">
+        <div className="space-y-3 border-t border-slate-200 pt-5">
             {error ? <p className="max-w-xl text-sm text-destructive" role="alert">{error}</p> : null}
-            {generationBlocker ? <p className="max-w-xl text-right text-sm font-medium text-amber-800" id="generation-blocker" role="status">{generationBlocker}</p> : null}
-            <Button aria-describedby={generationBlocker ? "generation-blocker" : undefined} aria-label={isPending ? "Saving and generating solutions" : "Save configuration & generate solutions"} className="min-w-48" disabled={!request || Boolean(candidateLimitError) || isPending} type="submit">
+            {generationBlocker ? <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800" id="generation-blocker" role="status">{generationBlocker}</p> : null}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs font-medium text-slate-500">{isPending ? "Saving configuration & checking feasibility…" : generationBlocker ? "Complete the configuration to continue" : "Configuration ready to generate"}</span>
+            <Button aria-describedby={generationBlocker ? "generation-blocker" : undefined} aria-label={isPending ? "Saving and generating solutions" : "Save configuration & generate solutions"} className="min-w-48" disabled={Boolean(generationBlocker) || isPending} type="submit">
               {isPending ? "Generating solutions…" : "Generate solutions"}
               <Play className="size-4" />
             </Button>
@@ -330,11 +400,10 @@ export function CiScenarioBuilder({
 function LocationCard({ address }: { address?: string | null }) {
   const mapsHref = address ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}` : null;
   return (
-    <section aria-label="Detected project location" className="rounded-xl border border-cyan-100 bg-cyan-50/50 p-4">
-      <span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><MapPin className="size-5" /></span>
-      <p className="mt-4 text-xs font-semibold uppercase tracking-[.12em] text-cyan-800">Detected bill address</p>
-      <strong className="mt-2 block text-sm leading-6 text-slate-950">{address ?? "No site address detected"}</strong>
-      {mapsHref ? <a className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-800 hover:text-cyan-950" href={mapsHref} rel="noreferrer" target="_blank">Directions in Google Maps <ExternalLink className="size-3.5" /></a> : null}
+    <section aria-label="Detected project location" className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-4">
+      <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-cyan-50 text-cyan-800"><MapPin className="size-4" /></span>
+      <div className="min-w-0 flex-1"><p className="text-[11px] font-medium text-slate-500">Detected bill address</p><strong className="mt-1 block text-sm font-medium leading-5 text-slate-950">{address ?? "No site address detected"}</strong></div>
+      {mapsHref ? <a className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold text-cyan-800 hover:bg-cyan-50 hover:text-cyan-950" href={mapsHref} rel="noreferrer" target="_blank">Directions in Google Maps <ExternalLink className="size-3.5" /></a> : null}
     </section>
   );
 }
@@ -349,17 +418,17 @@ function SolarProfileCard({ onProfileChange, onRangeChange, profile, profiles, r
   return (
     <ProfileCard icon={SunMedium} title="Solar PV">
       <SelectField label="Solar performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
+      <CandidateValuesSummary range={range} strictlyPositiveMinimum unit="kWp" />
       {profile ? (
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3">
+        <ProfileDetails label="Solar performance details">
           <ProfileFact label="Module efficiency" value={`${formatNumber(profile.module_efficiency_percent)}%`} />
           <ProfileFact label="Technology" value={humanize(profile.module_technology)} />
           <ProfileFact label="Temperature coefficient" value={`${formatNumber(profile.temperature_coefficient_percent_per_c)}% / °C`} />
           <ProfileFact label="Annual degradation" value={`${formatNumber(profile.annual_degradation_percent)}% / yr`} />
           <ProfileFact label="Default DC/AC" value={formatNumber(profile.default_dc_ac_ratio)} />
-        </dl>
+        </ProfileDetails>
       ) : <MissingProfile />}
-      <RangeFields label="Target PV range" onChange={onRangeChange} range={range} unit="kWp DC" />
-      <CandidateValuesSummary range={range} strictlyPositiveMinimum unit="kWp" />
     </ProfileCard>
   );
 }
@@ -374,8 +443,10 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
   return (
     <ProfileCard icon={BatteryCharging} title="Battery">
       <SelectField label="Battery performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
+      <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
+      <CandidateValuesSummary range={range} unit="kWh" />
       {profile ? (
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3">
+        <ProfileDetails label="Battery performance details">
           <ProfileFact label="Chemistry / coupling" value={`${profile.chemistry} · ${profile.coupling.toUpperCase()}`} />
           <ProfileFact label="Power ratio" value={`${formatNumber(profile.continuous_power_kw_per_unit / profile.nominal_capacity_kwh_per_unit)} kW/kWh`} />
           <ProfileFact label="Pack RTE" value={`${formatNumber(profile.round_trip_efficiency_percent)}%`} />
@@ -383,10 +454,8 @@ function BatteryProfileCard({ onProfileChange, onRangeChange, profile, profiles,
           <ProfileFact label="Usable DoD" value={`${formatNumber(profile.usable_depth_of_discharge_percent)}%`} />
           <ProfileFact label="Standby loss" value={`${formatNumber(profile.standby_loss_percent_per_month)}% / month`} />
           <ProfileFact label="Annual degradation" value={`${formatNumber(profile.annual_capacity_degradation_percent)}% / yr`} />
-        </dl>
+        </ProfileDetails>
       ) : <MissingProfile />}
-      <RangeFields label="Target battery range" onChange={onRangeChange} range={range} unit="kWh (0 includes PV-only)" />
-      <CandidateValuesSummary range={range} unit="kWh" />
     </ProfileCard>
   );
 }
@@ -404,19 +473,6 @@ function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profi
     <ProfileCard icon={Cpu} title="Inverter / PCS">
       <SelectField label="Inverter performance profile" onChange={onProfileChange} options={profiles.map((item) => [item.profile_id, `${item.name} · v${item.version}`])} value={profile?.profile_id ?? ""} />
       <NumberField label={separateAc ? "Battery PCS quantity" : "Inverter quantity"} min={1} max={10_000} step={1} placeholder="Auto" onChange={onQuantityChange} value={quantity} />
-      {profile ? (
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-white p-3 text-xs sm:grid-cols-3 xl:grid-cols-2">
-          <ProfileFact label="Power per inverter" value={`${formatNumber(profile.rated_active_power_kw)} kW`} />
-          <ProfileFact label="Apparent power per inverter" value={`${formatNumber(profile.rated_apparent_power_kva)} kVA`} />
-          <ProfileFact label="Reactive compensation" value={profile.reactive_support_enabled ? "On" : "Off"} />
-          <ProfileFact label="Cap per inverter" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
-          <ProfileFact label="Apparent / active ratio" value={formatNumber(profile.rated_apparent_power_kva / profile.rated_active_power_kw)} />
-          <ProfileFact label="Reactive / active ratio" value={formatNumber(profile.maximum_reactive_power_kvar / profile.rated_active_power_kw)} />
-          <ProfileFact label="European efficiency" value={`${formatNumber(profile.european_efficiency_percent)}%`} />
-          <ProfileFact label="Maximum efficiency" value={`${formatNumber(profile.maximum_efficiency_percent)}%`} />
-          <ProfileFact label="Source" value={profile.source_label} />
-        </dl>
-      ) : <MissingProfile />}
       {profile && count !== null ? <div aria-label="Configured inverter totals" className="rounded-lg bg-cyan-50 p-3 text-xs text-cyan-950">
         <p className="font-semibold tabular-nums">{count} × {formatNumber(profile.rated_active_power_kw)} kW = {formatNumber(count * profile.rated_active_power_kw)} kW</p>
         <dl className="mt-3 grid grid-cols-2 gap-3">
@@ -424,18 +480,37 @@ function InverterProfileCard({ onProfileChange, onQuantityChange, profile, profi
           <ProfileFact label="Total reactive cap" value={`${formatNumber(profile.reactive_support_enabled ? count * profile.maximum_reactive_power_kvar : 0)} kvar`} />
         </dl>
         {separateAc ? <p className="mt-2">Battery PCS total · PV inverter sized separately</p> : null}
-      </div> : !quantity.trim() ? <p className="text-xs text-slate-600">Automatic capacity sizing</p> : null}
+      </div> : !quantity.trim() ? <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">Automatic capacity sizing</p> : null}
+      {profile ? <>
+        <dl className="grid grid-cols-2 gap-3 text-xs">
+          <ProfileFact label="Reactive compensation" value={profile.reactive_support_enabled ? "On" : "Off"} />
+          <ProfileFact label="Cap per inverter" value={`${formatNumber(profile.maximum_reactive_power_kvar)} kvar`} />
+        </dl>
+        <ProfileDetails label="Inverter performance details">
+          <ProfileFact label="Power per inverter" value={`${formatNumber(profile.rated_active_power_kw)} kW`} />
+          <ProfileFact label="Apparent power per inverter" value={`${formatNumber(profile.rated_apparent_power_kva)} kVA`} />
+          <ProfileFact label="Apparent / active ratio" value={formatNumber(profile.rated_apparent_power_kva / profile.rated_active_power_kw)} />
+          <ProfileFact label="Reactive / active ratio" value={formatNumber(profile.maximum_reactive_power_kvar / profile.rated_active_power_kw)} />
+          <ProfileFact label="European efficiency" value={`${formatNumber(profile.european_efficiency_percent)}%`} />
+          <ProfileFact label="Maximum efficiency" value={`${formatNumber(profile.maximum_efficiency_percent)}%`} />
+          <ProfileFact label="Source" value={profile.source_label} />
+        </ProfileDetails>
+      </> : <MissingProfile />}
     </ProfileCard>
   );
 }
 
 function ProfileCard({ children, icon: Icon, title }: { children: ReactNode; icon: typeof SunMedium; title: string }) {
   return (
-    <section aria-label={`${title} profile`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-      <div className="mb-4 flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-white text-cyan-800 shadow-sm"><Icon className="size-5" /></span><h4 className="font-semibold text-slate-950">{title}</h4><span className="ml-auto rounded-full bg-cyan-50 px-2.5 py-1 text-[11px] font-semibold text-cyan-800">Performance reference</span></div>
-      <div className="space-y-3">{children}</div>
+    <section aria-label={`${title} profile`} className="min-w-0 rounded-xl border border-slate-200 bg-white p-4">
+      <div className="mb-4 flex items-center gap-2.5"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-cyan-50 text-cyan-800"><Icon className="size-4" /></span><div><h4 className="text-sm font-semibold text-slate-950">{title}</h4><span className="text-[11px] text-slate-500">Performance reference</span></div></div>
+      <div className="space-y-4">{children}</div>
     </section>
   );
+}
+
+function ProfileDetails({ children, label }: { children: ReactNode; label: string }) {
+  return <details className="group border-t border-slate-200 pt-3"><summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-slate-600 [&::-webkit-details-marker]:hidden">{label}<ChevronDown aria-hidden="true" className="size-3.5 shrink-0 transition-transform group-open:rotate-180" /></summary><dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg bg-slate-50 p-3 text-xs">{children}</dl></details>;
 }
 
 function RangeFields({ label, onChange, range, unit }: { label: string; onChange: (range: NumericRange) => void; range: NumericRange; unit: string }) {
@@ -468,10 +543,6 @@ function CandidateValuesSummary({ range, strictlyPositiveMinimum = false, unit }
   );
 }
 
-function OptionGroup({ children, title }: { children: ReactNode; title: string }) {
-  return <section className="rounded-lg bg-white p-4"><h4 className="mb-3 text-sm font-semibold text-slate-900">{title}</h4><div className="grid gap-3 sm:grid-cols-2">{children}</div></section>;
-}
-
 function NumberField({ allowBlank = false, min = 0, max, step = "any", placeholder, label, onChange, value }: { allowBlank?: boolean; min?: number; max?: number; step?: number | "any"; placeholder?: string; label: string; onChange: (value: string) => void; value: string }) {
   return <label className="grid gap-1 text-xs font-medium text-slate-600"><span>{label}</span><input aria-label={label} className="min-w-0 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm tabular-nums text-slate-950" min={min} max={max} onChange={(event) => onChange(event.target.value)} placeholder={placeholder ?? (allowBlank ? "Not modelled" : undefined)} step={step} type="number" value={value} /></label>;
 }
@@ -485,7 +556,7 @@ function SelectField({ label, onChange, options, value }: { label: string; onCha
 }
 
 function ProfileFact({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[.08em] text-slate-400">{label}</dt><dd className="mt-1 truncate font-medium text-slate-800" title={value}>{value}</dd></div>;
+  return <div className="min-w-0"><dt className="text-[10px] font-medium text-slate-500">{label}</dt><dd className="mt-1 break-words font-medium tabular-nums text-slate-800">{value}</dd></div>;
 }
 
 function MissingProfile() {

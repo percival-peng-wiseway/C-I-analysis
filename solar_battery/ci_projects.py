@@ -15,12 +15,13 @@ class CiProjectError(ValueError):
         self.code = code
 
 
-def list_ci_projects(session, *, actor: LocalActorContext) -> list[dict[str, object]]:
+def list_ci_projects(session, *, actor: LocalActorContext, deleted_only: bool = False) -> list[dict[str, object]]:
     rows = session.scalars(
         select(CiProjectModel)
         .where(
             CiProjectModel.workspace_id == actor.workspace_id,
             CiProjectModel.owner_id == actor.owner_id,
+            CiProjectModel.deleted_at.is_not(None) if deleted_only else CiProjectModel.deleted_at.is_(None),
         )
         .order_by(desc(CiProjectModel.updated_at), desc(CiProjectModel.created_at))
     ).all()
@@ -56,7 +57,7 @@ def create_ci_project(
 
 
 def require_ci_project(
-    session, *, project_id: UUID, actor: LocalActorContext
+    session, *, project_id: UUID, actor: LocalActorContext, include_deleted: bool = False
 ) -> CiProjectModel:
     row = session.scalar(
         select(CiProjectModel).where(
@@ -65,9 +66,26 @@ def require_ci_project(
             CiProjectModel.owner_id == actor.owner_id,
         )
     )
-    if row is None:
+    if row is None or (row.deleted_at is not None and not include_deleted):
         raise CiProjectError("ci_project_not_found", "The C&I project was not found.")
     return row
+
+
+def trash_ci_project(session, *, project_id: UUID, actor: LocalActorContext) -> None:
+    row = require_ci_project(session, project_id=project_id, actor=actor, include_deleted=True)
+    if row.deleted_at is None:
+        row.deleted_at = datetime.now(timezone.utc)
+        row.deleted_by_actor_id = actor.actor_id
+        session.flush()
+
+
+def restore_ci_project(session, *, project_id: UUID, actor: LocalActorContext) -> dict[str, object]:
+    row = require_ci_project(session, project_id=project_id, actor=actor, include_deleted=True)
+    row.deleted_at = None
+    row.deleted_by_actor_id = None
+    # Keep configuration timestamps and saved results intact: restoring is not a calculation.
+    session.flush()
+    return _project_contract(row)
 
 
 def mark_ci_setup_ready(

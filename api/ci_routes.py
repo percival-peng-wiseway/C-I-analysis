@@ -8,7 +8,10 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
+
+from solar_battery.ci_solar_resource import lookup_solar_resource
 
 from api.ci_schemas import (
     CiAnnualFinancialComparisonRequest,
@@ -87,6 +90,7 @@ from solar_battery.ci_project_evidence import (
     record_ci_project_evidence,
     store_ci_project_evidence_files,
     update_ci_project_evidence_inspection,
+    update_ci_project_evidence_inspection_if_current,
 )
 from solar_battery.ci_project_site_material import (
     CI_PROJECT_SITE_MATERIAL_CONTRACT_VERSION,
@@ -124,6 +128,8 @@ from solar_battery.ci_pricing_catalog import (
 from solar_battery.ci_projects import (
     CiProjectError,
     create_ci_project,
+    trash_ci_project,
+    restore_ci_project,
     list_ci_projects,
     mark_ci_setup_action_required,
     mark_ci_financial_simulation_ready,
@@ -215,12 +221,13 @@ def put_ci_device_profile(
 def get_ci_projects(
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
+    deleted_only: bool = False,
 ) -> dict[str, object]:
     actor = identity_provider.current()
     with session_factory() as session:
         return {
             "contract_version": "ci_project_registry_v1",
-            "projects": list_ci_projects(session, actor=actor),
+            "projects": list_ci_projects(session, actor=actor, deleted_only=deleted_only),
         }
 
 
@@ -240,6 +247,34 @@ def post_ci_project(
                 project = create_ci_project(
                     session, display_name=payload.display_name, actor=actor
                 )
+        return {"contract_version": "ci_project_v1", **project}
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.delete("/commercial-industrial/projects/{project_id}")
+def delete_ci_project(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    try:
+        with session_factory() as session, session.begin():
+            trash_ci_project(session, project_id=project_id, actor=identity_provider.current())
+        return {"contract_version": "ci_project_deletion_v1", "project_id": str(project_id), "status": "trashed"}
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.post("/commercial-industrial/projects/{project_id}/restore")
+def post_restore_ci_project(
+    project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    try:
+        with session_factory() as session, session.begin():
+            project = restore_ci_project(session, project_id=project_id, actor=identity_provider.current())
         return {"contract_version": "ci_project_v1", **project}
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
@@ -537,6 +572,9 @@ async def inspect_ci_project_evidence_uploads(
             bill_review=bill_review,
             files_persisted=True,
         )
+        result["solar_resource"] = await run_in_threadpool(
+            lookup_solar_resource, result.get("bill", {}).get("site_address")
+        )
         bill_source = CiEvidenceSource(
             bill.filename or "bill.pdf",
             bill.content_type or "application/pdf",
@@ -607,6 +645,44 @@ def get_ci_project_evidence(
             return ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+class CiSolarResourceRequest(BaseModel):
+    tilt_degrees: float = Field(default=20, ge=0, le=90, allow_inf_nan=False)
+    azimuth_degrees: float = Field(default=0, ge=0, le=360, allow_inf_nan=False)
+
+
+@router.post("/commercial-industrial/projects/{project_id}/solar-resource")
+def refresh_ci_solar_resource(
+    project_id: UUID,
+    payload: CiSolarResourceRequest,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory),
+) -> dict[str, object]:
+    actor = identity_provider.current()
+    try:
+        with session_factory() as session:
+            state = ci_project_evidence_state(session, project_id=project_id, actor=actor)
+        evidence = state.get("evidence")
+        if evidence is None:
+            raise HTTPException(409, detail={"message": "Upload bill evidence first."})
+        inspection = dict(evidence["inspection"])
+        resource = lookup_solar_resource(
+            inspection["bill"].get("site_address"), tilt=payload.tilt_degrees,
+            azimuth=payload.azimuth_degrees, previous=inspection.get("solar_resource"),
+        )
+        inspection["solar_resource"] = resource
+        with session_factory() as session:
+            with session.begin():
+                saved = update_ci_project_evidence_inspection_if_current(
+                    session, project_id=project_id, actor=actor,
+                    expected_saved_at=evidence["saved_at"], inspection_result=inspection,
+                )
+        if not saved:
+            raise HTTPException(409, detail={"message": "Evidence changed during lookup. Reload and retry."})
+        return resource
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 
@@ -754,6 +830,7 @@ def review_saved_ci_project_evidence(
             bill_review=payload.model_dump(mode="json"),
             files_persisted=True,
         )
+        result["solar_resource"] = lookup_solar_resource(result.get("bill", {}).get("site_address"))
         with session_factory() as session:
             with session.begin():
                 update_ci_project_evidence_inspection(
