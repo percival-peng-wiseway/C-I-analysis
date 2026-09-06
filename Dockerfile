@@ -31,7 +31,8 @@ COPY alembic_ci ./alembic_ci
 COPY alembic-ci.ini ./
 COPY scripts/start_cloudflare_container.sh /usr/local/bin/start-e3-ci
 
-RUN pip install --no-cache-dir ".[api,pdf,postgres]" \
+RUN sed -i 's/\r$//' /usr/local/bin/start-e3-ci \
+    && pip install --no-cache-dir ".[api,pdf,postgres]" \
     && chmod 0555 /usr/local/bin/start-e3-ci \
     && useradd --create-home --uid 10001 e3ci \
     && chown -R e3ci:e3ci /app

@@ -1,0 +1,3 @@
+# Linux entrypoints must remain executable after a Windows checkout/archive.
+*.sh text eol=lf
+Dockerfile text eol=lf
