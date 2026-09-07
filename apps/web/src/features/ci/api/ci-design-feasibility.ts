@@ -76,6 +76,9 @@ export interface CiIntervalActivityPoint {
   grid_import_kw: number;
   solar_to_load_kw: number;
   grid_export_kw: number;
+  // Additive fields: older servers may not expose battery interval flows yet.
+  battery_charge_kw?: number;
+  battery_discharge_kw?: number;
 }
 
 export interface CiIntervalActivityResult {
@@ -607,6 +610,8 @@ export function assertCiIntervalActivity(value: unknown): CiIntervalActivityResu
     payload.points.some((point, index) =>
       !Number.isFinite(Date.parse(point.timestamp)) ||
       (index > 0 && Date.parse(point.timestamp) <= Date.parse(payload.points[index - 1].timestamp)) ||
+      ((point.battery_charge_kw !== undefined || point.battery_discharge_kw !== undefined) &&
+        !safeSeries([point.battery_charge_kw!, point.battery_discharge_kw!])) ||
       !safeSeries([
         point.measured_import_kw,
         point.grid_import_kw,

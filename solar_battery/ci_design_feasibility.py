@@ -226,6 +226,8 @@ def analyze_ci_interval_activity(
                 "grid_import_kw": round(energy.grid_import[index] / hours, 6),
                 "solar_to_load_kw": round(energy.pv_to_load[index] / hours, 6),
                 "grid_export_kw": round(energy.grid_export[index] / hours, 6),
+                "battery_charge_kw": round(energy.battery_charge[index] / hours, 6),
+                "battery_discharge_kw": round(energy.battery_discharge[index] / hours, 6),
             }
         )
     expected_count = days * 24 * 60 // source.interval_minutes

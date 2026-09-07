@@ -76,7 +76,7 @@ export function CiIntervalActivityChart({
           <div>
             <CardTitle as="h3">Interval activity</CardTitle>
             <CardDescription className="mt-1 max-w-2xl">
-              Follow measured import, post-system grid import, direct solar use and physical export for the selected candidate.
+              Grid and solar flows, with battery charging and discharging shown separately.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-end gap-3">
@@ -122,11 +122,11 @@ export function CiIntervalActivityChart({
           </div>
         ) : activity ? (
           <>
-            <IntervalActivityPlot activity={activity} />
+            <IntervalActivityPlot key={`${activity.scenario_id}-${activity.range.effective_start_timestamp}-${days}`} activity={activity} />
             {!activity.range.complete ? (
               <p className="mt-3 text-xs text-amber-800">This source contains only partial coverage inside the selected range; missing intervals are not filled.</p>
             ) : null}
-            <p className="mt-3 text-xs text-slate-500">Physical active power only · {activity.interval_minutes}-minute source basis · no tariff window or chargeable-demand interpretation.</p>
+            <p className="mt-3 text-xs text-slate-500">{activity.interval_minutes}-minute average power · PV self-consumption simulation · no grid charging or tariff optimisation.</p>
           </>
         ) : null}
       </CardContent>
@@ -134,17 +134,29 @@ export function CiIntervalActivityChart({
   );
 }
 
-function IntervalActivityPlot({ activity }: { activity: CiIntervalActivityResult }) {
-  const [hovered, setHovered] = useState<number | null>(null);
+const flowSeries = [
+  { key: "measured_import_kw", label: "Measured import", color: "#7c3aed", dashed: true },
+  { key: "grid_import_kw", label: "Grid import", color: "#0891b2", dashed: false },
+  { key: "solar_to_load_kw", label: "Solar to load", color: "#d97706", dashed: false },
+  { key: "grid_export_kw", label: "Grid export", color: "#c026d3", dashed: false },
+] as const;
+
+export function IntervalActivityPlot({ activity }: { activity: CiIntervalActivityResult }) {
+  const [hovered, setHovered] = useState(0);
   const points = activity.points;
+  const hasBattery = points.every((point) => point.battery_charge_kw !== undefined && point.battery_discharge_kw !== undefined);
   const width = 1080;
-  const height = 390;
+  const height = hasBattery ? 560 : 370;
   const left = 64;
   const right = 18;
-  const top = 22;
-  const bottom = 58;
+  const top = 32;
   const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
+  const plotHeight = 260;
+  const batteryTop = 354;
+  const batteryHeight = 134;
+  const batteryZero = batteryTop + batteryHeight / 2;
+  const batteryMaximum = Math.max(1, ...points.flatMap((point) => [point.battery_charge_kw ?? 0, point.battery_discharge_kw ?? 0])) * 1.15;
+  const batteryY = (value: number) => batteryZero - value / batteryMaximum * batteryHeight / 2;
   const maximum = Math.max(
     1,
     ...points.flatMap((point) => [
@@ -156,22 +168,23 @@ function IntervalActivityPlot({ activity }: { activity: CiIntervalActivityResult
   ) * 1.08;
   const x = (index: number) => left + plotWidth * index / Math.max(1, points.length - 1);
   const y = (value: number) => top + plotHeight * (1 - value / maximum);
-  const line = (key: keyof Pick<CiIntervalActivityPoint, "measured_import_kw">) =>
+  const line = (key: typeof flowSeries[number]["key"]) =>
     points.map((point, index) => `${index ? "L" : "M"}${x(index).toFixed(2)},${y(point[key]).toFixed(2)}`).join(" ");
-  const area = (key: keyof Pick<CiIntervalActivityPoint, "grid_import_kw" | "solar_to_load_kw" | "grid_export_kw">) => {
-    const upper = points.map((point, index) => `${index ? "L" : "M"}${x(index).toFixed(2)},${y(point[key]).toFixed(2)}`).join(" ");
-    return `${upper} L${x(points.length - 1).toFixed(2)},${y(0).toFixed(2)} L${x(0).toFixed(2)},${y(0).toFixed(2)} Z`;
-  };
-  const xIndexes = tickIndexes(points.length, activity.range.requested_days === 1 ? 8 : 10);
-  const selected = hovered === null ? null : points[hovered];
+  const xIndexes = meterTickIndexes(points, activity.range.requested_days);
+  const selectedIndex = Math.min(hovered, points.length - 1);
+  const selected = points[selectedIndex];
+  const meterLabel = activity.time_basis === "fixed_aest_meter_time" ? "AEST · UTC+10" : "Source meter time";
 
   return (
-    <div>
-      <div className="relative overflow-x-auto">
+    <div className="min-w-0">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+        <span>Meter time · {meterLabel}</span>
+        <span>Independent power curves · not stacked</span>
+      </div>
+      <div className="overflow-x-auto rounded-xl border border-slate-100">
         <svg
           aria-label={`${activity.range.requested_days}-day interval activity chart for ${activity.scenario_label}`}
-          className="min-w-[760px]"
-          onPointerLeave={() => setHovered(null)}
+          className="block w-full min-w-[640px]"
           onPointerMove={(event) => {
             const bounds = event.currentTarget.getBoundingClientRect();
             const scaledX = (event.clientX - bounds.left) * width / bounds.width;
@@ -181,6 +194,7 @@ function IntervalActivityPlot({ activity }: { activity: CiIntervalActivityResult
           role="img"
           viewBox={`0 0 ${width} ${height}`}
         >
+          <title>Grid and solar power{hasBattery ? "; battery discharge above zero, charge below zero" : ""}. {meterLabel}.</title>
           <rect fill="#fbfcfe" height={plotHeight} rx="10" width={plotWidth} x={left} y={top} />
           {[0, 0.25, 0.5, 0.75, 1].map((tick) => (
             <g key={tick}>
@@ -188,50 +202,69 @@ function IntervalActivityPlot({ activity }: { activity: CiIntervalActivityResult
               <text fill="#64748b" fontSize="11" textAnchor="end" x={left - 9} y={y(maximum * tick) + 4}>{formatNumber(maximum * tick, 0)}</text>
             </g>
           ))}
-          <path d={area("grid_import_kw")} fill="#fde047" fillOpacity=".42" />
-          <path d={area("solar_to_load_kw")} fill="#fb923c" fillOpacity=".5" />
-          <path d={area("grid_export_kw")} fill="#e879f9" fillOpacity=".42" />
-          <path d={line("measured_import_kw")} fill="none" stroke="#7c3aed" strokeDasharray="7 6" strokeWidth="2.5" />
+          {flowSeries.map((series) => (
+            <path data-series={series.key} d={line(series.key)} fill="none" key={series.key} stroke={series.color} strokeDasharray={series.dashed ? "7 6" : undefined} strokeWidth={series.key === "grid_import_kw" ? "3" : "2"} strokeLinejoin="round" />
+          ))}
+          {hasBattery ? (
+            <g aria-label="Battery power: discharge positive, charge negative">
+              <text fill="#334155" fontSize="13" fontWeight="600" x={left} y={batteryTop - 16}>Battery power</text>
+              <text fill="#64748b" fontSize="11" textAnchor="end" x={width - right} y={batteryTop - 16}>+ Discharge / − Charge</text>
+              <rect fill="#f8fafc" height={batteryHeight} width={plotWidth} x={left} y={batteryTop} rx="8" />
+              {[-1, 0, 1].map((tick) => (
+                <g key={tick}>
+                  <line stroke={tick === 0 ? "#94a3b8" : "#e2e8f0"} x1={left} x2={width - right} y1={batteryY(tick * batteryMaximum)} y2={batteryY(tick * batteryMaximum)} />
+                  <text fill="#64748b" fontSize="11" textAnchor="end" x={left - 9} y={batteryY(tick * batteryMaximum) + 4}>{tick > 0 ? "+" : ""}{formatNumber(tick * batteryMaximum, 1)}</text>
+                </g>
+              ))}
+              {points.map((point, index) => {
+                const barWidth = Math.max(0.6, plotWidth / points.length * 0.72);
+                const barX = Math.max(left, Math.min(width - right - barWidth, x(index) - barWidth / 2));
+                return <g key={point.timestamp}>
+                  <rect data-series="battery_discharge_kw" fill="#059669" height={batteryZero - batteryY(point.battery_discharge_kw!)} width={barWidth} x={barX} y={batteryY(point.battery_discharge_kw!)} />
+                  <rect data-series="battery_charge_kw" fill="#f59e0b" height={batteryY(-point.battery_charge_kw!) - batteryZero} width={barWidth} x={barX} y={batteryZero} />
+                </g>;
+              })}
+              <text fill="#475569" fontSize="11" x="12" y={batteryTop - 16}>kW</text>
+            </g>
+          ) : null}
           {xIndexes.map((index) => (
             <text fill="#64748b" fontSize="11" key={index} textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} x={x(index)} y={height - 20}>
-              {axisTime(points[index].timestamp, index, points.length)}
+              {formatIntervalMeterTime(points[index].timestamp, index === 0 || index === points.length - 1 || points[index].timestamp.slice(11, 16) === "00:00")}
             </text>
           ))}
           <text fill="#475569" fontSize="11" x="12" y="17">kW</text>
-          {hovered !== null ? (
+          {selected ? (
             <g aria-hidden="true">
-              <line stroke="#475569" strokeDasharray="3 4" x1={x(hovered)} x2={x(hovered)} y1={top} y2={top + plotHeight} />
-              {[
-                [selected?.measured_import_kw ?? 0, "#7c3aed"],
-                [selected?.grid_import_kw ?? 0, "#ca8a04"],
-                [selected?.solar_to_load_kw ?? 0, "#ea580c"],
-                [selected?.grid_export_kw ?? 0, "#c026d3"],
-              ].map(([value, color]) => <circle cx={x(hovered)} cy={y(value as number)} fill={color as string} key={`${value}-${color}`} r="4" stroke="white" strokeWidth="2" />)}
+              <line stroke="#94a3b8" strokeDasharray="3 4" x1={x(selectedIndex)} x2={x(selectedIndex)} y1={top} y2={hasBattery ? batteryTop + batteryHeight : top + plotHeight} />
+              {flowSeries.map((series) => <circle cx={x(selectedIndex)} cy={y(selected[series.key])} fill={series.color} key={series.key} r="4" stroke="white" strokeWidth="2" />)}
             </g>
           ) : null}
         </svg>
-        {selected ? (
-          <div className="pointer-events-none absolute right-3 top-3 min-w-[190px] rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg backdrop-blur">
-            <p className="font-semibold text-slate-950">{selected.time_label}</p>
-            <TooltipRow color="#7c3aed" label="Measured import" value={selected.measured_import_kw} />
-            <TooltipRow color="#ca8a04" label="Grid import" value={selected.grid_import_kw} />
-            <TooltipRow color="#ea580c" label="Solar to load" value={selected.solar_to_load_kw} />
-            <TooltipRow color="#c026d3" label="Grid export" value={selected.grid_export_kw} />
-          </div>
-        ) : null}
       </div>
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-600">
-        <Legend color="#7c3aed" dashed label="Measured import" />
-        <Legend color="#ca8a04" label="Grid import" />
-        <Legend color="#ea580c" label="Solar to load" />
-        <Legend color="#c026d3" label="Grid export" />
+        {flowSeries.map(({ key, ...series }) => <Legend key={key} {...series} />)}
+        {hasBattery ? <><Legend color="#059669" label="Battery discharge" /><Legend color="#f59e0b" label="Battery charge" /></> : null}
       </div>
+      {selected ? (
+        <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <strong className="text-slate-900">{formatIntervalMeterTime(selected.timestamp, true)} · {meterLabel}</strong>
+            <span className="text-slate-500">Hover or use the slider to inspect an interval</span>
+          </div>
+          <input aria-label="Inspect interval" aria-valuetext={`${formatIntervalMeterTime(selected.timestamp, true)} ${meterLabel}`} className="my-3 block w-full accent-cyan-600" max={points.length - 1} min={0} onChange={(event) => setHovered(Number(event.target.value))} step={1} type="range" value={selectedIndex} />
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+            {flowSeries.map(({ key, ...series }) => <TooltipRow key={key} {...series} value={selected[key]} />)}
+            {hasBattery ? <><TooltipRow color="#059669" label="Battery discharge" value={selected.battery_discharge_kw!} /><TooltipRow color="#f59e0b" label="Battery charge" value={selected.battery_charge_kw!} /></> : null}
+          </div>
+        </div>
+      ) : null}
+      {!hasBattery ? <p className="mt-3 text-xs text-slate-500">Battery interval data is unavailable from this server.</p> : null}
     </div>
   );
 }
 
 function TooltipRow({ color, label, value }: { color: string; label: string; value: number }) {
-  return <div className="mt-1.5 flex items-center justify-between gap-4"><span className="flex items-center gap-2"><span className="size-2 rounded-full" style={{ backgroundColor: color }} />{label}</span><strong className="tabular-nums">{formatNumber(value)} kW</strong></div>;
+  return <div className="min-w-0 text-xs"><span className="flex items-center gap-2 text-slate-500"><span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />{label}</span><strong className="mt-1 block text-base tabular-nums text-slate-900">{formatNumber(value)} kW</strong></div>;
 }
 
 function Legend({ color, dashed = false, label }: { color: string; dashed?: boolean; label: string }) {
@@ -254,14 +287,23 @@ function clampStartDate(value: string, start: string, end: string, days: CiInter
   if (value > maximum) return maximum;
   return value;
 }
-function tickIndexes(count: number, maximum: number) {
-  return Array.from(new Set(Array.from({ length: Math.min(maximum, count) }, (_, index) => Math.round(index * (count - 1) / Math.max(1, Math.min(maximum, count) - 1)))));
+function meterTickIndexes(points: CiIntervalActivityPoint[], days: CiIntervalActivityDays) {
+  const hourStep = days === 1 ? 6 : days === 3 ? 12 : 24;
+  const indexes = points.flatMap((point, index) => {
+    const hour = Number(point.timestamp.slice(11, 13));
+    return point.timestamp.slice(14, 16) === "00" && hour % hourStep === 0 ? [index] : [];
+  });
+  // Keep the final interval without crowding a nearby midnight label.
+  return [...new Set([0, ...indexes.filter((index) => index > 0 && index < points.length - 1 - points.length * 0.08), points.length - 1])];
 }
-function axisTime(timestamp: string, index: number, count: number) {
-  const value = new Date(timestamp);
+export function formatIntervalMeterTime(timestamp: string, includeDate = false) {
+  // Format the source wall clock, not the browser's local/DST clock. The API
+  // selects calendar days in this same meter-time basis.
+  const value = new Date(`${timestamp.slice(0, 19)}Z`);
   return new Intl.DateTimeFormat("en-AU", {
-    day: index === 0 || index === count - 1 || value.getHours() === 0 ? "numeric" : undefined,
-    month: index === 0 || index === count - 1 || value.getHours() === 0 ? "short" : undefined,
+    timeZone: "UTC",
+    day: includeDate ? "numeric" : undefined,
+    month: includeDate ? "short" : undefined,
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,

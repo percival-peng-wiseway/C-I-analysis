@@ -200,12 +200,23 @@ def test_interval_activity_returns_bounded_multi_day_physical_flows() -> None:
             "grid_import_kw",
             "solar_to_load_kw",
             "grid_export_kw",
+            "battery_charge_kw",
+            "battery_discharge_kw",
         )
     )
     assert all(
         point["grid_import_kw"] <= point["measured_import_kw"] + 1e-6
         for point in result["points"]
     )
+    for point in result["points"]:
+        assert point["measured_import_kw"] == pytest.approx(
+            point["grid_import_kw"] + point["solar_to_load_kw"]
+            + point["battery_discharge_kw"], abs=2e-6
+        )
+        assert not (point["battery_charge_kw"] > 0 and point["battery_discharge_kw"] > 0)
+        assert point["battery_charge_kw"] <= scenario["max_charge_kw"] + 1e-6
+        assert point["battery_discharge_kw"] <= scenario["max_discharge_kw"] + 1e-6
+        assert point["timestamp"].endswith("+10:00")
 
 
 def test_interval_activity_rejects_unknown_scenario_and_range() -> None:
