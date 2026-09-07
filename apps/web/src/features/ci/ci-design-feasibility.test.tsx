@@ -23,6 +23,19 @@ const result = {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("C&I design feasibility visuals", () => {
+  it("handles empty results and restores a valid selection after results change", () => {
+    const empty = { ...result, scenarios: [] };
+    const { rerender } = render(<CiDesignFeasibility projectId="project-1" result={empty} />);
+    expect(screen.getByRole("status").textContent).toContain("No simulated scenarios");
+    rerender(<CiDesignFeasibility projectId="project-1" result={result} />);
+    expect(screen.getByRole("heading", { name: "12 simulated scenarios" })).toBeTruthy();
+    rerender(<CiDesignFeasibility projectId="project-1" result={{ ...result, scenarios: [result.scenarios[1]] }} />);
+    expect(screen.getByRole("button", { name: /Open solution 2:/ }).getAttribute("aria-pressed")).toBe("true");
+    rerender(<CiDesignFeasibility projectId="project-1" result={empty} />);
+    expect(screen.queryByRole("img", { name: "Annual grid import comparison" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("run Analysis again");
+  });
+
   it("shows every generated solution on the left and selectable dispatch metrics on the right", async () => {
     const user = userEvent.setup();
     render(<CiDesignFeasibility projectId="project-1" result={result} />);

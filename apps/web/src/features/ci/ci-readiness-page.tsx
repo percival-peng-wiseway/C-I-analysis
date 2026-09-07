@@ -770,8 +770,8 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
   const fullRunError = fullRunForProject ? fullAnalysis.error : null;
   const analysisScenarioIds = validatedSnapshot?.scenarioIds ?? fullRunData?.snapshot.scenarioIds ?? [];
   const analysis = fullRunData?.feasibilityResult ?? (!savedFeasibility.isError && savedFeasibility.data?.status === "ready" ? savedFeasibility.data.result : null);
-  const needsRun = !analysis;
   const displayedAnalysis = analysis ? selectedFeasibilityResult(analysis, analysisScenarioIds) : null;
+  const needsRun = !displayedAnalysis;
   const fullAnalysisBlocked = !validatedSnapshot;
   return (
     <section aria-labelledby="dispatch-workspace-title" className="space-y-5">
@@ -790,6 +790,7 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
       {pricePreview.isError ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved Net CAPEX snapshot is unavailable or out of date. Return to Solution Generator and refresh the quotations before running full analysis.</p> : null}
       {!validatedSnapshot && !pricePreview.isPending && !pricePreview.isFetching ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Return to Solution Generator, select the solutions to analyse and confirm their Net CAPEX quotations.</p> : null}
       {savedFeasibility.data?.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved dispatch result is out of date because the design or interval evidence changed. Select the required solutions in Solution Generator, then run Analysis again.</p> : null}
+      {!fullRunPending && analysis && !displayedAnalysis ? <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved dispatch result does not contain all selected solutions. Confirm the selection in Solution Generator, then re-run full analysis.</p> : null}
       {fullRunPending ? null : needsRun ? <DispatchReadyState design={savedDesign.data} scenarioIds={analysisScenarioIds} /> : displayedAnalysis ? <CiDesignFeasibility projectId={project.project_id} result={displayedAnalysis} /> : null}
     </section>
   );
@@ -855,7 +856,9 @@ function resultCoversScenarios(result: { scenarios: Array<{ scenario_id: string 
   return scenarioIds.every((scenarioId) => availableScenarioIds.has(scenarioId));
 }
 
-function selectedFeasibilityResult(result: NonNullable<CiSavedFeasibilityState["result"]>, scenarioIds: string[]) {
+export function selectedFeasibilityResult(result: NonNullable<CiSavedFeasibilityState["result"]>, scenarioIds: string[]) {
+  // Do not present an empty or partial intersection as a completed analysis.
+  if (!result.scenarios.length || (scenarioIds.length > 0 && !resultCoversScenarios(result, scenarioIds))) return null;
   if (!scenarioIds.length) return result;
   const selectedIds = new Set(scenarioIds);
   if (selectedIds.size === result.scenarios.length && result.scenarios.every((scenario) => selectedIds.has(scenario.scenario_id))) return result;

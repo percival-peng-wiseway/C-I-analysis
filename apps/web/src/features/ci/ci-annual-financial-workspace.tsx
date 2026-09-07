@@ -153,10 +153,13 @@ export function CiAnnualFinancialComparisonDetails({ result }: { result: CiAnnua
 }
 
 export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }: { onSelect?: (scenarioId: string) => void; result: CiAnnualFinancialComparisonResult; selectedScenarioId?: string }) {
-  const [internalActiveId, setInternalActiveId] = useState(result.solutions[0].scenario_id);
+  const [internalActiveId, setInternalActiveId] = useState(result.solutions[0]?.scenario_id ?? "");
   const activeId = selectedScenarioId ?? internalActiveId;
   const select = (scenarioId: string) => { setInternalActiveId(scenarioId); onSelect?.(scenarioId); };
   const active = result.solutions.find((item) => item.scenario_id === activeId) ?? result.solutions[0];
+  if (!active) {
+    return <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">No calculated Finance solutions are available. Confirm the selected solutions in Solution Generator, then run Analysis again.</p>;
+  }
   const width = Math.max(1120, result.solutions.length * 50 + 150);
   const height = 650;
   const left = 104, right = 30;

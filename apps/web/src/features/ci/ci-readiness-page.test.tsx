@@ -5,12 +5,33 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CiReadinessPage } from "./ci-readiness-page";
+import { CiReadinessPage, selectedFeasibilityResult } from "./ci-readiness-page";
+import type { CiDesignFeasibilityResult } from "./api/ci-design-feasibility";
 import { CiProductShell } from "./ci-product-shell";
 import { createCiQueryClient } from "./ci-query-client";
 import { CiWorkspaceProvider } from "./ci-workspace-context";
 import { ciSavedDesignQueryKey } from "./api/ci-projects";
 import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
+
+describe("saved dispatch selection matching", () => {
+  const saved = {
+    scenarios: [{ scenario_id: "old-a", physical_review_rank: 1 }, { scenario_id: "old-b", physical_review_rank: 2 }],
+    physical_review_order: { shortlist_count: 2 },
+  } as CiDesignFeasibilityResult;
+
+  it("rejects empty, disjoint and partially missing saved results", () => {
+    expect(selectedFeasibilityResult({ ...saved, scenarios: [] }, [])).toBeNull();
+    expect(selectedFeasibilityResult(saved, ["new-a"])).toBeNull();
+    expect(selectedFeasibilityResult(saved, ["old-a", "new-a"])).toBeNull();
+  });
+
+  it("retains saved results without a new selection and supports a fully covered subset", () => {
+    expect(selectedFeasibilityResult(saved, [])).toBe(saved);
+    const subset = selectedFeasibilityResult(saved, ["old-b"]);
+    expect(subset?.scenarios).toEqual([{ scenario_id: "old-b", physical_review_rank: 1 }]);
+    expect(saved.scenarios[1].physical_review_rank).toBe(2);
+  });
+});
 
 const readiness = {
   contract_version: "ci_workspace_readiness_v3",

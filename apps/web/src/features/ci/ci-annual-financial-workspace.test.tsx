@@ -108,6 +108,17 @@ const chefQProject = { ...project, project_id: "chef-q", display_name: "Chef Q" 
 
 afterEach(() => { cleanup(); fixtures.compare.mockClear(); });
 
+it("handles empty Finance results before and after a populated chart", () => {
+  const empty = { ...fixtures.comparison, solutions: [] };
+  const { rerender } = render(<CiPortfolioReturnChart result={empty} />);
+  expect(screen.getByRole("status").textContent).toContain("No calculated Finance solutions");
+  rerender(<CiPortfolioReturnChart result={fixtures.comparison} />);
+  expect(screen.getByRole("img", { name: "All solution NPV and payback comparison" })).toBeTruthy();
+  rerender(<CiPortfolioReturnChart result={empty} />);
+  expect(screen.queryByRole("img")).toBeNull();
+  expect(screen.getByRole("status").textContent).toContain("run Analysis again");
+});
+
 it("shows the PV and battery combination diagonally below every portfolio bar", () => {
   render(<CiPortfolioReturnChart result={fixtures.comparison} />);
 

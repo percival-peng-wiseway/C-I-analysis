@@ -114,6 +114,28 @@ def test_design_feasibility_returns_energy_and_peak_day_physics_without_tariff()
     assert all("aud" not in str(key).lower() for key in evaluated)
 
 
+def test_peak_replay_morning_pv_and_overlapping_imports_use_same_meter_intervals() -> None:
+    result = analyze_ci_design_feasibility(_wide_bytes(), scenarios=[_scenario()])
+    points = result["scenarios"][0]["peak_day"]["points"]
+    morning = [p for p in points if "06:00" <= p["time_label"] < "12:00"
+               and p["pv_generation_kw"] > 0.001]
+    assert morning, "PV must be present in morning intervals, not start at 13:00"
+    overlapping = [p for p in morning if p["battery_discharge_kw"] == 0]
+    assert overlapping
+    for point in points:
+        assert datetime.fromisoformat(point["timestamp"]).strftime("%H:%M") == point["time_label"]
+        assert point["pv_only_import_kw"] == pytest.approx(
+            max(0, point["baseline_kw"] - point["pv_generation_kw"]), abs=2e-6
+        )
+        # This technical envelope does not allow grid charging.
+        assert point["pv_battery_import_kw"] == pytest.approx(
+            max(0, point["pv_only_import_kw"] - point["battery_discharge_kw"]), abs=2e-6
+        )
+    for point in overlapping:
+        assert point["pv_only_import_kw"] == point["pv_battery_import_kw"]
+        assert point["pv_only_import_kw"] < point["baseline_kw"]
+
+
 def test_design_feasibility_shortlists_the_first_ten_physical_results() -> None:
     scenarios = []
     for index in range(12):

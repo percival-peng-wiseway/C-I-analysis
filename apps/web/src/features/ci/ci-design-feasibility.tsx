@@ -24,13 +24,16 @@ const dispatchViews: Array<{ icon: typeof Activity; id: DispatchView; label: str
 ];
 
 export function CiDesignFeasibility({ projectId, result }: { projectId: string; result: CiDesignFeasibilityResult }) {
-  const [scenarioId, setScenarioId] = useState(result.scenarios[0].scenario_id);
+  const [scenarioId, setScenarioId] = useState(result.scenarios[0]?.scenario_id ?? "");
   const [view, setView] = useState<DispatchView>("overview");
   const [metric, setMetric] = useState<ScenarioMetric>("grid_import_reduction");
   const [query, setQuery] = useState("");
   const selected = result.scenarios.find((item) => item.scenario_id === scenarioId) ?? result.scenarios[0];
   const availableYears = result.coverage.years.map((item) => item.year);
   const [year, setYear] = useState(result.coverage.primary_year);
+  if (!selected) {
+    return <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">No simulated scenarios are available for this selection. Return to Solution Generator, confirm the selected solutions, then run Analysis again.</p>;
+  }
   const yearResult = selected.yearly_energy.find((item) => item.year === year);
   const energy = yearResult ?? selected.coverage_energy;
   const performance = yearResult?.performance ?? selected.coverage_performance;

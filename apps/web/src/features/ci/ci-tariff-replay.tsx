@@ -1,5 +1,6 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { inverterDescription } from "./ci-scenario-labels";
+import { ScenarioPeakReplay } from "./ci-scenario-peak-replay";
 import {
   Activity,
   ArrowLeft,
@@ -905,43 +906,6 @@ function IntervalReplay({
         ? <ScenarioPeakReplay scenario={feasibilityScenario} />
         : <CiTariffDispatchChart key={scenario.scenario_id} projection={scenario.dispatch_review_projection} />}
     </div>
-  );
-}
-
-function ScenarioPeakReplay({ scenario }: { scenario: CiFeasibilityScenario }) {
-  const peak = scenario.peak_day;
-  const points = peak.points;
-  const target = peak.sampled_target_kw;
-  const width = 920; const height = 320; const left = 48; const right = 16; const top = 20; const bottom = 42;
-  const maximum = Math.max(1, ...(points.flatMap((point) => [point.baseline_kw, point.pv_only_import_kw, point.pv_battery_import_kw])), target ?? 0) * 1.05;
-  const x = (index: number) => left + (width - left - right) * index / Math.max(1, points.length - 1);
-  const y = (value: number) => top + (height - top - bottom) * (1 - value / maximum);
-  const path = (key: "baseline_kw" | "pv_only_import_kw" | "pv_battery_import_kw") => points.map((point, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${y(point[key]).toFixed(1)}`).join(" ");
-  const flatIntervals = target === null ? 0 : points.filter((point) => (
-    point.battery_discharge_kw > 1e-3
-    && Math.abs(point.pv_battery_import_kw - target) <= 0.01
-  )).length;
-  const dischargeIntervals = points.filter((point) => point.battery_discharge_kw > 1e-3).length;
-  return (
-    <section className="rounded-xl border border-cyan-200 bg-cyan-50/30 p-4 sm:p-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h4 className="font-semibold text-slate-950">Scenario Analysis · active-power peak shaving</h4><p className="mt-1 text-sm text-slate-500">{peak.date} · pre-tariff technical dispatch in kW</p></div>
-        <div className="flex flex-wrap gap-2 text-xs font-semibold"><span className="rounded-full bg-white px-3 py-1.5 text-slate-700">{dischargeIntervals} discharge intervals</span>{target !== null ? <span className="rounded-full bg-cyan-100 px-3 py-1.5 text-cyan-900">{flatIntervals} intervals at target</span> : null}</div>
-      </div>
-      <div className="mt-5 overflow-x-auto">
-        <svg aria-label="Scenario Analysis active-power peak shaving replay" className="min-w-[720px]" role="img" viewBox={`0 0 ${width} ${height}`}>
-          <rect fill="#fbfdff" x={left} y={top} width={width-left-right} height={height-top-bottom} />
-          {[0,.25,.5,.75,1].map((tick)=><line key={tick} stroke="#e2e8f0" x1={left} x2={width-right} y1={y(maximum*tick)} y2={y(maximum*tick)} />)}
-          {target !== null ? <line stroke="#f97316" strokeDasharray="7 5" strokeWidth="2" x1={left} x2={width-right} y1={y(target)} y2={y(target)} /> : null}
-          <path d={path("baseline_kw")} fill="none" stroke="#334155" strokeWidth="3" />
-          <path d={path("pv_only_import_kw")} fill="none" stroke="#f59e0b" strokeWidth="2.5" />
-          <path d={path("pv_battery_import_kw")} fill="none" stroke="#0891b2" strokeWidth="3" />
-          {[0,.25,.5,.75,1].map((tick)=>{const index=Math.min(points.length-1,Math.round((points.length-1)*tick));return <text fill="#64748b" fontSize="11" key={tick} textAnchor={tick===0?"start":tick===1?"end":"middle"} x={x(index)} y={height-12}>{points[index]?.time_label}</text>;})}
-          <text fill="#475569" fontSize="11" x="6" y="15">kW</text>
-        </svg>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-5 text-xs text-slate-600"><Legend colour="#334155" label="Measured import" /><Legend colour="#f59e0b" label="PV only" /><Legend colour="#0891b2" label="PV + battery" />{target !== null ? <DashedLegend colour="#f97316" label={`Sampled target ${numberLabel(target, 3)} kW`} /> : null}</div>
-    </section>
   );
 }
 
