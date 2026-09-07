@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CiCalculationHandbook, CiHandbookModule } from "./api/ci-calculation-handbook";
 import { CiHandbookPanel } from "./ci-handbook-panel";
+import { guideFixture } from "./api/ci-calculation-guide.test-data";
 import { createCiQueryClient } from "./ci-query-client";
 import { CiWorkspaceProvider } from "./ci-workspace-context";
 
@@ -18,10 +19,64 @@ afterEach(() => {
 });
 
 describe("CiHandbookPanel", () => {
+  it("opens a populated teaching guide and switches chapters without loading project calculations", async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockHandbookApi();
+    renderPanel();
+    expect(await screen.findByText("200 kW average demand")).toBeTruthy();
+    expect(screen.getByText(/Synthetic teaching example only/)).toBeTruthy();
+    await user.click(screen.getByRole("button", {name: "5. stc"}));
+    expect(screen.getByText("174 × $39")).toBeTruthy();
+    expect(screen.getByText("$6,786.00 worksheet estimate")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/calculation-guide");
+  });
+
+  it("keeps a visible guide header and retry when the guide request fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", {status: 503})));
+    renderPanel();
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("heading", {name: "How this system calculates"})).toBeTruthy();
+    expect(screen.getByRole("button", {name: "Retry guide"})).toBeTruthy();
+  });
+
+  it("matches the selected scenario across saved results and withholds stale finance", async () => {
+    const payload = handbookFixture();
+    for (const module of payload.modules) {
+      module.status = module.module_id === "finance_analysis" ? "stale" : "ready";
+      if (module.module_id === "evidence") continue;
+      module.result_sets = [{result_set_id: module.module_id === "solution_generator" ? "solution.solutions" : `${module.module_id}.results`, label: `${module.label} matched results`,
+        columns: [{key: "pv_capacity", label: "PV capacity", unit: "kWp"}, {key: "battery_capacity", label: "Battery capacity", unit: "kWh"}],
+        rows: [{result_id: "a", label: "Solution A", values: {pv_capacity: 140, battery_capacity: 210}}, {result_id: "b", label: "Solution B", values: {pv_capacity: 200, battery_capacity: 294}}]}];
+    }
+    payload.summary.result_row_count = payload.modules.reduce((sum, m) => sum + m.result_sets.reduce((n, s) => n + s.rows.length, 0), 0);
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).endsWith("/calculation-guide") ? guideFixture() : payload)));
+    vi.stubGlobal("fetch", fetcher);
+    renderPanel();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", {name: "Saved solution walkthrough"}));
+    const select = await screen.findByLabelText("Solution to explain");
+    expect(screen.getByText("Matching saved scenario ID: a")).toBeTruthy();
+    await user.selectOptions(select, "b");
+    expect(screen.getByText("Matching saved scenario ID: b")).toBeTruthy();
+    expect(screen.queryByText("Matching saved scenario ID: a")).toBeNull();
+    expect(screen.getByText(/Current results are withheld/)).toBeTruthy();
+    expect(screen.queryByText("Finance Analysis matched results")).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("explains an empty solution list instead of displaying a blank walkthrough", async () => {
+    mockHandbookApi();
+    renderPanel();
+    await userEvent.click(screen.getByRole("button", {name: "Saved solution walkthrough"}));
+    expect(await screen.findByText(/No saved solution yet/)).toBeTruthy();
+  });
+
   it("changes Handbook modules without refetching or sending a POST", async () => {
     const user = userEvent.setup();
     const fetchMock = mockHandbookApi();
     renderPanel();
+    await user.click(screen.getByRole("button", { name: "Project ledger" }));
 
     expect(await screen.findByRole("heading", { name: "Module overview" })).toBeTruthy();
     const sectionNavigation = screen.getByRole("navigation", { name: "Handbook sections" });
@@ -31,7 +86,7 @@ describe("CiHandbookPanel", () => {
     await user.click(within(sectionNavigation).getByRole("button", { name: /Formulas 1/i }));
     expect(await screen.findByText("Solution Generator formula")).toBeTruthy();
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit | undefined)?.method !== "POST")).toBe(true);
   });
 
@@ -39,20 +94,23 @@ describe("CiHandbookPanel", () => {
     const user = userEvent.setup();
     const fetchMock = mockHandbookApi();
     renderPanel();
+    await user.click(screen.getByRole("button", { name: "Project ledger" }));
 
     expect(await screen.findByRole("heading", { name: "Module overview" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Close Handbook - Test project" }));
     expect(screen.queryByRole("dialog", { name: "Handbook - Test project" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Reopen Handbook" }));
+    await user.click(screen.getByRole("button", { name: "Project ledger" }));
     expect(await screen.findByRole("heading", { name: "Module overview" })).toBeTruthy();
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("uses a full-screen dialog with clear module and section navigation", async () => {
     const user = userEvent.setup();
     mockHandbookApi();
     renderPanel();
+    await user.click(screen.getByRole("button", { name: "Project ledger" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Handbook - Test project" });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
@@ -88,6 +146,7 @@ describe("CiHandbookPanel", () => {
     const user = userEvent.setup();
     mockHandbookApi();
     renderPanel();
+    await user.click(screen.getByRole("button", { name: "Project ledger" }));
 
     const sectionNavigation = await screen.findByRole("navigation", { name: "Handbook sections" });
     await user.click(within(sectionNavigation).getByRole("button", { name: /Formulas 1/i }));
@@ -133,7 +192,7 @@ function renderPanel(initiallyOpen = true) {
 }
 
 function mockHandbookApi() {
-  const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(handbookFixture()), { status: 200 }));
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(String(input).endsWith("/calculation-guide") ? guideFixture() : handbookFixture()), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }

@@ -115,6 +115,7 @@ from solar_battery.ci_project_feasibility import (
     record_ci_design_feasibility_result,
 )
 from solar_battery.ci_project_handbook import build_ci_project_handbook
+from solar_battery.ci_handbook_guide import calculation_guide
 from solar_battery.ci_project_annual_financial import (
     ci_annual_financial_state,
     record_ci_annual_financial_result,
@@ -285,6 +286,13 @@ def post_restore_ci_project(
         return {"contract_version": "ci_project_v1", **project}
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
+
+
+@router.get("/commercial-industrial/calculation-guide")
+def get_ci_calculation_guide(response: Response) -> dict[str, object]:
+    """Teaching content independent of project state; no simulation or mutation."""
+    response.headers["Cache-Control"] = "no-store"
+    return calculation_guide()
 
 
 @router.get("/commercial-industrial/projects/{project_id}/calculation-handbook")

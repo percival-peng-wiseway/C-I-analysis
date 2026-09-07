@@ -24,7 +24,9 @@ import {
   type CiHandbookCalculation,
   type CiHandbookModule,
   type CiHandbookValue,
+  type CiCalculationHandbook,
 } from "@/features/ci/api/ci-calculation-handbook";
+import { CiCalculationGuide } from "./ci-calculation-guide";
 import { useCiWorkspace, type CiWorkspaceStage } from "@/features/ci/ci-workspace-context";
 
 const moduleMeta: Record<CiHandbookModule["module_id"], { icon: typeof Database }> = {
@@ -48,11 +50,12 @@ const handbookSections: Array<{ id: HandbookSectionId; label: string; icon: type
 export function CiHandbookPanel({ onClose, open }: { onClose: () => void; open: boolean }) {
   const workspace = useCiWorkspace();
   const projectId = workspace.activeProject?.projectId ?? "";
+  const [view, setView] = useState<"guide" | "solution" | "ledger">("guide");
   const [selectedModuleId, setSelectedModuleId] = useState<CiHandbookModule["module_id"]>(() => moduleForStage(workspace.stage));
   const [selectedSectionId, setSelectedSectionId] = useState<HandbookSectionId>("overview");
   const [search, setSearch] = useState("");
   const handbook = useQuery({
-    enabled: open && Boolean(projectId),
+    enabled: open && view !== "guide" && Boolean(projectId),
     queryKey: ciCalculationHandbookQueryKey(projectId),
     queryFn: () => fetchCiCalculationHandbook(projectId),
   });
@@ -74,15 +77,22 @@ export function CiHandbookPanel({ onClose, open }: { onClose: () => void; open: 
 
   return (
     <Drawer
-      description="Formulas, current values, parameter sources, optimizer methods and saved results."
+      description="Calculation guide, a worked example and your project's saved solution trail."
       label={`Handbook${workspace.activeProject ? ` - ${workspace.activeProject.displayName}` : ""}`}
       onClose={onClose}
       open={open}
       presentation="fullscreen"
     >
-      {handbook.isPending ? <HandbookLoading /> : null}
+      <div className="flex h-full min-h-0 flex-col">
+        <nav aria-label="Handbook views" className="flex shrink-0 flex-wrap gap-2 border-b border-slate-200 px-4 py-3 sm:px-8">
+          {([ ["guide", "Calculation guide"], ["solution", "Saved solution walkthrough"], ["ledger", "Project ledger"] ] as const).map(([id, label]) => <button type="button" key={id} aria-current={view === id ? "page" : undefined} className={`rounded-lg px-4 py-2 text-sm font-medium ${view === id ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`} onClick={() => setView(id)}>{label}</button>)}
+        </nav>
+        <div className="min-h-0 flex-1 overflow-hidden">
+      {view === "guide" ? <CiCalculationGuide /> : <>
+      {!projectId ? <p className="p-8">Select a project to view its saved results. The calculation guide is available without project data.</p> : handbook.isPending ? <HandbookLoading /> : null}
       {handbook.isError ? <HandbookError message={handbook.error instanceof Error ? handbook.error.message : "Handbook is unavailable."} onRetry={() => void handbook.refetch()} /> : null}
-      {handbook.data && selected && filtered ? (
+      {view === "solution" && handbook.data ? <SavedSolutionWalkthrough handbook={handbook.data} /> : null}
+      {view === "ledger" && handbook.data && selected && filtered ? (
         <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] lg:grid-cols-[268px_minmax(0,1fr)] lg:grid-rows-1">
           <aside className="border-b border-slate-200 bg-slate-50 px-3 py-3 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r lg:px-4 lg:py-5">
             <nav aria-label="Handbook modules" className="flex gap-2 overflow-x-auto pb-1 lg:block lg:space-y-2 lg:overflow-visible lg:pb-0">
@@ -164,8 +174,37 @@ export function CiHandbookPanel({ onClose, open }: { onClose: () => void; open: 
           </div>
         </div>
       ) : null}
+      </>}
+        </div>
+      </div>
     </Drawer>
   );
+}
+
+function SavedSolutionWalkthrough({ handbook }: { handbook: CiCalculationHandbook }) {
+  const candidates = handbook.modules.find(m => m.module_id === "solution_generator")?.result_sets.find(s => s.result_set_id === "solution.solutions")?.rows ?? [];
+  const [selectedId, setSelectedId] = useState("");
+  const candidate = candidates.find(c => c.result_id === selectedId) ?? candidates[0];
+  const titles: Record<string, string> = {
+    solution_generator: "1. Saved equipment and investment",
+    scenario_analysis: "2. Saved physical dispatch and tariff replay",
+    finance_analysis: "3. Saved cashflows and financial metrics",
+  };
+  return <div className="h-full overflow-y-auto px-4 py-6 sm:px-8"><div className="mx-auto max-w-5xl space-y-6">
+    <header><h3 className="text-2xl font-semibold">Follow one saved solution</h3><p className="mt-2 text-sm leading-7 text-slate-600">Every result below matches the same scenario ID. This is a read-only trace, not a new calculation or recommendation. Use Calculation guide for step-by-step numerical substitutions.</p></header>
+    {!candidate ? <p role="status" className="rounded-xl border border-slate-200 p-6">No saved solution yet. Generate solutions first, or use the synthetic worked example in Calculation guide.</p> : <>
+      <label className="grid gap-2 text-sm font-medium">Solution to explain<select className="w-full min-w-0 rounded-lg border border-slate-300 bg-white p-3" value={candidate.result_id} onChange={e => setSelectedId(e.target.value)}>{candidates.map(c => <option key={c.result_id} value={c.result_id}>{c.label} · {formatValue(c.values.pv_capacity ?? null, "kWp")} PV · {formatValue(c.values.battery_capacity ?? null, "kWh")} battery</option>)}</select></label>
+      <p className="break-all text-xs text-slate-500">Matching saved scenario ID: {candidate.result_id}</p>
+      {handbook.modules.filter(m => m.module_id !== "evidence").map(module => {
+        const sets = module.result_sets.map(s => ({ ...s, rows: s.rows.filter(r => r.result_id === candidate.result_id) })).filter(s => s.rows.length > 0);
+        return <section key={module.module_id} className="rounded-xl border border-slate-200 p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3"><h4 className="text-lg font-semibold">{titles[module.module_id]}</h4><StatusBadge status={module.status} /></div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{module.description}</p>
+          {module.status !== "ready" ? <p role="status" className="mt-4 rounded-lg bg-amber-50 p-4 text-sm text-amber-950">This step is {statusLabel(module.status).toLowerCase()}. Current results are withheld; review inputs and rerun the source module.</p> : !sets.length ? <p className="mt-4 text-sm text-slate-500">No matching saved result for this solution. Run this solution in the source module to complete the trail.</p> : sets.map(set => <div className="mt-5" key={set.result_set_id}><h5 className="font-semibold">{set.label}</h5><dl className="mt-3 grid gap-x-8 gap-y-4 sm:grid-cols-2">{set.columns.map(column => <div className="min-w-0" key={column.key}><dt className="text-xs text-slate-500">{column.label}{column.unit ? ` (${column.unit})` : ""}</dt><dd className="mt-1 break-words text-sm tabular-nums">{formatValue(set.rows[0].values[column.key] ?? null, column.unit)}</dd></div>)}</dl></div>)}
+        </section>;
+      })}
+    </>}
+  </div></div>;
 }
 
 function HandbookSection({

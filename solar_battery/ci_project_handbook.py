@@ -442,7 +442,7 @@ def _solution_module(
         _calculation("solution.range_count", "Candidate values in one range", "count = floor((maximum - minimum) / step) + 1", "Builds the analyst-authored PV or battery target list without equipment-size rounding.", ["minimum", "maximum", "step"], "solar_battery/ci_solution_generator.py::_range_values"),
         _calculation("solution.matrix_count", "Requested solution combinations", "requested_count = PV candidate count * battery candidate count", "Forms the Cartesian product before connection checks.", ["PV candidate count", "battery candidate count"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.pv_derating", "Effective PV derating", "derating = availability * product(1 - loss_i)", "Combines all saved site-loss assumptions multiplicatively.", ["availability", "shading", "soiling", "temperature", "wiring/mismatch", "other loss"], "solar_battery/ci_solution_generator.py::_effective_derating", example=_pv_derating_example(site, technical)),
-        _calculation("solution.annual_pv_output", "Expected annual PV output", "annual_kWh = PV_kWp * specific_yield_kWh_per_kWp * derating", "Used for energy screening and Solar STC output eligibility.", ["PV capacity", "specific yield", "derating"], "solar_battery/ci_design_feasibility.py::_scenario_energy_series"),
+        _calculation("solution.annual_pv_output", "Expected annual PV output", "annual_kWh = PV_kWp * specific_yield_kWh_per_kWp * derating", "Expected energy before clipping. This does not feed the standalone STC worksheet, which uses manually entered operands.", ["PV capacity", "specific yield", "derating"], "solar_battery/ci_design_feasibility.py::_scenario_energy_series"),
         _calculation("solution.battery_power", "Battery screening power", "battery_kW = target_kWh * profile_kW_per_unit / profile_kWh_per_unit", "Uses the selected battery profile as a performance ratio only.", ["target battery capacity", "profile continuous power", "profile nominal capacity"], "solar_battery/ci_solution_generator.py::_screening_battery_power"),
         _calculation("solution.one_way_efficiency", "One-way battery efficiency", "pack_plus_conversion: eta=sqrt(RTE)*conversion; whole_system_ac: eta=sqrt(RTE)", "The same one-way efficiency is assigned to charge and discharge. Whole-system AC RTE already includes conversion; the converter multiplier is not applied again.", ["RTE basis", "round-trip efficiency", "power conversion efficiency"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
         _calculation("solution.minimum_soc", "Minimum state of charge", "minimum_SOC = 1 - usable_depth_of_discharge", "Converts usable DoD into the lower SOC bound.", ["usable depth of discharge"], "solar_battery/ci_solution_generator.py::generate_ci_solutions"),
@@ -452,7 +452,7 @@ def _solution_module(
         _calculation("solution.pq_limit", "Circular P-Q capability", "P^2 + Q^2 <= S_limit^2", "Constrains shared inverter active and reactive power in dispatch. Q and S limits come from the scaled inverter profile snapshot, while the circular capability shape remains an analyst assumption because the current profile does not provide an executable P-Q curve.", ["active power", "reactive power", "profile-scaled apparent power limit"], "solar_battery/ci_peak_shaving_optimizer.py"),
         _calculation("solution.battery_curve_cost", "Battery equipment curve cost", "units = target_battery_kWh / module_capacity_kWh; cost = proportional below first point, linearly interpolated between points, and last-segment extrapolated above the final point", "The requested battery target remains continuous; its capacity is converted to a reference module quantity only for equipment pricing.", ["target battery capacity", "module capacity", "selected battery capital-cost curve"], "solar_battery/ci_annual_financial_comparison.py::_curve_cost"),
         _calculation("solution.inverter_curve_cost", "Inverter equipment curve cost", "cost = curve(capacity) when capacity <= sizing_unit; otherwise cost = capacity / sizing_unit * curve(sizing_unit)", "Above the selected inverter sizing unit, pricing scales the cost at that sizing unit rather than extrapolating the last curve segment.", ["screening inverter capacity", "sizing unit", "selected inverter capital-cost curve"], "solar_battery/ci_annual_financial_comparison.py::_profile_capex_breakdown"),
-        _calculation("solution.gross_capex", "Gross equipment CAPEX", "gross_CAPEX = PV_kWp * selected_PV_AUD_per_kWp + battery_curve_cost + inverter_curve_cost", "Uses the selected workspace equipment catalogue. Each component is rounded to cents before the stored gross total is rounded to cents.", ["PV capacity", "battery reference quantity", "inverter capacity", "selected device prices"], "solar_battery/ci_annual_financial_comparison.py::_profile_capex_breakdown", example=_gross_capex_example(priced_solutions)),
+        _calculation("solution.gross_capex", "Gross project CAPEX", "gross_CAPEX = PV_kWp * selected_PV_AUD_per_kWp + battery_curve_cost + inverter_curve_cost + installation_misc_cost", "Uses selected equipment prices plus the saved Plan A installation/miscellaneous fee once per solution (default AUD 70,000). Each component and the total are rounded to cents. Manual final quotations already include installation.", ["PV capacity", "battery reference quantity", "inverter capacity", "selected device prices"], "solar_battery/ci_annual_financial_comparison.py::_profile_capex_breakdown", example=_gross_capex_example(priced_solutions)),
         _calculation("solution.net_capex", "Model Net CAPEX", "model_Net_CAPEX = gross_CAPEX; STC_deduction = 0", "The standalone STC worksheet is not a pricing input. A manual quotation replaces the model equipment cost as the investment used for analysis.", ["gross CAPEX"], "solar_battery/ci_annual_financial_comparison.py::preview_ci_design_candidate_prices", example=_net_capex_example(priced_solutions)),
         _calculation("solution.solar_stc_eligibility", "Solar STC eligibility", "eligible only when 0 < PV_kWp <= 100 and PV_kWp * specific_yield * derating <= 250,000 kWh/year", "The program must also be enabled with current eligibility, site, zone, price and ruleset evidence. An ineligible scenario receives zero certificates rather than an estimated entitlement.", ["PV capacity", "annual specific yield", "derating", "approved evidence bindings"], "solar_battery/ci_rebate_calculation.py::_solar_stc"),
         _calculation("solution.solar_stc", "Solar STC rebate", "STCs = floor(PV_kWp * postcode_zone_rating * deeming_years); rebate = round(STCs * certificate_price, 2)", "The whole product is floored once. Deeming years are determined by the approved target certificate date.", ["PV capacity", "zone rating", "deeming years", "certificate price"], "solar_battery/ci_rebate_calculation.py::_solar_stc", example=_rebate_example(priced_solutions, "solar_stc")),
@@ -462,6 +462,18 @@ def _solution_module(
         _calculation("solution.veec", "Victorian deemed VEEC rebate", "input_factor = 0.133 when PV_kWp <= 100 else 0.25; regional_factor = 0.98 metropolitan else 1.04; VEECs = floor(PV_kWp * input_factor * 10 * regional_factor); rebate = round(VEECs * certificate_price, 2)", "The lifetime is fixed at 10 years and the whole certificate product is floored once.", ["PV capacity", "input factor", "10-year lifetime", "Victorian regional factor", "certificate price"], "solar_battery/ci_rebate_calculation.py::_vic_deemed_veec", example=_rebate_example(priced_solutions, "vic_deemed_veec")),
         _calculation("solution.manual_quote_basis", "Manual quotation hand-off", "finance_gross_upfront = finance_Net_CAPEX = entered_quoted_Net_CAPEX; finance_rebate_deduction = 0", "The quotation field is explicitly a final ex-GST Net CAPEX. The theoretical rebate audit is retained, but annual finance does not deduct it again.", ["analyst-entered quoted Net CAPEX"], "solar_battery/ci_annual_financial_comparison.py::_financial_solution"),
     ]
+    legacy_ids = {"solution.solar_stc_eligibility", "solution.solar_stc", "solution.battery_stc_eligibility", "solution.battery_stc", "solution.veec_eligibility", "solution.veec"}
+    for calculation in calculations:
+        if calculation["calculation_id"] in legacy_ids:
+            calculation["label"] = "Legacy audit only · " + calculation["label"]
+            calculation["description"] = "NOT ACTIVE in the current worksheet, Solutions or Finance. Historical implementation only. " + calculation["description"]
+    for parameter in parameters:
+        if parameter["parameter_id"].startswith("solution.rebate."):
+            parameter["active_in_current_model"] = False
+    calculations.extend([
+        _calculation("solution.worksheet_solar", "Standalone Solar STC worksheet", "rebate = (2030 - entered_year + 1) * entered_zone_factor * entered_PV_kWp * entered_price", "Zone 3 = 1.382; Zone 4 = 1.185. No certificate floor or eligibility caps. This worksheet is not a solution or finance input.", ["entered installation year", "entered zone", "entered PV capacity", "entered certificate price"], "solar_battery/ci_stc_calculator.py::calculate_stc_estimate"),
+        _calculation("solution.worksheet_battery", "Standalone Battery STC worksheet", "rebate = entered_STC_count * entered_certificate_price", "No installation-period factor or capacity multiplier. Default 174 certificates at AUD 39 gives AUD 6,786. Excluded from Solutions and Finance.", ["entered STC count", "entered certificate price"], "solar_battery/ci_stc_calculator.py::calculate_stc_estimate", example={"substitution": "Synthetic worksheet example: 174 * 39", "result": 6786, "unit": "AUD"}),
+    ])
     price_by_id = {str(row.get("scenario_id")): row for row in priced_solutions}
     rows = []
     rebate_rows = []
@@ -475,6 +487,13 @@ def _solution_module(
             "values": {
                 "pv_capacity": candidate.get("pv_capacity_kwp_dc"),
                 "battery_capacity": candidate.get("nominal_capacity_kwh"),
+                "specific_yield": candidate.get("pv_annual_specific_yield_kwh_per_kw"),
+                "derating": candidate.get("pv_derating_factor"),
+                "battery_power": candidate.get("max_discharge_kw"),
+                "charge_efficiency": candidate.get("charge_efficiency"),
+                "discharge_efficiency": candidate.get("discharge_efficiency"),
+                "soc_min": candidate.get("min_soc_fraction"),
+                "soc_max": candidate.get("max_soc_fraction"),
                 "pcs_capacity": candidate.get("battery_inverter_capacity_kw_ac") if candidate.get("dispatch_topology") == "separate_ac" else candidate.get("pv_inverter_capacity_kw_ac"),
                 "pv_inverter_capacity": candidate.get("pv_inverter_capacity_kw_ac"),
                 "topology": candidate.get("dispatch_topology", "shared_hybrid_dc"),
@@ -482,6 +501,7 @@ def _solution_module(
                 "pv_capex": breakdown.get("pv_aud"),
                 "battery_capex": breakdown.get("battery_aud"),
                 "inverter_capex": breakdown.get("inverter_aud"),
+                "installation_misc": breakdown.get("installation_misc_aud"),
                 "upfront_rebate": priced.get("upfront_rebate_aud_ex_gst"),
                 "net_capex": priced.get("net_capex_aud_ex_gst"),
             },
@@ -512,7 +532,7 @@ def _solution_module(
     return _module(
         "solution_generator",
         "Solution Generator",
-        "Search-space generation, equipment performance, rebates and Net CAPEX.",
+        "Search-space generation, saved equipment performance and investment, including installation. STC is separate.",
         status="ready" if design_candidates else "input_required",
         saved_at=None,
         parameters=parameters,
@@ -525,17 +545,25 @@ def _solution_module(
             _result_set("solution.solutions", "Generated solutions", [
                 {"key": "pv_capacity", "label": "PV", "unit": "kWp DC"},
                 {"key": "battery_capacity", "label": "Battery", "unit": "kWh"},
+                {"key": "specific_yield", "label": "Authored specific yield", "unit": "kWh/kWp/year"},
+                {"key": "derating", "label": "PV derating", "unit": "fraction"},
+                {"key": "battery_power", "label": "Battery discharge limit", "unit": "kW"},
+                {"key": "charge_efficiency", "label": "Charge efficiency", "unit": "fraction"},
+                {"key": "discharge_efficiency", "label": "Discharge efficiency", "unit": "fraction"},
+                {"key": "soc_min", "label": "Minimum SOC", "unit": "fraction"},
+                {"key": "soc_max", "label": "Maximum SOC", "unit": "fraction"},
                 {"key": "pcs_capacity", "label": "PCS", "unit": "kW AC"},
                 {"key": "pv_inverter_capacity", "label": "PV / shared inverter", "unit": "kW AC"},
                 {"key": "topology", "label": "Topology", "unit": None},
                 {"key": "pv_capex", "label": "PV CAPEX", "unit": "AUD ex GST"},
                 {"key": "battery_capex", "label": "Battery CAPEX", "unit": "AUD ex GST"},
                 {"key": "inverter_capex", "label": "Inverter CAPEX", "unit": "AUD ex GST"},
+                {"key": "installation_misc", "label": "Installation & miscellaneous", "unit": "AUD ex GST"},
                 {"key": "gross_capex", "label": "Gross CAPEX", "unit": "AUD ex GST"},
-                {"key": "upfront_rebate", "label": "Rebates", "unit": "AUD ex GST"},
+                {"key": "upfront_rebate", "label": "Legacy rebate audit (inactive)", "unit": "AUD ex GST"},
                 {"key": "net_capex", "label": "Model Net CAPEX", "unit": "AUD ex GST"},
             ], rows),
-            _result_set("solution.rebate_audit", "Saved rebate calculation audit", [
+            _result_set("solution.rebate_audit", "Legacy rebate audit (not used in current calculations)", [
                 {"key": "status", "label": "Status", "unit": None},
                 {"key": "reason_codes", "label": "Reason codes", "unit": None},
                 {"key": "certificate_quantity", "label": "Certificates", "unit": "certificates"},
@@ -551,9 +579,9 @@ def _solution_module(
             f"Device profile: {device_state.get('status', 'not_configured')}.",
             f"Rebate profile: {rebate_state.get('status', 'not_configured')}.",
             "Candidate generation is sorted by PV capacity, battery capacity, inverter capacity and scenario ID in ascending order; this is canonical storage order, not an economic ranking.",
-            "The model-price preview rounds each equipment component, Gross CAPEX, approved rebate total and Net CAPEX to two decimal places.",
+            "The model-price preview rounds equipment components and the one-off installation fee to cents. Current Net CAPEX equals Gross CAPEX, with no STC deduction.",
             "Legacy top-level AUD/kWp, AUD/kWh and AUD/kW price summaries in the device profile are not the active battery or inverter curve inputs for the current price preview; the selected equipment catalogue is authoritative.",
-            "Draft, stale and suggested rebate values are shown as inactive working information. Only an approved rebate calculation profile may affect the saved Net CAPEX preview.",
+            "Legacy rebate profiles and certificate audits are inactive historical information. Neither they nor the standalone worksheet affect current solution or finance prices.",
             "Certificate eligibility is not guaranteed. Disabled or ineligible programs remain visible with zero value, reason codes, source provenance, saved operands and the active ruleset identity.",
             "Electrical topology is explicit: shared_hybrid_dc preserves legacy DC PV charging outside the shared AC port; separate_ac uses independent PV inverter and battery PCS ports, with PV charging crossing both. An AC-labelled profile does not automatically select the topology.",
         ],
@@ -998,7 +1026,7 @@ def _finance_module(
         calculations=calculations,
         models=[
             _model("finance.tariff_replay", "Representative-year tariff model", "Evidence-bound tariff-aware optimized interval replay", "Consume the matching saved scenario's optimized annual interval quantities and price baseline and post-dispatch quantities with the active approved tariff.", ["The embedded source_tariff_replay_sha256 must match the saved tariff replay digest or the finance result fails closed.", "Scenario IDs and first-year values are inherited from the matching tariff replay row, not recomputed from the pre-tariff technical envelope.", "Reactive support changes finance only through reduced kVA multiplied by a positive approved demand rate; a zero rate produces zero demand-charge saving.", "Export credit is currently zero in dispatch and tariff value.", "Source-bill adjustment is excluded from scenario annual replay.", "The same tariff rates are used for baseline and scenario; future tariff changes and category-specific escalation are not modelled.", "Demand and tariff claims remain internal until evidence gates pass."], "solar_battery/ci_scenario_analysis.py::_annual_tariff_value and solar_battery/ci_project_annual_financial.py"),
-            _model("finance.discounted_cashflow", "Discounted cashflow model", "Nominal annual cashflows with NPV, IRR and simple payback", "Combine saved Net CAPEX, tariff value, O&M, escalation, degradation and replacement events across the selected term.", ["Current comparison stores no replacement events.", "O&M is flat nominal AUD and is not escalated.", "Taxes, financing, depreciation, residual value, insurance, development costs and battery replacement or ageing are not modelled in this comparison."], "solar_battery/ci_financial_solutions.py::calculate_metrics"),
+            _model("finance.discounted_cashflow", "Discounted cashflow model", "Nominal annual cashflows with NPV, IRR and simple payback", "Combine saved Net CAPEX, tariff value, O&M, escalation, degradation and replacement events across the selected term.", ["Current comparison stores no replacement events.", "O&M is flat nominal AUD and is not escalated.", "Plan A installation/miscellaneous is included in investment. Taxes, financing, depreciation, residual value, insurance and battery replacement or physical ageing are not separately modelled in this comparison."], "solar_battery/ci_financial_solutions.py::calculate_metrics"),
             _model("finance.review_order", "Financial review order", "Highest NPV, then shorter payback, lower Net CAPEX, physical rank and scenario ID", "Creates a deterministic internal comparison order.", ["Null payback sorts after finite payback.", "The leader is not a customer recommendation."], "solar_battery/ci_annual_financial_comparison.py::compare_ci_annual_financial_scenarios"),
         ],
         result_sets=[_result_set("finance.solutions", "Saved financial comparison", [
@@ -1131,7 +1159,9 @@ def _equipment_cost_parameters(
     """Project saved catalogue prices without invoking the pricing engine."""
 
     catalog = _mapping(device_profile.get("equipment_catalog"))
-    parameters: list[dict[str, object]] = []
+    parameters: list[dict[str, object]] = [
+        _parameter("solution.cost.installation_misc", "Installation & miscellaneous · Plan A", device_profile.get("installation_misc_cost_aud"), unit="AUD ex GST / solution", source_kind="analyst_input", source_label="Saved equipment & finance settings", source_path="device_profile_state.profile.installation_misc_cost_aud", edit_stage="tariff_replay")
+    ]
     groups = (
         ("pv", "pv_products", "pv_product_id"),
         ("battery", "battery_products", "battery_product_id"),
@@ -1270,7 +1300,8 @@ def _gross_capex_example(
         "substitution": (
             f"{row.get('scenario_id')}: stored PV {breakdown.get('pv_aud')} + "
             f"battery {breakdown.get('battery_aud')} + inverter "
-            f"{breakdown.get('inverter_aud')}"
+            f"{breakdown.get('inverter_aud')} + installation/miscellaneous "
+            f"{breakdown.get('installation_misc_aud', 'not recorded in this historical snapshot')}"
         ),
         "result": result,
         "unit": "AUD ex GST",
@@ -1289,8 +1320,8 @@ def _net_capex_example(
     return {
         "substitution": (
             f"{row.get('scenario_id')}: stored gross "
-            f"{row.get('gross_capex_aud_ex_gst')} - stored approved rebate "
-            f"{row.get('upfront_rebate_aud_ex_gst')}"
+            f"{row.get('gross_capex_aud_ex_gst')}; stored Net CAPEX {result}. "
+            "Historical snapshots are audit-only; the current model does not subtract STC."
         ),
         "result": result,
         "unit": "AUD ex GST",
