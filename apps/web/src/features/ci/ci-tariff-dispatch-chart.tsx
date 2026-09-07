@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { CiDispatchReviewPoint, CiDispatchReviewProjection } from "./api/ci-scenarios";
+import { useChartWidth } from "./use-chart-width";
 
 type Series = { key: keyof CiDispatchReviewPoint; label: string; color: string };
 const batterySeries: Series[] = [
@@ -47,7 +48,8 @@ export function CiTariffDispatchChart({ projection }: { projection: CiDispatchRe
 }
 
 function SavedSeriesChart({ label, points, series, unit }: { label: string; points: CiDispatchReviewPoint[]; series: Series[]; unit: string }) {
-  const width = 920; const height = 250; const left = 65; const right = 18; const top = 24; const bottom = 40;
+  const { ref, width } = useChartWidth();
+  const height = 250; const left = 65; const right = 18; const top = 24; const bottom = 40;
   const numericValue = (point: CiDispatchReviewPoint, key: keyof CiDispatchReviewPoint) => typeof point[key] === "number" && Number.isFinite(point[key]) ? point[key] as number : null;
   const values = points.flatMap((point) => series.flatMap(({ key }) => { const value = numericValue(point, key); return value === null ? [] : [value]; }));
   const minimum = Math.min(0, ...values);
@@ -58,9 +60,9 @@ function SavedSeriesChart({ label, points, series, unit }: { label: string; poin
     let connected = false;
     return points.map((point, index) => { const value = numericValue(point, key); if (value === null) { connected = false; return ""; } const segment = `${connected ? "L" : "M"}${x(index).toFixed(2)},${y(value).toFixed(2)}`; connected = true; return segment; }).join(" ");
   };
-  const ticks = [...new Set([0, .25, .5, .75, 1].map((fraction) => Math.round((points.length - 1) * fraction)))];
+  const ticks = [...new Set((width < 480 ? [0, .5, 1] : [0, .25, .5, .75, 1]).map((fraction) => Math.round((points.length - 1) * fraction)))];
   return <div>
-    <div className="overflow-x-auto"><svg aria-label={label} className="block h-auto w-full min-w-[640px]" role="img" viewBox={`0 0 ${width} ${height}`}>
+    <div ref={ref} className="min-w-0"><svg aria-label={label} className="block h-auto w-full" role="img" viewBox={`0 0 ${width} ${height}`}>
       <title>{label} · {unit} · saved Python tariff dispatch</title>
       <rect fill="#fbfdff" height={height - top - bottom} width={width - left - right} x={left} y={top} />
       {[0, .25, .5, .75, 1].map((fraction) => { const value = minimum + (maximum - minimum) * fraction; return <g key={fraction}><line stroke="#e2e8f0" x1={left} x2={width-right} y1={y(value)} y2={y(value)} /><text fill="#64748b" fontSize="11" textAnchor="end" x={left-8} y={y(value)+4}>{number(value, 1)}</text></g>; })}

@@ -121,6 +121,10 @@ it("handles empty Finance results before and after a populated chart", () => {
 
 it("shows the PV and battery combination diagonally below every portfolio bar", () => {
   render(<CiPortfolioReturnChart result={fixtures.comparison} />);
+  const summary = screen.getByLabelText("Selected solution financial summary");
+  expect(summary.children.length).toBe(5);
+  expect(summary.className).toContain("repeat(4,minmax(0,1fr))");
+  expect(screen.getByLabelText("Solution comparison plot").className).not.toContain("min-w-[860px]");
 
   const capacityLabels = screen.getAllByText(/^.* kWp \+ .* kWh$/);
   expect(capacityLabels).toHaveLength(fixtures.comparison.solutions.length * 2);
@@ -130,6 +134,20 @@ it("shows the PV and battery combination diagonally below every portfolio bar", 
     expect(label.getAttribute("transform")).toMatch(/^rotate\(-30 /);
   });
   expect(screen.getAllByRole("button", { name: /PV 146\.1 kWp and battery 391 kWh/ })).toHaveLength(2);
+});
+
+it("fits small portfolios and keeps dense portfolios readable on narrow screens", () => {
+  const measure = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(320);
+  try {
+    const { rerender } = render(<CiPortfolioReturnChart result={{ ...fixtures.comparison, solutions: fixtures.comparison.solutions.slice(0, 2) }} />);
+    const plot = screen.getByLabelText("Solution comparison plot");
+    expect((plot.firstElementChild as HTMLElement).style.width).toBe("100%");
+    expect(plot.getAttribute("tabindex")).toBeNull();
+    const solutions = Array.from({length: 8}, (_, index) => ({ ...fixtures.comparison.solutions[0], scenario_id: `dense-${index}`, financial_review_rank: index + 1 }));
+    rerender(<CiPortfolioReturnChart result={{ ...fixtures.comparison, solutions }} />);
+    expect((plot.firstElementChild as HTMLElement).style.width).toBe("726px");
+    expect(plot.getAttribute("tabindex")).toBe("0");
+  } finally { measure.mockRestore(); }
 });
 
 it("applies the shared Device profile to all tariff scenarios", async () => {

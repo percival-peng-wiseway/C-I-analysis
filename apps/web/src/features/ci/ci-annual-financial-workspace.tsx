@@ -7,6 +7,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useChartWidth } from "./use-chart-width";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -153,6 +154,7 @@ export function CiAnnualFinancialComparisonDetails({ result }: { result: CiAnnua
 }
 
 export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }: { onSelect?: (scenarioId: string) => void; result: CiAnnualFinancialComparisonResult; selectedScenarioId?: string }) {
+  const { ref: chartRef, width: availableWidth } = useChartWidth(1120);
   const [internalActiveId, setInternalActiveId] = useState(result.solutions[0]?.scenario_id ?? "");
   const activeId = selectedScenarioId ?? internalActiveId;
   const select = (scenarioId: string) => { setInternalActiveId(scenarioId); onSelect?.(scenarioId); };
@@ -160,13 +162,13 @@ export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }:
   if (!active) {
     return <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">No calculated Finance solutions are available. Confirm the selected solutions in Solution Generator, then run Analysis again.</p>;
   }
-  const width = Math.max(1120, result.solutions.length * 50 + 150);
-  const height = 650;
+  const width = Math.max(availableWidth, result.solutions.length * 72 + 150);
+  const height = 540;
   const left = 104, right = 30;
   const chartWidth = width - left - right;
   const step = chartWidth / result.solutions.length;
   const barWidth = Math.min(36, Math.max(22, step * .62));
-  const npvTop = 64, panelHeight = 170, paybackTop = 376;
+  const npvTop = 48, panelHeight = 150, paybackTop = 304;
   const npvValues = result.solutions.map((item) => item.metrics.net_present_value_aud);
   const npvMin = Math.min(0, ...npvValues);
   const npvMax = Math.max(1, ...npvValues);
@@ -181,8 +183,9 @@ export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }:
 
   return <section className="overflow-hidden rounded-xl border border-slate-200 bg-white" aria-labelledby="portfolio-return-title">
     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 p-5 sm:px-6 sm:py-5"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-cyan-700">Portfolio view</p><h2 className="mt-1 text-xl font-semibold text-slate-950" id="portfolio-return-title">NPV and payback across all solutions</h2><p className="mt-1 text-sm text-slate-500">Select a bar to inspect the same solution throughout Tariff replay.</p></div><div className="flex items-center gap-3"><span className="inline-flex items-center gap-2 text-xs text-slate-500"><span className="size-2.5 rounded-sm bg-[#a63db7]" />Top 3 NPV</span><span className="inline-flex items-center gap-2 text-xs text-slate-500"><span className="size-2.5 rounded-sm bg-[#102a4d]" />Selected</span><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">{result.solutions.length} solutions</span></div></div>
-    <div className="overflow-x-auto p-4 sm:p-6">
-      <div className="min-w-[860px]">
+    <div className="p-4 sm:p-6">
+      <div ref={chartRef} className="min-w-0 overflow-x-auto" tabIndex={width > availableWidth ? 0 : undefined} aria-label="Solution comparison plot">
+      <div style={{width: width > availableWidth ? width : "100%"}}>
       <svg aria-label="All solution NPV and payback comparison" className="block h-auto w-full" role="img" viewBox={`0 0 ${width} ${height}`}>
         <rect fill="#f8fafc" height={panelHeight} rx="10" width={chartWidth} x={left} y={npvTop} />
         {ticks.map((fraction) => <line key={`npv-${fraction}`} stroke="#dbe2ea" x1={left} x2={width-right} y1={npvTop + fraction * panelHeight} y2={npvTop + fraction * panelHeight} />)}
@@ -226,8 +229,9 @@ export function CiPortfolioReturnChart({ onSelect, result, selectedScenarioId }:
         })}
       </svg>
       </div>
+      </div>
     </div>
-    <div className="grid gap-3 border-t border-slate-200 bg-slate-50/70 p-5 sm:grid-cols-2 lg:grid-cols-[minmax(260px,1.7fr)_repeat(5,minmax(110px,1fr))] lg:items-stretch"><div className="rounded-xl border border-slate-200 bg-white p-4 sm:col-span-2 lg:col-span-1"><p className="text-xs font-semibold uppercase tracking-[.13em] text-cyan-700">Selected solution #{active.financial_review_rank}</p><p className="mt-2 text-sm font-semibold leading-6 text-slate-950">{configurationFromFinance(active)}</p></div><ChartMetric label="Gross CAPEX" value={aud(active.gross_upfront_cost_aud_ex_gst)} /><ChartMetric label="Net upfront" value={aud(active.upfront_cost_aud_ex_gst)} /><ChartMetric label="NPV" value={signedAud(active.metrics.net_present_value_aud)} /><ChartMetric label="Payback" value={payback(active.metrics.payback_period_years)} /></div>
+    <div aria-label="Selected solution financial summary" className="grid gap-3 border-t border-slate-200 bg-slate-50/70 p-4 sm:grid-cols-2 sm:p-5 xl:grid-cols-[minmax(0,1.6fr)_repeat(4,minmax(0,1fr))] xl:items-stretch"><div className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 sm:col-span-2 xl:col-span-1"><p className="text-xs font-semibold uppercase tracking-[.13em] text-cyan-700">Selected solution #{active.financial_review_rank}</p><p className="mt-2 text-sm font-semibold leading-6 text-slate-950">{configurationFromFinance(active)}</p></div><ChartMetric label="Gross CAPEX" value={aud(active.gross_upfront_cost_aud_ex_gst)} /><ChartMetric label="Net upfront" value={aud(active.upfront_cost_aud_ex_gst)} /><ChartMetric label="NPV" value={signedAud(active.metrics.net_present_value_aud)} /><ChartMetric label="Payback" value={payback(active.metrics.payback_period_years)} /></div>
   </section>;
 }
 

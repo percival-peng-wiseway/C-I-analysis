@@ -560,7 +560,7 @@ export function CiTariffReplayResult({
       </header>
 
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <nav aria-label="Solution analysis sections" className="flex gap-1 overflow-x-auto border-b border-slate-200 bg-slate-50/60 p-3 sm:px-5">
+        <nav aria-label="Solution analysis sections" className="flex flex-wrap gap-1 border-b border-slate-200 bg-slate-50/60 p-3 sm:px-5">
           {tabs.map((item) => <button aria-pressed={tab === item.id} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold transition ${tab === item.id ? "bg-cyan-100 text-cyan-800" : "text-slate-500 hover:bg-white hover:text-slate-800"}`} key={item.id} onClick={() => setTab(item.id)} type="button">{item.label}</button>)}
         </nav>
         <div className="p-5 sm:p-6">
@@ -579,7 +579,7 @@ export function CiTariffReplayResult({
 function SolutionGallery({ financeResult, onOpen, result }: { financeResult: CiAnnualFinancialComparisonResult; onOpen: (scenarioId: string) => void; result: CiPhysicalScenarioResult }) {
   return <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-slate-200 p-5 sm:p-6"><div><p className="text-xs font-semibold uppercase tracking-[.15em] text-cyan-700">Solutions</p><h2 className="mt-1 text-xl font-semibold text-slate-950">Open a solution to inspect the full analysis</h2></div><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">{financeResult.solutions.length} calculated</span></div>
-    <div className="grid gap-4 bg-slate-50/40 p-4 md:grid-cols-2 2xl:grid-cols-3 sm:p-5">
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))] gap-4 bg-slate-50/40 p-4 sm:p-5">
       {financeResult.solutions.map((solution) => {
         const scenario = result.scenarios.find((item) => item.scenario_id === solution.scenario_id);
         if (!scenario) return null;
@@ -617,7 +617,7 @@ function SystemConfiguration({ scenario }: { scenario: CiPhysicalScenarioResult[
 
 function KeyMetricStrip({ result, scenario, solution }: { result: CiPhysicalScenarioResult; scenario: CiPhysicalScenarioResult["scenarios"][number]; solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {
   const demandReduction = Math.max(0, result.baseline.raw_rolling_demand_kva - scenario.post_dispatch.raw_rolling_demand_kva);
-  return <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8"><DetailMetric label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} /><DetailMetric label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} /><DetailMetric label="Annual saving" positive value={aud2(solution.first_year_value_aud_ex_gst)} /><DetailMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /><DetailMetric label="IRR" value={percent(solution.metrics.internal_rate_of_return)} /><DetailMetric label="NPV" positive={solution.metrics.net_present_value_aud >= 0} value={signedAud2(solution.metrics.net_present_value_aud)} /><DetailMetric label="Demand reduction" value={`${numberLabel(demandReduction, 3)} kVA`} /></div>;
+  return <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-7"><DetailMetric label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} /><DetailMetric label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} /><DetailMetric label="Annual saving" positive value={aud2(solution.first_year_value_aud_ex_gst)} /><DetailMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /><DetailMetric label="IRR" value={percent(solution.metrics.internal_rate_of_return)} /><DetailMetric label="NPV" positive={solution.metrics.net_present_value_aud >= 0} value={signedAud2(solution.metrics.net_present_value_aud)} /><DetailMetric label="Demand reduction" value={`${numberLabel(demandReduction, 3)} kVA`} /></div>;
 }
 
 function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancialComparisonResult; solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {

@@ -32,7 +32,7 @@ describe("C&I design feasibility visuals", () => {
     rerender(<CiDesignFeasibility projectId="project-1" result={{ ...result, scenarios: [result.scenarios[1]] }} />);
     expect(screen.getByRole("button", { name: /Open solution 2:/ }).getAttribute("aria-pressed")).toBe("true");
     rerender(<CiDesignFeasibility projectId="project-1" result={empty} />);
-    expect(screen.queryByRole("img", { name: "Annual grid import comparison" })).toBeNull();
+    expect(screen.queryByRole("figure", { name: "Annual grid import comparison" })).toBeNull();
     expect(screen.getByRole("status").textContent).toContain("run Analysis again");
   });
 
@@ -44,7 +44,7 @@ describe("C&I design feasibility visuals", () => {
 
     expect(screen.getByRole("heading", { name: "12 simulated scenarios" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "100.123456789 kWp PV · 200.987654321 kWh battery · 80.111222333 kW hybrid inverter / PCS" })).toBeTruthy();
-    expect(screen.getByRole("img", { name: "Annual grid import comparison" })).toBeTruthy();
+    expect(screen.getByRole("figure", { name: "Annual grid import comparison" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open solution 12: 155 kWp PV · 310 kWh battery · 124 kW hybrid inverter / PCS" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Open solution 12: 155 kWp PV · 310 kWh battery · 124 kW hybrid inverter / PCS" }));

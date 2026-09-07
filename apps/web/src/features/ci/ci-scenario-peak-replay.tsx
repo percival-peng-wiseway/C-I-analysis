@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CiFeasibilityScenario } from "./api/ci-design-feasibility";
+import { useChartWidth } from "./use-chart-width";
 
 const series = [
   { key: "baseline_kw", label: "Measured import", colour: "#334155" },
@@ -8,16 +9,17 @@ const series = [
 ] as const;
 type ImportKey = typeof series[number]["key"];
 const number = (value: number) => Number.isFinite(value) ? value.toLocaleString("en-AU", { maximumFractionDigits: 2 }) : "Unavailable";
-const width = 920, left = 58, right = 18;
+const left = 58, right = 18;
 // Use Python's meter-time labels directly. Browser timezone conversion would shift the curves.
 const minute = (label: string) => { const [h, m] = label.split(":").map(Number); return h * 60 + m; };
-const x = (label: string) => left + (width - left - right) * minute(label) / 1440;
 
 export function ScenarioPeakReplay({ scenario }: { scenario: CiFeasibilityScenario }) {
   return <PeakReplay key={`${scenario.scenario_id}:${scenario.peak_day.date}`} scenario={scenario} />;
 }
 
 function PeakReplay({ scenario }: { scenario: CiFeasibilityScenario }) {
+  const { ref, width } = useChartWidth();
+  const x = (label: string) => left + (width - left - right) * minute(label) / 1440;
   const { points, sampled_target_kw: target, date } = scenario.peak_day;
   const [visible, setVisible] = useState<Record<ImportKey, boolean>>({ baseline_kw: true, pv_only_import_kw: true, pv_battery_import_kw: true });
   const [showPv, setShowPv] = useState(true);
@@ -35,7 +37,7 @@ function PeakReplay({ scenario }: { scenario: CiFeasibilityScenario }) {
   const path = (key: ImportKey | "pv_generation_kw", max: number, bottom: number) => points.map((point, index) => `${index ? "L" : "M"}${x(point.time_label).toFixed(2)},${y(point[key], max, bottom).toFixed(2)}`).join(" ");
   const axes = (max: number, bottom: number) => <>
     {[0, .25, .5, .75, 1].map(tick => <g key={tick}><line stroke="#e2e8f0" x1={left} x2={width - right} y1={y(max * tick, max, bottom)} y2={y(max * tick, max, bottom)} /><text x={left - 8} y={y(max * tick, max, bottom) + 4} textAnchor="end" fill="#64748b" fontSize="11">{number(max * tick)}</text></g>)}
-    {[0, 6, 12, 18, 24].map(hour => <text key={hour} x={x(`${hour}:00`)} y={bottom + 22} textAnchor={hour === 0 ? "start" : hour === 24 ? "end" : "middle"} fill="#64748b" fontSize="11">{String(hour).padStart(2, "0")}:00</text>)}
+    {(width < 480 ? [0, 12, 24] : [0, 6, 12, 18, 24]).map(hour => <text key={hour} x={x(`${hour}:00`)} y={bottom + 22} textAnchor={hour === 0 ? "start" : hour === 24 ? "end" : "middle"} fill="#64748b" fontSize="11">{String(hour).padStart(2, "0")}:00</text>)}
     <text x="8" y="13" fill="#475569" fontSize="11">kW</text>
   </>;
   const hoverTargets = (bottom: number) => points.map((point, index) => {
@@ -53,18 +55,18 @@ function PeakReplay({ scenario }: { scenario: CiFeasibilityScenario }) {
       <button type="button" aria-pressed={showPv} className={`${toggleClass} ${showPv ? "border-slate-300 text-slate-800" : "border-slate-200 text-slate-400"}`} onClick={() => setShowPv(v => !v)}><span aria-hidden="true" className="w-5 border-t-[3px] border-emerald-600" />PV generation</button>
     </div>
     <p className="mt-2 text-xs text-slate-500">Click a legend to show or hide a series. Dashed blue over solid amber means equal grid import, not missing PV.</p>
-    <div className="mt-4 overflow-x-auto">
-      <svg aria-label="Scenario Analysis active-power peak shaving replay" role="img" className="min-w-[640px] w-full" viewBox="0 0 920 300">
+    <div ref={ref} className="mt-4 min-w-0">
+      <svg aria-label="Scenario Analysis active-power peak shaving replay" role="img" className="block w-full" viewBox={`0 0 ${width} 300`}>
         {axes(maximum, 264)}
         {target !== null && <line stroke="#64748b" strokeDasharray="3 5" x1={left} x2={width - right} y1={y(target, maximum, 264)} y2={y(target, maximum, 264)} />}
         {series.filter(s => visible[s.key]).map(s => <path key={s.key} data-series={s.key} d={path(s.key, maximum, 264)} fill="none" stroke={s.colour} strokeWidth={s.key === "pv_only_import_kw" ? 3.5 : 2.5} strokeDasharray={s.key === "pv_battery_import_kw" ? "7 5" : undefined} />)}
         <line x1={x(current.time_label)} x2={x(current.time_label)} y1={20} y2={264} stroke="#94a3b8" strokeDasharray="2 4" />
         {hoverTargets(264)}
       </svg>
-      {showPv && <div className="mt-4 min-w-[640px] border-t border-slate-100 pt-4">
+      {showPv && <div className="mt-4 min-w-0 border-t border-slate-100 pt-4">
         <h5 className="text-sm font-semibold text-emerald-800">PV generation (modelled)</h5>
         <p className="mt-1 text-xs text-slate-500">Same meter-time axis; separate kW scale. Generation is not the same as avoided grid import.</p>
-        {pvAvailable ? <svg aria-label="Technical screening PV generation" role="img" className="w-full" viewBox="0 0 920 170">
+        {pvAvailable ? <svg aria-label="Technical screening PV generation" role="img" className="block w-full" viewBox={`0 0 ${width} 170`}>
           {axes(pvMaximum, 134)}
           <path d={`${path("pv_generation_kw", pvMaximum, 134)} L${x(points[points.length - 1].time_label)},134 L${x(points[0].time_label)},134 Z`} fill="#d1fae5" />
           <path data-series="pv_generation_kw" d={path("pv_generation_kw", pvMaximum, 134)} fill="none" stroke="#047857" strokeWidth="2.5" />
