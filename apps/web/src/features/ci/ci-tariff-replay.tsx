@@ -629,6 +629,7 @@ function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancial
   ];
   const capexParts = breakdown ? [
     { label: "PV", value: breakdown.pv_aud, color: "bg-amber-400" },
+    { label: "Installation & miscellaneous · Plan A", value: breakdown.installation_misc_aud ?? 0, color: "bg-slate-500" },
     { label: "Battery", value: breakdown.battery_aud, color: "bg-cyan-600" },
     ...(solution.dispatch_topology === "separate_ac" && solution.inverter_pricing ? [
       { label: "PV inverter", value: solution.inverter_pricing.pv_inverter_aud_ex_gst, color: "bg-violet-500" },

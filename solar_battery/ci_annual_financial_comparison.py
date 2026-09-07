@@ -247,6 +247,7 @@ def compare_ci_annual_financial_scenarios(
             ),
             "device_prices": (
                 {
+                    "installation_misc_cost_aud": validated_profile["installation_misc_cost_aud"],
                     "pv_cost_aud_per_kwp_dc": validated_profile[
                         "pv_cost_aud_per_kwp_dc"
                     ],
@@ -686,6 +687,7 @@ def _profile_capex_breakdown(
             2,
         ),
         "inverter_aud": float(inverter_pricing["total_inverter_aud_ex_gst"]),
+        "installation_misc_aud": round(float(profile["installation_misc_cost_aud"]), 2),
     }
 
 

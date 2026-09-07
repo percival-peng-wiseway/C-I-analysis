@@ -14,6 +14,29 @@ afterEach(() => {
 });
 
 describe("CiSettingsPanel solution profile library", () => {
+  it("defaults Plan A installation cost to 70000 and saves edits independently of equipment prices", async () => {
+    let profile = deviceProfile();
+    vi.stubGlobal("fetch", vi.fn(async (_input, init) => {
+      if (init?.method === "PUT") profile = JSON.parse(String(init.body));
+      return new Response(JSON.stringify(readyState(profile)));
+    }));
+    const view = renderSettings();
+    await screen.findByRole("heading", { name: "Solution profile library" });
+    await userEvent.click(screen.getByRole("tab", { name: "Equipment & finance" }));
+    const fee = screen.getByLabelText("Installation & miscellaneous cost (Plan A)");
+    expect(fee).toHaveProperty("value", "70000");
+    await userEvent.clear(fee);
+    await userEvent.type(fee, "80000");
+    await userEvent.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(profile.installation_misc_cost_aud).toBe(80000));
+    expect(profile.equipment_catalog.pv_products[0].capital_cost_aud_per_kwp_dc).toBe(530);
+    view.unmount();
+    renderSettings();
+    await screen.findByRole("heading", { name: "Solution profile library" });
+    await userEvent.click(screen.getByRole("tab", { name: "Equipment & finance" }));
+    expect(screen.getByLabelText("Installation & miscellaneous cost (Plan A)")).toHaveProperty("value", "80000");
+  });
+
   it("adds a stable solar draft, publishes it, and saves it as the default", async () => {
     const user = userEvent.setup();
     const profile = deviceProfile();
@@ -159,7 +182,7 @@ function deviceProfile(): CiDeviceProfile {
     tax_basis: "gst_exclusive",
     pv_cost_aud_per_kwp_dc: 530,
     battery_cost_aud_per_kwh: 413,
-    inverter_cost_aud_per_kw_ac: 80,
+    inverter_cost_aud_per_kw_ac: 80, installation_misc_cost_aud: 70000,
     equipment_catalog: {
       pv_products: [{ product_id: "astronergy_astro_n7_600_630w", manufacturer: "Astronergy", model: "ASTRO N7 600–630W", rated_power_min_w: 600, rated_power_max_w: 630, capital_cost_aud_per_kwp_dc: 530, replacement_cost_aud_per_kwp_dc: 530, annual_om_aud: 0 }],
       battery_products: [{ product_id: "fox_ess_cq7_ci", manufacturer: "Fox ESS", model: "CQ7 C&I", chemistry: "LFP", module_capacity_kwh: 7, cost_curve: [{ quantity: 30, capital_cost_aud: 77578, replacement_cost_aud: 57456, annual_om_aud: 0 }, { quantity: 36, capital_cost_aud: 91866, replacement_cost_aud: 69660, annual_om_aud: 0 }, { quantity: 42, capital_cost_aud: 106154, replacement_cost_aud: 81864, annual_om_aud: 0 }] }],

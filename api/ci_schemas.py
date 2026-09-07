@@ -89,6 +89,7 @@ class CiDeviceProfileRequest(BaseModel):
     pv_cost_aud_per_kwp_dc: float = Field(gt=0, le=1_000_000)
     battery_cost_aud_per_kwh: float = Field(gt=0, le=1_000_000)
     inverter_cost_aud_per_kw_ac: float = Field(gt=0, le=1_000_000)
+    installation_misc_cost_aud: float = Field(default=70000, ge=0, le=1_000_000_000, allow_inf_nan=False)
     equipment_catalog: dict[str, object]
     default_equipment_selection: dict[str, str]
     solution_profiles: dict[str, list[dict[str, object]]] | None = None

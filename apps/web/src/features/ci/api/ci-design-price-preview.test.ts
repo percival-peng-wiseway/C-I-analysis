@@ -3,6 +3,18 @@ import { describe, expect, it, vi } from "vitest";
 import { fetchCiDesignPricePreview } from "./ci-design-price-preview";
 
 describe("fetchCiDesignPricePreview", () => {
+  it("reconciles installation fees as part of total CAPEX and rejects negative fees", async () => {
+    const data = payload();
+    const priced = { ...data, solutions: data.solutions.map(item => ({ ...item,
+      gross_capex_aud_ex_gst: 160000, net_capex_aud_ex_gst: 160000,
+      capex_breakdown_aud_ex_gst: { ...item.capex_breakdown_aud_ex_gst, installation_misc_aud: 70000 },
+    })) };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(priced)));
+    expect((await fetchCiDesignPricePreview("project-1", fetcher as typeof fetch)).solutions[0].net_capex_aud_ex_gst).toBe(160000);
+    priced.solutions[0].capex_breakdown_aud_ex_gst.installation_misc_aud = -70000;
+    await expect(fetchCiDesignPricePreview("project-1", fetcher as typeof fetch)).rejects.toThrow("unsafe contract");
+  });
+
   it("accepts the Python-priced all-solution contract", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify(payload()), { status: 200 }));
     const result = await fetchCiDesignPricePreview("project-1", fetcher as typeof fetch);

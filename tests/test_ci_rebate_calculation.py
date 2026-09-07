@@ -497,11 +497,13 @@ def test_design_price_preview_prices_continuous_authored_capacities_without_equi
     first_breakdown = first["capex_breakdown_aud_ex_gst"]
     second_breakdown = second["capex_breakdown_aud_ex_gst"]
     assert first_breakdown == {
+        "installation_misc_aud": 70000.0,
         "pv_aud": 53000.0,
         "battery_aud": round((200.0 / 7.0) * (77578.0 / 30.0), 2),
         "inverter_aud": 9000.0,
     }
     assert second_breakdown == {
+        "installation_misc_aud": 70000.0,
         "pv_aud": 53053.0,
         "battery_aud": round((200.1 / 7.0) * (77578.0 / 30.0), 2),
         "inverter_aud": 9002.5,

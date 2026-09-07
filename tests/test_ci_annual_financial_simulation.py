@@ -122,6 +122,24 @@ def test_separate_ac_prices_pv_inverter_and_battery_pcs_once_each() -> None:
     assert pv_preview["inverter_pricing"]["battery_inverter_aud_ex_gst"] == 0.0
 
 
+@pytest.mark.parametrize("capacity", [0, 200, 390])
+def test_plan_a_adds_fixed_fee_once_and_manual_total_is_not_charged_again(capacity):
+    candidate = {**_scenario(), "nominal_capacity_kwh": capacity}
+    base_profile = {**_device_profile(), "installation_misc_cost_aud": 0}
+    profile = _device_profile()
+    base = preview_ci_design_candidate_prices(candidates=[candidate], device_profile=base_profile)["solutions"][0]
+    priced = preview_ci_design_candidate_prices(candidates=[candidate], device_profile=profile)["solutions"][0]
+    assert priced["net_capex_aud_ex_gst"] == pytest.approx(base["net_capex_aud_ex_gst"] + 70000)
+    assert priced["capex_breakdown_aud_ex_gst"]["installation_misc_aud"] == 70000
+    tariff = _physical_result(b"", profile={}, scenarios=[candidate])
+    finance = compare_ci_annual_financial_scenarios(tariff_replay_result=tariff,
+        request={"pricing_mode": "device_profile"}, device_profile=profile)["solutions"][0]
+    assert finance["upfront_cost_aud_ex_gst"] == priced["net_capex_aud_ex_gst"]
+    manual = compare_ci_annual_financial_scenarios(tariff_replay_result=tariff,
+        request={"prices": [{"scenario_id": candidate["scenario_id"], "upfront_cost_aud_ex_gst": priced["net_capex_aud_ex_gst"]}]})["solutions"][0]
+    assert manual["upfront_cost_aud_ex_gst"] == priced["net_capex_aud_ex_gst"]
+
+
 def test_separate_ac_manual_quote_is_not_repriced_or_rebated_twice() -> None:
     candidate = {
         **_scenario(),
@@ -585,16 +603,16 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
         }
         assert auto_by_id[scenarios[0]["scenario_id"]][
             "upfront_cost_aud_ex_gst"
-        ] == 135883.81
+        ] == 205883.81
         assert auto_by_id[scenarios[0]["scenario_id"]][
             "capex_breakdown_aud_ex_gst"
-        ] == {"pv_aud": 53000.0, "battery_aud": 73883.81, "inverter_aud": 9000.0}
+        ] == {"pv_aud": 53000.0, "battery_aud": 73883.81, "inverter_aud": 9000.0, "installation_misc_aud": 70000.0}
         assert auto_by_id[scenarios[2]["scenario_id"]][
             "capex_breakdown_aud_ex_gst"
         ]["inverter_aud"] == 12000.0
         changed_profile = client.put(
             "/api/commercial-industrial/settings/device-profile",
-            json={**_device_profile(), "battery_cost_aud_per_kwh": 500.0},
+            json={**_device_profile(), "installation_misc_cost_aud": 80000.0},
         )
         assert changed_profile.status_code == 200
         stale = client.get(
@@ -717,7 +735,7 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
             f"/api/commercial-industrial/projects/{project['project_id']}/stc-calculator",
             json={"solar_installation_year": 2025, "solar_zone": 4, "pv_capacity_kwp": 140,
                   "solar_certificate_price": 39, "battery_installation_period": "2026-05_12",
-                  "battery_usable_capacity_kwh": 100, "battery_certificate_price": 39},
+                  "battery_stc_count": 100, "battery_certificate_price": 39},
         )
         assert worksheet.status_code == 200
         assert worksheet.json()["estimate"]["total_rebate_aud"] == 65340.60

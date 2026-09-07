@@ -92,7 +92,7 @@ const generatedDesign = {
 };
 
 const deviceProfileFixture = {
-  contract_version: "ci_device_profile_v5", profile_id: "workspace_device_profile", currency: "AUD", tax_basis: "gst_exclusive", pv_cost_aud_per_kwp_dc: 530, battery_cost_aud_per_kwh: 413, inverter_cost_aud_per_kw_ac: 80,
+  contract_version: "ci_device_profile_v5", profile_id: "workspace_device_profile", currency: "AUD", tax_basis: "gst_exclusive", pv_cost_aud_per_kwp_dc: 530, battery_cost_aud_per_kwh: 413, inverter_cost_aud_per_kw_ac: 80, installation_misc_cost_aud: 70000,
   equipment_catalog: {
     pv_products: [{ product_id: "astronergy_astro_n7_600_630w", manufacturer: "Astronergy", model: "ASTRO N7 600–630W", rated_power_min_w: 600, rated_power_max_w: 630, capital_cost_aud_per_kwp_dc: 530, replacement_cost_aud_per_kwp_dc: 530, annual_om_aud: 0 }],
     battery_products: [{ product_id: "fox_ess_cq7_ci", manufacturer: "Fox ESS", model: "CQ7 C&I", chemistry: "LFP", module_capacity_kwh: 7, cost_curve: [{ quantity: 30, capital_cost_aud: 77578, replacement_cost_aud: 57456, annual_om_aud: 0 }, { quantity: 36, capital_cost_aud: 91866, replacement_cost_aud: 69660, annual_om_aud: 0 }, { quantity: 42, capital_cost_aud: 106154, replacement_cost_aud: 81864, annual_om_aud: 0 }] }],
@@ -211,7 +211,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path.endsWith("/stc-calculator")) return new Response(JSON.stringify({ contract_version: "ci_stc_calculator_state_v1", project_id: path.includes("project-2") ? "project-2" : "project-1", estimate: null }));
+    if (path.endsWith("/stc-calculator")) return new Response(JSON.stringify({ contract_version: "ci_stc_calculator_state_v2", project_id: path.includes("project-2") ? "project-2" : "project-1", draft_inputs: null, legacy_capacity_reset: false, estimate: null }));
     if (path.endsWith("/settings/device-profile")) {
       const suggested = deviceProfileFixture;
       if (init?.method === "PUT") return new Response(JSON.stringify({ contract_version: "ci_device_profile_state_v1", status: "ready", updated_at: "2026-08-19", profile_sha256: "a".repeat(64), profile: JSON.parse(String(init.body)), suggested_profile: suggested }), { status: 200 });

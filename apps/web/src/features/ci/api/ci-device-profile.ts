@@ -78,6 +78,7 @@ export interface CiDeviceProfile {
   pv_cost_aud_per_kwp_dc: number;
   battery_cost_aud_per_kwh: number;
   inverter_cost_aud_per_kw_ac: number;
+  installation_misc_cost_aud: number;
   equipment_catalog: {
     pv_products: Array<{
       product_id: "astronergy_astro_n7_600_630w";
@@ -214,6 +215,7 @@ function isExistingPricingAndFinance(profile: CiDeviceProfile) {
     isFiniteInRange(profile.pv_cost_aud_per_kwp_dc, 0, 1_000_000, false) &&
     isFiniteInRange(profile.battery_cost_aud_per_kwh, 0, 1_000_000, false) &&
     isFiniteInRange(profile.inverter_cost_aud_per_kw_ac, 0, 1_000_000, false) &&
+    isFiniteInRange(profile.installation_misc_cost_aud, 0, 1_000_000_000, true) &&
     isFiniteInRange(profile.discount_rate, 0, 1, true, false) &&
     isFiniteInRange(profile.annual_value_escalation_rate, 0, 1, true, false) &&
     isFiniteInRange(profile.annual_value_degradation_rate, 0, 1, true, false) &&

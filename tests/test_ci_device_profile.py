@@ -33,6 +33,22 @@ def _profile(**overrides: object) -> dict[str, object]:
     return profile
 
 
+def test_plan_a_default_and_legacy_prices_are_not_hash_compatible():
+    legacy = _profile()
+    legacy.pop("installation_misc_cost_aud")
+    upgraded = validate_ci_device_profile(legacy)
+    assert upgraded["installation_misc_cost_aud"] == 70000
+    assert "installation_misc_cost_aud" not in legacy
+    assert device_profile_sha256(legacy) not in compatible_device_profile_sha256s(upgraded)
+    assert validate_ci_device_profile(_profile(installation_misc_cost_aud=0))["installation_misc_cost_aud"] == 0
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), 1_000_000_001])
+def test_plan_a_rejects_invalid_fees(value):
+    with pytest.raises(CiProjectError):
+        validate_ci_device_profile(_profile(installation_misc_cost_aud=value))
+
+
 def _v2_profile(**overrides: object) -> dict[str, object]:
     profile = _profile(**overrides)
     profile["contract_version"] = CI_V2_DEVICE_PROFILE_CONTRACT_VERSION

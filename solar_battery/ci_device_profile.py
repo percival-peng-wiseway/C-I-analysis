@@ -146,6 +146,7 @@ def suggested_ci_device_profile() -> dict[str, object]:
         "pv_cost_aud_per_kwp_dc": 530.0,
         "battery_cost_aud_per_kwh": 413.0,
         "inverter_cost_aud_per_kw_ac": 80.0,
+        "installation_misc_cost_aud": 70000.0,
         "equipment_catalog": {
             "pv_products": [
                 {
@@ -507,6 +508,9 @@ def validate_ci_device_profile(profile: dict[str, object]) -> dict[str, object]:
         ),
         "inverter_cost_aud_per_kw_ac": _positive_price(
             profile.get("inverter_cost_aud_per_kw_ac"), "Inverter price"
+        ),
+        "installation_misc_cost_aud": _non_negative_price(
+            profile.get("installation_misc_cost_aud", 70000.0), "Plan A installation and miscellaneous cost"
         ),
         "equipment_catalog": {
             "pv_products": pv_products,

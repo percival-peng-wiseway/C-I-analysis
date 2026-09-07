@@ -27,7 +27,7 @@ class CiStcCalculatorInput(BaseModel):
         "2028-01_06", "2028-07_12", "2029-01_06", "2029-07_12",
         "2030-01_06", "2030-07_12",
     ]
-    battery_usable_capacity_kwh: float = Field(ge=0, le=1_000_000)
+    battery_stc_count: float = Field(default=174, ge=0, le=1_000_000)
     battery_certificate_price: float = Field(ge=0, le=1000)
 
 
@@ -36,7 +36,7 @@ def calculate_stc_estimate(inputs: CiStcCalculatorInput) -> dict:
     zone = Decimal("1.382" if inputs.solar_zone == 3 else "1.185")
     factor = Decimal(BATTERY_FACTORS[inputs.battery_installation_period])
     solar_quantity = Decimal(deeming) * zone * Decimal(str(inputs.pv_capacity_kwp))
-    battery_quantity = Decimal(str(inputs.battery_usable_capacity_kwh)) * factor
+    battery_quantity = Decimal(str(inputs.battery_stc_count)) * factor
 
     def money(quantity, price):
         return (quantity * Decimal(str(price))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -44,7 +44,7 @@ def calculate_stc_estimate(inputs: CiStcCalculatorInput) -> dict:
     solar = money(solar_quantity, inputs.solar_certificate_price)
     battery = money(battery_quantity, inputs.battery_certificate_price)
     return {
-        "contract_version": "ci_stc_manual_estimate_v1",
+        "contract_version": "ci_stc_manual_estimate_v2",
         "inputs": inputs.model_dump(mode="json"),
         "solar_deeming_years": deeming, "solar_zone_factor": float(zone),
         "battery_factor": float(factor),
@@ -61,8 +61,17 @@ def calculate_stc_estimate(inputs: CiStcCalculatorInput) -> dict:
 def stc_calculator_state(session, *, project_id, actor):
     project = require_ci_project(session, project_id=project_id, actor=actor)
     saved = project.stc_calculator_json
-    return {"contract_version": "ci_stc_calculator_state_v1", "project_id": str(project_id),
-            "estimate": calculate_stc_estimate(CiStcCalculatorInput.model_validate(saved)) if saved is not None else None}
+    legacy_capacity_reset = saved is not None and "battery_usable_capacity_kwh" in saved
+    # Reading an old worksheet must not reinterpret kWh as certificates or mutate it.
+    draft = dict(saved) if saved is not None else None
+    if legacy_capacity_reset:
+        draft.pop("battery_usable_capacity_kwh")
+        draft["battery_stc_count"] = 174
+    inputs = CiStcCalculatorInput.model_validate(draft) if draft is not None else None
+    return {"contract_version": "ci_stc_calculator_state_v2", "project_id": str(project_id),
+            "draft_inputs": inputs.model_dump(mode="json") if inputs is not None else None,
+            "legacy_capacity_reset": legacy_capacity_reset,
+            "estimate": calculate_stc_estimate(inputs) if inputs is not None and not legacy_capacity_reset else None}
 
 
 def save_stc_calculator(session, *, project_id, actor, inputs):

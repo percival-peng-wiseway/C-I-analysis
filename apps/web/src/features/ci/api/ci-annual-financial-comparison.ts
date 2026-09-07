@@ -20,6 +20,7 @@ export interface CiAnnualFinancialComparisonSolution {
     pv_aud: number;
     battery_aud: number;
     inverter_aud: number;
+    installation_misc_aud?: number;
   } | null;
   annual_om_cost_aud_ex_gst: number;
   first_year_value_aud_ex_gst: number;
@@ -111,6 +112,7 @@ export interface CiAnnualFinancialComparisonResult {
       pv_cost_aud_per_kwp_dc: number;
       battery_cost_aud_per_kwh: number;
       inverter_cost_aud_per_kw_ac: number;
+      installation_misc_cost_aud?: number;
     } | null;
     equipment_selection: CiEquipmentSelection | null;
     rebate_profile_sha256: string | null;
@@ -298,6 +300,7 @@ export function assertCiAnnualFinancialComparison(
         item.capex_breakdown_aud_ex_gst?.pv_aud,
         item.capex_breakdown_aud_ex_gst?.battery_aud,
         item.capex_breakdown_aud_ex_gst?.inverter_aud,
+        item.capex_breakdown_aud_ex_gst?.installation_misc_aud ?? 0,
       ].every(Number.isFinite)) ||
       (item.metrics.payback_period_years !== null && !Number.isFinite(item.metrics.payback_period_years)) ||
       (item.metrics.internal_rate_of_return !== null && !Number.isFinite(item.metrics.internal_rate_of_return)) ||

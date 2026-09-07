@@ -18,6 +18,7 @@ export interface CiDesignPricePreviewSolution {
     pv_aud: number;
     battery_aud: number;
     inverter_aud: number;
+    installation_misc_aud?: number;
   };
   rebate_calculation: CiScenarioRebateCalculation;
 }
@@ -94,8 +95,9 @@ function validSolution(solution: CiDesignPricePreviewSolution) {
     breakdown?.pv_aud,
     breakdown?.battery_aud,
     breakdown?.inverter_aud,
+    breakdown?.installation_misc_aud ?? 0,
   ];
-  const breakdownTotal = breakdown ? breakdown.pv_aud + breakdown.battery_aud + breakdown.inverter_aud : Number.NaN;
+  const breakdownTotal = breakdown ? breakdown.pv_aud + breakdown.battery_aud + breakdown.inverter_aud + (breakdown.installation_misc_aud ?? 0) : Number.NaN;
   return (
     typeof solution.scenario_id === "string" && solution.scenario_id.length > 0 &&
     typeof solution.label === "string" && solution.label.length > 0 &&

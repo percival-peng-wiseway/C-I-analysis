@@ -541,7 +541,7 @@ const deviceProfile: CiDeviceProfile = {
   tax_basis: "gst_exclusive",
   pv_cost_aud_per_kwp_dc: 530,
   battery_cost_aud_per_kwh: 413,
-  inverter_cost_aud_per_kw_ac: 80,
+  inverter_cost_aud_per_kw_ac: 80, installation_misc_cost_aud: 70000,
   equipment_catalog: {
     pv_products: [{
       product_id: "astronergy_astro_n7_600_630w",
