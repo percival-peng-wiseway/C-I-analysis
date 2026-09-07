@@ -313,7 +313,7 @@ def validate_ci_project_tariff_profile(
         "windows",
         "minimum_chargeable_rolling_kva",
     }
-    optional_keys = {"additional_bill_adjustment_aud"}
+    optional_keys = {"additional_bill_adjustment_aud", "environmental"}
     if (
         not isinstance(profile, dict)
         or not required_keys <= set(profile)
@@ -363,6 +363,22 @@ def validate_ci_project_tariff_profile(
         "windows": normalized_windows,
         "minimum_chargeable_rolling_kva": minimum_kva,
     }
+    if "environmental" in profile:
+        items = profile["environmental"]
+        if not isinstance(items, list) or not 1 <= len(items) <= 20:
+            raise _invalid("Environmental charge lines are invalid.")
+        normalized["environmental"] = []
+        for item in items:
+            if not isinstance(item, dict) or set(item) != {"label", "rate_c_per_kwh", "certificate_fraction"}:
+                raise _invalid("Environmental charge lines are invalid.")
+            normalized["environmental"].append({
+                "label": _text(item["label"], "Environmental label", 100),
+                "rate_c_per_kwh": _number(item["rate_c_per_kwh"], "Environmental rate", maximum=1_000_000),
+                "certificate_fraction": _number(item["certificate_fraction"], "Certificate fraction", maximum=1),
+            })
+        # The explicit lines supersede the legacy single-line fields.
+        normalized_rates["environmental_c_per_kwh"] = 0.0
+        normalized_rates["environmental_certificate_fraction"] = 1.0
     if "additional_bill_adjustment_aud" in profile:
         normalized["additional_bill_adjustment_aud"] = _number(
             profile.get("additional_bill_adjustment_aud"),
@@ -411,44 +427,31 @@ def _suggested_profile(
         or abs(float(categories["additional_charges"])) > 1_000_000
     ):
         return None
-    energy_rate = float(categories["energy_charges"]) / consumption * 100
-    network_rate = float(categories["network_charges"]) / consumption * 100
-    regulated_rate = float(categories["regulated_charges"]) / consumption * 100
-    environmental_rate = float(categories["environmental_charges"]) / consumption * 100
+    detected = bill.get("tariff_line_items", {})
+    detected_rates = detected.get("rates", {})
+    detected_factors = detected.get("factors", {})
     normalized_tariff_code = tariff_code.strip()
-    demand_windows = _suggested_demand_windows(normalized_tariff_code)
-    return validate_ci_project_tariff_profile(
-        {
-            "contract_version": CI_PROJECT_TARIFF_PROFILE_CONTRACT_VERSION,
-            "display_label": f"{normalized_tariff_code} · bill-derived working copy",
-            "network_tariff_code": normalized_tariff_code,
-            "additional_bill_adjustment_aud": float(
-                categories["additional_charges"]
-            ),
-            "rates": {
-                "retail_peak_c_per_kwh": energy_rate,
-                "retail_off_peak_c_per_kwh": energy_rate,
-                "incentive_demand_aud_per_kva_month": 0.0,
-                "rolling_demand_aud_per_kva_month": 0.0,
-                "network_peak_c_per_kwh": network_rate,
-                "network_off_peak_c_per_kwh": network_rate,
-                "aemo_ancillary_c_per_kwh": regulated_rate,
-                "aemo_participant_c_per_kwh": 0.0,
-                "aemo_frc_c_per_day": 0.0,
-                "environmental_c_per_kwh": environmental_rate,
-                "environmental_certificate_fraction": 1.0,
-                "metering_aud_per_day": float(categories["metering_charges"]) / billing_days,
-                "value_added_c_per_day": 0.0,
-            },
-            "factors": {"mlf": 1.0, "dlf": 1.0},
-            "windows": {
-                "retail_energy": {"start": "07:00", "end": "22:00"},
-                "network_energy": {"start": "07:00", "end": "22:00"},
-                **demand_windows,
-            },
-            "minimum_chargeable_rolling_kva": 0.0,
-        }
-    )
+    suggestion = {
+        "contract_version": CI_PROJECT_TARIFF_PROFILE_CONTRACT_VERSION,
+        "display_label": f"{normalized_tariff_code} · bill line items for review",
+        "network_tariff_code": normalized_tariff_code,
+        "additional_bill_adjustment_aud": float(categories["additional_charges"]),
+        "rates": {key: detected_rates.get(key) for key in sorted(_RATE_KEYS)},
+        "factors": {key: detected_factors.get(key) for key in ("mlf", "dlf")},
+        "windows": {
+            "retail_energy": {"start": "07:00", "end": "22:00"},
+            "network_energy": {"start": "07:00", "end": "22:00"},
+            **_suggested_demand_windows(normalized_tariff_code),
+        },
+        "minimum_chargeable_rolling_kva": 0.0,
+    }
+    if detected.get("environmental"):
+        suggestion["environmental"] = detected["environmental"]
+        suggestion["rates"]["environmental_c_per_kwh"] = 0.0
+        suggestion["rates"]["environmental_certificate_fraction"] = 1.0
+    # Null means not detected, never a free charge or a category-average rate.
+    # Saved/approved profiles still require every numeric field to be complete.
+    return suggestion
 
 
 def _calculation_profile(
@@ -509,7 +512,7 @@ def _calculation_profile(
             "aemo_ancillary_c_per_kwh": rates["aemo_ancillary_c_per_kwh"],
             "aemo_participant_c_per_kwh": rates["aemo_participant_c_per_kwh"],
             "aemo_frc_c_per_day": rates["aemo_frc_c_per_day"],
-            "environmental": [
+            "environmental": editable.get("environmental") or [
                 {
                     "label": "Bill-derived environmental charge",
                     "rate_c_per_kwh": rates["environmental_c_per_kwh"],
@@ -687,8 +690,9 @@ def _evidence_basis(
             dict(categories) if isinstance(categories, dict) else None
         ),
         "derivation_notice": (
-            "Starting rates are category-average equivalents derived from the saved bill. "
-            "They are a calculation working copy, not detected contractual line items."
+            "Rates are extracted from explicit bill line items before loss factors. "
+            "Blank fields were not detected; category totals are never converted into tariff rates. "
+            "Review billing windows and the demand floor against approved tariff evidence; these are defaults, not extracted terms."
         ),
     }
 
@@ -767,6 +771,7 @@ def _tariff_facts_sha256(evidence: CiProjectEvidenceModel) -> str:
         "highest_metered_demand_kva",
         "power_factor_at_highest_demand",
         "charge_categories_ex_gst_aud",
+        "tariff_line_items",
         "subtotal_ex_gst_aud",
         "gst_aud",
         "total_inc_gst_aud",

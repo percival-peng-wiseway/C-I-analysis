@@ -109,3 +109,36 @@ const state: CiProjectTariffProfileState = {
   evidence_basis: null,
   blockers: [{ code: "tariff_profile_approval_required", message: "Review and approve the tariff profile." }],
 };
+
+it("leaves undetected rates blank and blocks saving instead of assuming zero", () => {
+  render(<CiTariffProfileDialog busy={false} detectedTariffCode="LLVT2" error={null} onClose={vi.fn()} onSave={vi.fn()} open state={{
+    ...state, suggested_profile: { ...profile, rates: { ...profile.rates, retail_peak_c_per_kwh: null, aemo_participant_c_per_kwh: null }, factors: { mlf: null, dlf: 1.1 } },
+  }} />);
+  expect((screen.getByLabelText("Retail peak rate") as HTMLInputElement).value).toBe("");
+  expect((screen.getByLabelText("AEMO participant rate") as HTMLInputElement).value).toBe("");
+  expect((screen.getByLabelText("MLF") as HTMLInputElement).value).toBe("");
+  expect((screen.getByRole("button", { name: "Save & use in calculations" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("replaces saved averages with detected rates only in the unsaved draft", async () => {
+  const user = userEvent.setup();
+  const onSave = vi.fn();
+  render(<CiTariffProfileDialog busy={false} detectedTariffCode="LLVT2" error={null} onClose={vi.fn()} onSave={onSave} open state={{
+    ...state, status: "approved", profile,
+    suggested_profile: { ...profile, rates: { ...profile.rates, retail_peak_c_per_kwh: 12.5, retail_off_peak_c_per_kwh: 8 }, environmental: [
+      { label: "VEEC Charge", rate_c_per_kwh: 10, certificate_fraction: .1 },
+      { label: "SREC Charge", rate_c_per_kwh: 5, certificate_fraction: .2 },
+    ] },
+  }} />);
+  await user.click(screen.getByRole("button", { name: "Use detected bill rates" }));
+  expect((screen.getByLabelText("Retail peak rate") as HTMLInputElement).value).toBe("12.5");
+  expect((screen.getByLabelText("Retail off-peak rate") as HTMLInputElement).value).toBe("8");
+  expect((screen.getByLabelText("VEEC Charge rate (c/kWh)") as HTMLInputElement).value).toBe("10");
+  expect((screen.getByLabelText("SREC Charge certificate fraction") as HTMLInputElement).value).toBe("0.2");
+  expect(screen.queryByLabelText("Environmental rate")).toBeNull();
+  expect(onSave).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Save & use in calculations" }));
+  expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ environmental: expect.arrayContaining([
+    { label: "VEEC Charge", rate_c_per_kwh: 10, certificate_fraction: .1 },
+  ]) }), true);
+});

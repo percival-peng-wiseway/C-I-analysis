@@ -17,6 +17,19 @@ describe("project tariff profile API", () => {
     expect(fetcher.mock.calls[0]?.[0]).toBe("/api/commercial-industrial/projects/project%20%2F%20one/tariff-profile");
   });
 
+  it("accepts unknown rates only in suggestions, never saved calculation profiles", () => {
+    const incomplete = { ...profile, rates: { ...profile.rates, retail_peak_c_per_kwh: null }, factors: { mlf: null, dlf: 1 } };
+    expect(assertCiProjectTariffProfileState({ ...state("not_available"), suggested_profile: incomplete }).suggested_profile).toEqual(incomplete);
+    expect(() => assertCiProjectTariffProfile(incomplete)).toThrow("Imported JSON");
+    expect(() => assertCiProjectTariffProfileState({ ...state("approved"), profile: incomplete })).toThrow("unsafe contract");
+  });
+
+  it("preserves environmental lines and rejects invalid certificate percentages", () => {
+    const detailed = { ...profile, environmental: [{ label: "Synthetic certificate", rate_c_per_kwh: 10, certificate_fraction: 0.1 }] };
+    expect(assertCiProjectTariffProfile(detailed).environmental).toEqual(detailed.environmental);
+    expect(() => assertCiProjectTariffProfile({ ...detailed, environmental: [{ ...detailed.environmental[0], certificate_fraction: 10 }] })).toThrow("Imported JSON");
+  });
+
   it("accepts an unavailable state without bill evidence or a suggestion", () => {
     expect(assertCiProjectTariffProfileState({ ...state("not_available"), suggested_profile: null })).toMatchObject({ status: "not_available", suggested_profile: null });
   });

@@ -13,6 +13,8 @@ from typing import Any
 
 from pypdf import PdfReader
 
+from solar_battery.ci_bill_tariff_lines import extract_bill_tariff_lines
+
 from solar_battery.ci_tariff_analysis import (
     MAX_CI_NEM12_UPLOAD_BYTES,
     CiTariffAnalysisError,
@@ -1283,6 +1285,7 @@ def _parse_origin_invoice_text(raw_text: str) -> dict[str, Any]:
         "retailer": "Origin Energy",
         "invoice_kind": "Business Electricity Tax Invoice",
         "extraction_method": "verified_origin_template",
+        "tariff_line_items": extract_bill_tariff_lines(text),
         "review_status": "not_required",
         "missing_fields": [],
         "invoice_arithmetic_scope": "charge_categories_and_totals",

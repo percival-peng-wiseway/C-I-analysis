@@ -40,6 +40,15 @@ def _approved_evidence_inspection() -> dict[str, object]:
             "consumption_kwh": 288.0,
             "highest_metered_demand_kva": 15.0,
             "power_factor_at_highest_demand": 0.8,
+            "tariff_line_items": {"version": 1, "factors": {"mlf": 1.0, "dlf": 1.0}, "rates": {
+                "aemo_ancillary_c_per_kwh": 1.0, "aemo_frc_c_per_day": 0.0,
+                "aemo_participant_c_per_kwh": 0.0, "environmental_c_per_kwh": 0.5,
+                "environmental_certificate_fraction": 1.0, "incentive_demand_aud_per_kva_month": 0.0,
+                "metering_aud_per_day": 2.0, "network_off_peak_c_per_kwh": 20.0,
+                "network_peak_c_per_kwh": 20.0, "retail_off_peak_c_per_kwh": 10.0,
+                "retail_peak_c_per_kwh": 10.0, "rolling_demand_aud_per_kva_month": 0.0,
+                "value_added_c_per_day": 0.0,
+            }},
             "charge_categories_ex_gst_aud": {
                 "energy_charges": 28.8,
                 "network_charges": 57.6,
@@ -279,7 +288,7 @@ def test_bill_evidence_produces_a_review_only_tariff_suggestion(
         "start": "16:00",
         "end": "19:00",
     }
-    assert "not detected contractual line items" in state["evidence_basis"][
+    assert "category totals are never converted into tariff rates" in state["evidence_basis"][
         "derivation_notice"
     ]
 
@@ -767,3 +776,47 @@ def test_tariff_profile_rejects_unknown_fields_and_overnight_windows(
     assert overnight.status_code == 422
     assert overnight.json()["detail"]["code"] == "ci_project_tariff_profile_invalid"
     assert unknown_envelope.status_code == 422
+
+
+def test_saved_legacy_bill_gets_line_rates_without_reupload(tmp_path, monkeypatch):
+    from tests.test_ci_bill_tariff_lines import DETAILS
+    from tests.test_ci_evidence_intake import BILL_TEXT
+
+    legacy = _approved_evidence_inspection()
+    del legacy['bill']['tariff_line_items']
+    monkeypatch.setattr('api.ci_routes.inspect_ci_evidence_pair', lambda *_args, **_kwargs: legacy)
+    monkeypatch.setattr('solar_battery.ci_evidence_intake._extract_pdf_text', lambda _: BILL_TEXT + DETAILS)
+    database_url = sqlite_url_for_path(tmp_path / 'legacy-rates.sqlite3')
+    with create_test_client(database_url) as client:
+        _, project_url = _create_project(client)
+        _save_evidence(client, project_url, bill_bytes=b'synthetic bill', nem12=_nem12_bytes())
+        state = client.get(f'{project_url}/tariff-profile').json()
+        assert state['suggested_profile']['rates']['retail_peak_c_per_kwh'] == 12.5
+        assert state['suggested_profile']['rates']['retail_off_peak_c_per_kwh'] == 8.
+        assert len(state['suggested_profile']['environmental']) == 3
+        assert state['status'] == 'not_available'
+        assert state['approved_at'] is None
+        # The second read uses persisted rate evidence, without re-reading a PDF.
+        monkeypatch.setattr('solar_battery.ci_evidence_intake._extract_pdf_text', lambda _: (_ for _ in ()).throw(AssertionError('unexpected reparse')))
+        assert client.get(f'{project_url}/tariff-profile').json() == state
+
+
+def test_environmental_line_items_reach_python_calculation_without_collapsing():
+    from types import SimpleNamespace
+    from solar_battery.ci_project_tariff_profile import _calculation_profile, validate_ci_project_tariff_profile, _suggested_profile
+    from solar_battery.ci_tariff_analysis import calculate_ci_tariff_charges
+
+    inspection = _annualized_evidence_inspection()
+    evidence = SimpleNamespace(inspection_result_json=inspection, bill_sha256='a' * 64, interval_sha256='b' * 64)
+    draft = _suggested_profile(evidence)
+    draft['environmental'] = [
+        {'label': 'Synthetic A', 'rate_c_per_kwh': 10., 'certificate_fraction': .1},
+        {'label': 'Synthetic B', 'rate_c_per_kwh': 5., 'certificate_fraction': .2},
+    ]
+    draft['factors']['dlf'] = 1.1
+    profile = _calculation_profile(project_id=UUID(int=1), editable=validate_ci_project_tariff_profile(draft), evidence=evidence)
+    assert profile['rates']['environmental'] == draft['environmental']
+    quantities = {key: 0 for key in ('retail_peak_kwh', 'retail_off_peak_kwh', 'incentive_demand_kva', 'rolling_demand_kva', 'network_peak_kwh', 'network_off_peak_kwh')}
+    quantities['import_kwh'] = 300
+    charges = calculate_ci_tariff_charges(quantities, profile=profile, days=30)
+    assert charges['categories']['environmental_charges'] == 6.6

@@ -10,6 +10,7 @@ export interface CiProjectTariffProfile {
   display_label: string;
   network_tariff_code: string;
   additional_bill_adjustment_aud?: number;
+  environmental?: Array<{ label: string; rate_c_per_kwh: number; certificate_fraction: number }>;
   rates: {
     retail_peak_c_per_kwh: number;
     retail_off_peak_c_per_kwh: number;
@@ -38,6 +39,11 @@ export interface CiProjectTariffProfile {
   minimum_chargeable_rolling_kva: number;
 }
 
+export type CiSuggestedTariffProfile = Omit<CiProjectTariffProfile, "rates" | "factors"> & {
+  rates: { [K in keyof CiProjectTariffProfile["rates"]]: number | null };
+  factors: { mlf: number | null; dlf: number | null };
+};
+
 export interface CiProjectTariffProfileState {
   contract_version: "ci_project_tariff_profile_state_v1";
   status: CiProjectTariffProfileStatus;
@@ -45,7 +51,7 @@ export interface CiProjectTariffProfileState {
   approved_at: string | null;
   profile_sha256: string | null;
   profile: CiProjectTariffProfile | null;
-  suggested_profile: CiProjectTariffProfile | null;
+  suggested_profile: CiSuggestedTariffProfile | null;
   evidence_basis: {
     network_tariff_code: string | null;
     billing_period_start: string | null;
@@ -137,7 +143,7 @@ export function assertCiProjectTariffProfileState(value: unknown): CiProjectTari
     !["not_available", "draft", "approved", "stale"].includes(state.status) ||
     !isNullableDateTime(state.updated_at) ||
     !isNullableDateTime(state.approved_at) ||
-    !(state.suggested_profile === null || isTariffProfile(state.suggested_profile)) ||
+    !(state.suggested_profile === null || isSuggestedTariffProfile(state.suggested_profile)) ||
     !(state.evidence_basis === null || isEvidenceBasis(state.evidence_basis)) ||
     !Array.isArray(state.blockers) ||
     state.blockers.some((item) => !isBlocker(item)) ||
@@ -173,6 +179,16 @@ export function assertCiProjectTariffProfile(value: unknown): CiProjectTariffPro
   return value;
 }
 
+function isSuggestedTariffProfile(value: unknown): value is CiSuggestedTariffProfile {
+  const profile = value as CiSuggestedTariffProfile;
+  if (!profile?.rates || !profile?.factors) return false;
+  return isTariffProfile({
+    ...profile,
+    rates: Object.fromEntries(Object.entries(profile.rates).map(([key, rate]) => [key, rate === null ? 0 : rate])),
+    factors: Object.fromEntries(Object.entries(profile.factors).map(([key, factor]) => [key, factor === null ? 1 : factor])),
+  });
+}
+
 function isTariffProfile(value: unknown): value is CiProjectTariffProfile {
   const profile = value as CiProjectTariffProfile;
   const rates = profile?.rates;
@@ -198,12 +214,17 @@ function isTariffProfile(value: unknown): value is CiProjectTariffProfile {
     hasRequiredKeysAndNoOthers(
       profile,
       ["contract_version", "display_label", "network_tariff_code", "rates", "factors", "windows", "minimum_chargeable_rolling_kva"],
-      ["additional_bill_adjustment_aud"],
+      ["additional_bill_adjustment_aud", "environmental"],
     ) &&
     profile.contract_version === "ci_project_tariff_profile_v1" &&
     isLabel(profile.display_label, 160) &&
     isLabel(profile.network_tariff_code, 64) &&
     (profile.additional_bill_adjustment_aud === undefined || isBoundedFinite(profile.additional_bill_adjustment_aud, -1_000_000, 1_000_000)) &&
+    (profile.environmental === undefined || (
+      Array.isArray(profile.environmental) && profile.environmental.length > 0 && profile.environmental.length <= 20 &&
+      profile.environmental.every((item) => item && hasExactKeys(item, ["label", "rate_c_per_kwh", "certificate_fraction"]) &&
+        isLabel(item.label, 100) && isBoundedFinite(item.rate_c_per_kwh, 0, 1_000_000) && isBoundedFinite(item.certificate_fraction, 0, 1))
+    )) &&
     rates &&
     hasExactKeys(rates, rateKeys) &&
     rateKeys.every((key) => isBoundedFinite(rates[key], 0, 1_000_000)) &&

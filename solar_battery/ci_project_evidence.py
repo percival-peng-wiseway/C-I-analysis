@@ -287,3 +287,34 @@ def _safe_filename(value: str, *, fallback: str) -> str:
 def _safe_content_type(value: str, fallback: str) -> str:
     normalized = value.strip()
     return (normalized or fallback)[:128]
+
+
+def enrich_saved_ci_bill_tariff_lines(
+    session, object_store: ObjectStore, *, project_id: UUID, actor: LocalActorContext,
+) -> None:
+    """Backfill rate evidence from the verified bill without changing approvals."""
+    from solar_battery.ci_bill_tariff_lines import extract_bill_tariff_lines
+    from solar_battery.ci_evidence_intake import (
+        CiEvidenceIntakeError, _extract_pdf_text, _normalise_invoice_text,
+    )
+
+    state = ci_project_evidence_state(session, project_id=project_id, actor=actor)
+    saved = state.get("evidence")
+    if saved is None:
+        return
+    inspection = saved["inspection"]
+    bill = inspection.get("bill")
+    if not isinstance(bill, dict) or "tariff_line_items" in bill:
+        return
+    row = _require_evidence(session, project_id=project_id, actor=actor)
+    data = _read_verified(object_store, storage_key=row.bill_object_store_key,
+                          expected_size=row.bill_size_bytes, expected_sha256=row.bill_sha256)
+    try:
+        detected = extract_bill_tariff_lines(_normalise_invoice_text(_extract_pdf_text(data)))
+    except CiEvidenceIntakeError:
+        detected = {"version": 1, "rates": {}, "factors": {}}
+    update_ci_project_evidence_inspection_if_current(
+        session, project_id=project_id, actor=actor, expected_saved_at=saved["saved_at"],
+        inspection_result={**inspection, "bill": {**bill, "tariff_line_items": detected}},
+    )
+    session.expire_all()

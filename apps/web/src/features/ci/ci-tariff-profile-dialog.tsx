@@ -6,6 +6,7 @@ import {
   assertCiProjectTariffProfile,
   type CiProjectTariffProfile,
   type CiProjectTariffProfileState,
+  type CiSuggestedTariffProfile,
 } from "@/features/ci/api/ci-tariff-profile";
 
 type RateKey = keyof CiProjectTariffProfile["rates"];
@@ -134,6 +135,14 @@ export function CiTariffProfileDialog({
             {importMessage ? <p aria-live="polite" className={`w-full text-xs ${importMessage.startsWith("Imported") ? "text-emerald-700" : "text-red-700"}`}>{importMessage}</p> : null}
           </div>
 
+          {state?.evidence_basis ? <p className="mb-4 text-sm leading-6 text-slate-600">{state.evidence_basis.derivation_notice}</p> : null}
+          {state?.suggested_profile && state.profile ? <Button className="mb-4" disabled={busy} onClick={() => {
+            const detected = state.suggested_profile!;
+            setDraft((current) => ({ ...current, ...numericDraft(detected), display_label: current.display_label,
+              environmental: detected.environmental, windows: current.windows, minimum_chargeable_rolling_kva: current.minimum_chargeable_rolling_kva }));
+            setImportMessage("Imported detected bill rates into the unsaved draft. Complete blank fields and review before saving.");
+          }} type="button" variant="outline">Use detected bill rates</Button> : null}
+
           <fieldset className="space-y-6 disabled:opacity-70" disabled={busy}>
             <div className="grid gap-4 sm:grid-cols-2">
               <TextField label="Display label" onChange={(value) => setDraft((current) => ({ ...current, display_label: value }))} value={draft.display_label} />
@@ -146,7 +155,7 @@ export function CiTariffProfileDialog({
                 <table className="w-full min-w-[620px] border-collapse text-left text-sm">
                   <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Charge</th><th className="px-4 py-3">Rate</th><th className="px-4 py-3">Unit</th></tr></thead>
                   <tbody className="divide-y divide-slate-100">
-                    {rateFields.map((field) => (
+                    {rateFields.filter((field) => !draft.environmental || !["environmental_c_per_kwh", "environmental_certificate_fraction"].includes(field.key)).map((field) => (
                       <tr key={field.key}><th className="px-4 py-2.5 font-medium text-slate-800" scope="row">{field.label}</th><td className="px-4 py-2.5"><NumberField ariaLabel={`${field.label} rate`} max={field.key === "environmental_certificate_fraction" ? "1" : "1000000"} onChange={(value) => updateRate(field.key, value)} value={draft.rates[field.key]} /></td><td className="px-4 py-2.5 text-xs text-slate-500">{field.unit}</td></tr>
                     ))}
                     <tr>
@@ -158,6 +167,16 @@ export function CiTariffProfileDialog({
                 </table>
               </div>
             </section>
+
+            {draft.environmental ? <section aria-labelledby={`${titleId}-environmental`}>
+              <h3 className="font-semibold text-slate-950" id={`${titleId}-environmental`}>Environmental charge lines</h3>
+              <p className="mt-1 text-xs text-slate-500">Printed ex-GST rates before DLF. Certificate percentages are converted to fractions (10% = 0.10). Each line is calculated separately.</p>
+              <div className="mt-3 space-y-3">{draft.environmental.map((item, index) => <div className="grid gap-3 sm:grid-cols-3" key={index}>
+                <TextField label={`Environmental line ${index + 1}`} value={item.label} onChange={(value) => setDraft((current) => ({ ...current, environmental: current.environmental!.map((line, i) => i === index ? { ...line, label: value } : line) }))} />
+                <NumberLabel label={`${item.label} rate (c/kWh)`} max="1000000" min="0" step="any" value={item.rate_c_per_kwh} onChange={(value) => setDraft((current) => ({ ...current, environmental: current.environmental!.map((line, i) => i === index ? { ...line, rate_c_per_kwh: parseNumber(value) } : line) }))} />
+                <NumberLabel label={`${item.label} certificate fraction`} max="1" min="0" step="any" value={item.certificate_fraction} onChange={(value) => setDraft((current) => ({ ...current, environmental: current.environmental!.map((line, i) => i === index ? { ...line, certificate_fraction: parseNumber(value) } : line) }))} />
+              </div>)}</div>
+            </section> : null}
 
             <section aria-labelledby={`${titleId}-factors`}>
               <h3 className="font-semibold text-slate-950" id={`${titleId}-factors`}>Loss factors and demand floor</h3>
@@ -200,7 +219,7 @@ function initialDraft(state: CiProjectTariffProfileState | null, detectedTariffC
   const source = state?.status === "stale"
     ? state.suggested_profile ?? state.profile
     : state?.profile ?? state?.suggested_profile;
-  if (source) return structuredClone(source);
+  if (source) return numericDraft(source);
   return {
     contract_version: "ci_project_tariff_profile_v1",
     display_label: "",
@@ -210,6 +229,15 @@ function initialDraft(state: CiProjectTariffProfileState | null, detectedTariffC
     factors: { mlf: Number.NaN, dlf: Number.NaN },
     windows: Object.fromEntries(windowFields.map((field) => [field.key, { start: "", end: "" }])) as CiProjectTariffProfile["windows"],
     minimum_chargeable_rolling_kva: Number.NaN,
+  };
+}
+
+function numericDraft(profile: CiSuggestedTariffProfile): CiProjectTariffProfile {
+  const copy = structuredClone(profile);
+  return {
+    ...copy,
+    rates: Object.fromEntries(Object.entries(copy.rates).map(([key, value]) => [key, value ?? Number.NaN])) as CiProjectTariffProfile["rates"],
+    factors: { mlf: copy.factors.mlf ?? Number.NaN, dlf: copy.factors.dlf ?? Number.NaN },
   };
 }
 

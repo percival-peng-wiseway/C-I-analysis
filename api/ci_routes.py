@@ -86,6 +86,7 @@ from solar_battery.ci_internal_report import (
 from solar_battery.ci_project_evidence import (
     CiEvidenceSource,
     ci_project_evidence_state,
+    enrich_saved_ci_bill_tariff_lines,
     load_ci_project_evidence_sources,
     record_ci_project_evidence,
     store_ci_project_evidence_files,
@@ -414,11 +415,14 @@ def get_ci_project_tariff_profile(
     response: Response,
     identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
     session_factory=Depends(get_durable_session_factory),
+    object_store: ObjectStore = Depends(get_object_store),
 ) -> dict[str, object]:
     actor = identity_provider.current()
     response.headers["Cache-Control"] = "no-store"
     try:
         with session_factory() as session:
+            with session.begin():
+                enrich_saved_ci_bill_tariff_lines(session, object_store, project_id=project_id, actor=actor)
             return ci_project_tariff_profile_state(
                 session,
                 project_id=project_id,
