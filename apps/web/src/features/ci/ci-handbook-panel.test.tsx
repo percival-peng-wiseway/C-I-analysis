@@ -72,6 +72,31 @@ describe("CiHandbookPanel", () => {
     expect(await screen.findByText(/No saved solution yet/)).toBeTruthy();
   });
 
+  it("shows Python formulas and the selected solution's numbers instead of optimizer dumps", async () => {
+    const payload = handbookFixture();
+    const generator = payload.modules.find(m => m.module_id === "solution_generator")!;
+    generator.result_sets = [{result_set_id: "solution.solutions", label: "Solutions", columns: [{key: "pv_capacity", label: "PV", unit: "kWp"}], rows: [
+      {result_id: "a", label: "Solution A", values: {pv_capacity: 200}},
+      {result_id: "b", label: "Solution B", values: {pv_capacity: 100}},
+    ]}];
+    payload.solution_walkthroughs = [
+      {scenario_id: "a", steps: [{calculation_id: "pv.annual", label: "Annual PV energy", formula: "PV × yield × derating", description: "Before clipping", inputs: [], source_reference: "Python", current_example: {substitution: "200 × 1,500 × 0.9", result: 270000, unit: "kWh/year"}}]},
+      {scenario_id: "b", steps: [{calculation_id: "pv.annual", label: "Annual PV energy", formula: "PV × yield × derating", description: "Before clipping", inputs: [], source_reference: "Python", current_example: {substitution: "100 × 1,000 × 0.8", result: 80000, unit: "kWh/year"}}]},
+    ];
+    payload.modules.find(m => m.module_id === "scenario_analysis")!.result_sets = [{result_set_id: "scenario.optimizer_runs", label: "Optimizer", columns: [{key: "disclosures", label: "Disclosures", unit: null}], rows: [{result_id: "a", label: "A", values: {disclosures: "reactive_pq_inner_approximation_16_segments_exact_replay, ".repeat(300)}}]}];
+    payload.summary.result_row_count = payload.modules.reduce((n, m) => n + m.result_sets.reduce((a, s) => a + s.rows.length, 0), 0);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).endsWith("/calculation-guide") ? guideFixture() : payload))));
+    renderPanel();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", {name: "Saved solution walkthrough"}));
+    expect(await screen.findByText("200 × 1,500 × 0.9")).toBeTruthy();
+    expect(screen.getByText("270,000 kWh/year")).toBeTruthy();
+    expect(screen.queryByText(/reactive_pq_inner/)).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Solution to explain"), "b");
+    expect(screen.getByText("100 × 1,000 × 0.8")).toBeTruthy();
+    expect(screen.queryByText("270,000 kWh/year")).toBeNull();
+  });
+
   it("changes Handbook modules without refetching or sending a POST", async () => {
     const user = userEvent.setup();
     const fetchMock = mockHandbookApi();

@@ -84,6 +84,7 @@ export interface CiCalculationHandbook {
     statement: string;
   };
   modules: CiHandbookModule[];
+  solution_walkthroughs?: Array<{ scenario_id: string; steps: CiHandbookCalculation[] }>;
   summary: {
     module_count: number;
     parameter_count: number;
@@ -149,6 +150,13 @@ export function assertCiCalculationHandbook(value: unknown, projectId: string): 
     new Set(moduleIds).size !== 4 ||
     !["evidence", "solution_generator", "scenario_analysis", "finance_analysis"].every((id) => moduleIds.includes(id as CiHandbookModule["module_id"])) ||
     payload.modules.some((module) => !validModule(module)) ||
+    (payload.solution_walkthroughs !== undefined && (
+      !Array.isArray(payload.solution_walkthroughs) ||
+      duplicate(payload.solution_walkthroughs.map(item => item.scenario_id)) ||
+      payload.solution_walkthroughs.some(item => !safeText(item.scenario_id) || !Array.isArray(item.steps) || !item.steps.every(validCalculation) ||
+        duplicate(item.steps.map(step => step.calculation_id)) ||
+        !payload.modules.find(module => module.module_id === "solution_generator")?.result_sets.find(set => set.result_set_id === "solution.solutions")?.rows.some(row => row.result_id === item.scenario_id))
+    )) ||
     duplicate(parameters.map((item) => item.parameter_id)) ||
     duplicate(calculations.map((item) => item.calculation_id)) ||
     duplicate(models.map((item) => item.model_id)) ||

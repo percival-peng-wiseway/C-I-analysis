@@ -185,24 +185,23 @@ function SavedSolutionWalkthrough({ handbook }: { handbook: CiCalculationHandboo
   const candidates = handbook.modules.find(m => m.module_id === "solution_generator")?.result_sets.find(s => s.result_set_id === "solution.solutions")?.rows ?? [];
   const [selectedId, setSelectedId] = useState("");
   const candidate = candidates.find(c => c.result_id === selectedId) ?? candidates[0];
-  const titles: Record<string, string> = {
-    solution_generator: "1. Saved equipment and investment",
-    scenario_analysis: "2. Saved physical dispatch and tariff replay",
-    finance_analysis: "3. Saved cashflows and financial metrics",
-  };
+  const walkthrough = handbook.solution_walkthroughs?.find(item => item.scenario_id === candidate?.result_id);
   return <div className="h-full overflow-y-auto px-4 py-6 sm:px-8"><div className="mx-auto max-w-5xl space-y-6">
-    <header><h3 className="text-2xl font-semibold">Follow one saved solution</h3><p className="mt-2 text-sm leading-7 text-slate-600">Every result below matches the same scenario ID. This is a read-only trace, not a new calculation or recommendation. Use Calculation guide for step-by-step numerical substitutions.</p></header>
+    <header><h3 className="text-2xl font-semibold">Follow one saved solution</h3><p className="mt-2 text-sm leading-7 text-slate-600">Formula → this solution's saved values → result. Select a solution to follow its solar yield, battery, investment and cashflows. No new analysis is run here.</p></header>
     {!candidate ? <p role="status" className="rounded-xl border border-slate-200 p-6">No saved solution yet. Generate solutions first, or use the synthetic worked example in Calculation guide.</p> : <>
-      <label className="grid gap-2 text-sm font-medium">Solution to explain<select className="w-full min-w-0 rounded-lg border border-slate-300 bg-white p-3" value={candidate.result_id} onChange={e => setSelectedId(e.target.value)}>{candidates.map(c => <option key={c.result_id} value={c.result_id}>{c.label} · {formatValue(c.values.pv_capacity ?? null, "kWp")} PV · {formatValue(c.values.battery_capacity ?? null, "kWh")} battery</option>)}</select></label>
+      <label className="grid gap-2 text-sm font-medium">Solution to explain<select className="w-full min-w-0 rounded-lg border border-slate-300 bg-white p-3" value={candidate.result_id} onChange={e => setSelectedId(e.target.value)}>{candidates.map(c => <option key={c.result_id} value={c.result_id}>{c.label} · {scalarValue(typeof c.values.pv_capacity === "number" ? c.values.pv_capacity : null, "kWp")} PV · {scalarValue(typeof c.values.battery_capacity === "number" ? c.values.battery_capacity : null, "kWh")} battery</option>)}</select></label>
       <p className="break-all text-xs text-slate-500">Matching saved scenario ID: {candidate.result_id}</p>
-      {handbook.modules.filter(m => m.module_id !== "evidence").map(module => {
-        const sets = module.result_sets.map(s => ({ ...s, rows: s.rows.filter(r => r.result_id === candidate.result_id) })).filter(s => s.rows.length > 0);
-        return <section key={module.module_id} className="rounded-xl border border-slate-200 p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3"><h4 className="text-lg font-semibold">{titles[module.module_id]}</h4><StatusBadge status={module.status} /></div>
-          <p className="mt-2 text-sm leading-6 text-slate-600">{module.description}</p>
-          {module.status !== "ready" ? <p role="status" className="mt-4 rounded-lg bg-amber-50 p-4 text-sm text-amber-950">This step is {statusLabel(module.status).toLowerCase()}. Current results are withheld; review inputs and rerun the source module.</p> : !sets.length ? <p className="mt-4 text-sm text-slate-500">No matching saved result for this solution. Run this solution in the source module to complete the trail.</p> : sets.map(set => <div className="mt-5" key={set.result_set_id}><h5 className="font-semibold">{set.label}</h5><dl className="mt-3 grid gap-x-8 gap-y-4 sm:grid-cols-2">{set.columns.map(column => <div className="min-w-0" key={column.key}><dt className="text-xs text-slate-500">{column.label}{column.unit ? ` (${column.unit})` : ""}</dt><dd className="mt-1 break-words text-sm tabular-nums">{formatValue(set.rows[0].values[column.key] ?? null, column.unit)}</dd></div>)}</dl></div>)}
-        </section>;
-      })}
+      {!walkthrough ? <p role="status" className="rounded-lg bg-amber-50 p-4 text-sm text-amber-950">Current results are withheld until the server provides this solution's numerical walkthrough. Reload after the backend update.</p> : walkthrough.steps.map((step, index) => <article key={`${candidate.result_id}:${step.calculation_id}`} className="border-t border-slate-200 py-6">
+        <h4 className="text-lg font-semibold">{index + 1}. {step.label}</h4>
+        <dl className="mt-4 space-y-4 text-sm">
+          <div><dt className="text-slate-500">Formula</dt><dd className="mt-1 break-words font-mono leading-7">{step.formula}</dd></div>
+          {step.current_example ? <>
+            <div><dt className="text-slate-500">With this solution's values</dt><dd className="mt-1 break-words font-mono leading-7 tabular-nums">{step.current_example.substitution}</dd></div>
+            <div className="rounded-lg bg-emerald-50 px-4 py-3"><dt className="text-xs text-emerald-800">Result</dt><dd className="mt-1 text-xl font-semibold tabular-nums text-emerald-950">{formatValue(step.current_example.result, step.current_example.unit)}</dd></div>
+          </> : null}
+        </dl>
+        <p role={step.current_example ? undefined : "status"} className={`mt-3 text-sm leading-6 ${step.current_example ? "text-slate-600" : "text-amber-800"}`}>{step.description}</p>
+      </article>)}
     </>}
   </div></div>;
 }

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from solar_battery.ci_handbook_walkthrough import solution_walkthroughs
+
 
 CI_PROJECT_HANDBOOK_CONTRACT_VERSION = "ci_project_handbook_v1"
 
@@ -75,6 +77,11 @@ def build_ci_project_handbook(
             ),
         },
         "modules": modules,
+        "solution_walkthroughs": solution_walkthroughs(
+            modules,
+            price_ready=design_price_preview_state.get("status") == "ready",
+            replay_ready=tariff_replay_state.get("status") == "ready",
+        ),
         "summary": {
             "module_count": len(modules),
             "parameter_count": sum(len(item["parameters"]) for item in modules),
@@ -695,6 +702,7 @@ def _scenario_module(
                 "pv_generation": dispatch.get("pv_generation_kwh"),
                 "maximum_reactive_support": dispatch.get("maximum_reactive_support_kvar"),
                 "annual_cost": value.get("scenario_cost_ex_gst_aud"),
+                "baseline_cost": value.get("baseline_cost_ex_gst_aud"),
                 "first_year_value": value.get("first_year_value_ex_gst_aud"),
             },
         })
@@ -732,8 +740,8 @@ def _scenario_module(
                     "exact_bill": result_projection.get("exact_replay_bill_aud"),
                     "exactness_gap": result_projection.get("optimization_exactness_gap_aud"),
                     "bill_reconciliation": result_projection.get("bill_reconciliation_difference_aud"),
-                    "corrections": _joined_values(snapshot.get("corrections")),
-                    "disclosures": _joined_values(snapshot.get("disclosures")),
+                    "corrections": list(dict.fromkeys(str(v) for v in snapshot.get("corrections", []) or [])),
+                    "disclosures": list(dict.fromkeys(str(v) for v in snapshot.get("disclosures", []) or [])),
                     "customer_facing_permission": snapshot.get("customer_facing_permission"),
                     "recommendation_permitted": snapshot.get("recommendation_permitted"),
                 },
@@ -768,6 +776,7 @@ def _scenario_module(
                 {"key": "pv_generation", "label": "PV generation", "unit": "kWh"},
                 {"key": "maximum_reactive_support", "label": "Max reactive support", "unit": "kvar"},
                 {"key": "annual_cost", "label": "Annual cost", "unit": "AUD ex GST"},
+                {"key": "baseline_cost", "label": "Baseline annual cost", "unit": "AUD ex GST"},
                 {"key": "first_year_value", "label": "First-year value", "unit": "AUD ex GST"},
             ], tariff_rows),
             _result_set("scenario.optimizer_runs", "Saved optimizer run snapshots", [
