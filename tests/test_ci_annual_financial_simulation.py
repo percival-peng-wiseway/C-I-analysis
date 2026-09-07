@@ -734,11 +734,11 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
         worksheet = client.put(
             f"/api/commercial-industrial/projects/{project['project_id']}/stc-calculator",
             json={"solar_installation_year": 2025, "solar_zone": 4, "pv_capacity_kwp": 140,
-                  "solar_certificate_price": 39, "battery_installation_period": "2026-05_12",
+                  "solar_certificate_price": 39,
                   "battery_stc_count": 100, "battery_certificate_price": 39},
         )
         assert worksheet.status_code == 200
-        assert worksheet.json()["estimate"]["total_rebate_aud"] == 65340.60
+        assert worksheet.json()["estimate"]["total_rebate_aud"] == 42720.60
         assert client.get(
             f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
         ).json() == blocked_saved_finance

@@ -3,16 +3,9 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { fetchStcCalculator, stcCalculatorKey, type StcCalculatorInput } from "./api/ci-stc-calculator";
 
-const periods = [
-  ["2025", "2025 Jan–Dec"], ["2026-01_04", "2026 Jan–Apr"], ["2026-05_12", "2026 May–Dec"],
-  ["2027-01_06", "2027 Jan–Jun"], ["2027-07_12", "2027 Jul–Dec"],
-  ["2028-01_06", "2028 Jan–Jun"], ["2028-07_12", "2028 Jul–Dec"],
-  ["2029-01_06", "2029 Jan–Jun"], ["2029-07_12", "2029 Jul–Dec"],
-  ["2030-01_06", "2030 Jan–Jun"], ["2030-07_12", "2030 Jul–Dec"],
-];
 type Draft = Record<keyof StcCalculatorInput, string>;
 const emptyDraft: Draft = { solar_installation_year: "2026", solar_zone: "4", pv_capacity_kwp: "",
-  solar_certificate_price: "39", battery_installation_period: "2026-05_12",
+  solar_certificate_price: "39",
   battery_stc_count: "174", battery_certificate_price: "39" };
 const draftFrom = (input: StcCalculatorInput): Draft => Object.fromEntries(Object.entries(input).map(([k, v]) => [k, String(v)])) as Draft;
 const money = (v: number) => v.toLocaleString("en-AU", { style: "currency", currency: "AUD" });
@@ -30,13 +23,13 @@ function StcWorksheet({ projectId }: { projectId: string }) {
     onSuccess: data => { client.setQueryData(stcCalculatorKey(projectId), data); } });
   const saved = state.data?.estimate;
   const dirty = !!draft && (!saved || Object.keys(draft).some(k => draft[k as keyof Draft] !== String(saved.inputs[k as keyof StcCalculatorInput])));
-  const valid = !!draft && Object.entries(draft).every(([key, value]) => key === "battery_installation_period" || (value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) >= 0))
+  const valid = !!draft && Object.values(draft).every(value => value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) >= 0)
     && Number(draft.solar_certificate_price) <= 1000 && Number(draft.battery_certificate_price) <= 1000
     && Number(draft.pv_capacity_kwp) <= 1_000_000 && Number(draft.battery_stc_count) <= 1_000_000;
   const update = (key: keyof Draft, value: string) => { save.reset(); setDraft(d => d ? { ...d, [key]: value } : d); };
   const calculate = () => {
     if (!draft || !valid) return;
-    const input = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, key === "battery_installation_period" ? value : Number(value)])) as unknown as StcCalculatorInput;
+    const input = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, Number(value)])) as unknown as StcCalculatorInput;
     save.mutate(input);
   };
   const field = (key: keyof Draft, label: string) => <label className="grid gap-1.5 text-xs font-medium text-slate-600"><span>{label}</span><input form={`stc-worksheet-${projectId}`} className={control} type="number" min="0" step="any" max={key.includes("price") ? 1000 : 1_000_000} disabled={save.isPending} value={draft?.[key] ?? ""} onChange={e => update(key, e.target.value)} onKeyDown={e => { if(e.key === "Enter") { e.preventDefault(); e.stopPropagation(); calculate(); } }} /></label>;
@@ -57,11 +50,11 @@ function StcWorksheet({ projectId }: { projectId: string }) {
           </section>
           <section aria-label="Battery STC calculator" className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/40 p-4">
             <h5 className="font-semibold">Battery STCs</h5>
-            <label className="grid gap-1.5 text-xs font-medium text-slate-600">Battery installation period<select form={`stc-worksheet-${projectId}`} className={control} value={draft.battery_installation_period} disabled={save.isPending} onChange={e => update("battery_installation_period", e.target.value)}>{periods.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <div className="grid gap-3 sm:grid-cols-2">{field("battery_stc_count", "Battery STC count (certificates)")}{field("battery_certificate_price", "Battery STC price (AUD / certificate)")}</div>
-            <p className="text-xs text-slate-500">STC count × installation-period factor × price (custom worksheet formula)</p>
+            <p className="text-xs text-slate-500">STC count × price</p>
             {state.data?.legacy_capacity_reset ? <p role="status" className="text-xs text-amber-800">The previous battery capacity was not converted to STC count. The count defaults to 174; review it and calculate again to save the new estimate.</p> : null}
-            {saved && !dirty ? <><p className="text-xs">{saved.inputs.battery_stc_count} × {saved.battery_factor} × {saved.inputs.battery_certificate_price}</p><p className="text-lg font-semibold">Battery rebate: {money(saved.battery_rebate_aud)}</p></> : null}
+            {state.data?.requires_recalculation && !state.data.legacy_capacity_reset ? <p role="status" className="text-xs text-amber-800">The battery formula is now STC count × price, without an installation-period factor. Review the retained count and price, then calculate and save again.</p> : null}
+            {saved && !dirty ? <><p className="text-xs">{saved.inputs.battery_stc_count} × {saved.inputs.battery_certificate_price}</p><p className="text-lg font-semibold">Battery rebate: {money(saved.battery_rebate_aud)}</p></> : null}
           </section>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-emerald-50 p-4">

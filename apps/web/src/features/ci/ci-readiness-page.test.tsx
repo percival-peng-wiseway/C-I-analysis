@@ -211,7 +211,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path.endsWith("/stc-calculator")) return new Response(JSON.stringify({ contract_version: "ci_stc_calculator_state_v2", project_id: path.includes("project-2") ? "project-2" : "project-1", draft_inputs: null, legacy_capacity_reset: false, estimate: null }));
+    if (path.endsWith("/stc-calculator")) return new Response(JSON.stringify({ contract_version: "ci_stc_calculator_state_v3", project_id: path.includes("project-2") ? "project-2" : "project-1", draft_inputs: null, legacy_capacity_reset: false, requires_recalculation: false, estimate: null }));
     if (path.endsWith("/settings/device-profile")) {
       const suggested = deviceProfileFixture;
       if (init?.method === "PUT") return new Response(JSON.stringify({ contract_version: "ci_device_profile_state_v1", status: "ready", updated_at: "2026-08-19", profile_sha256: "a".repeat(64), profile: JSON.parse(String(init.body)), suggested_profile: suggested }), { status: 200 });

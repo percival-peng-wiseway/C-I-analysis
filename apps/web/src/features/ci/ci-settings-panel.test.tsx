@@ -25,6 +25,12 @@ describe("CiSettingsPanel solution profile library", () => {
     await userEvent.click(screen.getByRole("tab", { name: "Equipment & finance" }));
     const fee = screen.getByLabelText("Installation & miscellaneous cost (Plan A)");
     expect(fee).toHaveProperty("value", "70000");
+    // Standalone labels are inline by default; padding then leaves the input outside the card.
+    expect(fee.closest("label")?.classList.contains("block")).toBe(true);
+    expect(fee.closest("label")?.classList.contains("w-full")).toBe(true);
+    expect(fee.closest("fieldset")?.classList.contains("min-w-0")).toBe(true);
+    expect(fee.parentElement?.classList.contains("min-w-0")).toBe(true);
+    expect(screen.getByText("AUD / solution").classList.contains("shrink-0")).toBe(true);
     await userEvent.clear(fee);
     await userEvent.type(fee, "80000");
     await userEvent.click(screen.getByRole("button", { name: "Save profile" }));

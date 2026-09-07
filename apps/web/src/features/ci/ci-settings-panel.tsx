@@ -152,7 +152,7 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
           {profileQuery.isError ? <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">Device profile could not be loaded.</p> : null}
           {draft ? (
             <form className="space-y-6" onSubmit={(event) => { event.preventDefault(); if (!validationMessage) save.mutate(draft); }}>
-              <fieldset className="space-y-6 disabled:opacity-70" disabled={save.isPending}>
+              <fieldset className="min-w-0 space-y-6 disabled:opacity-70" disabled={save.isPending}>
                 {section === "solution_profiles" ? (
                   <SolutionProfilesLibrary
                     defaultBatteryId={draft.default_solution_profile_selection.battery_profile_id}
@@ -450,7 +450,7 @@ function CatalogPriceInput({ label, onChange, value }: { label: string; onChange
 }
 
 function RateField({ label, onChange, suffix, value }: { label: string; onChange: (value: number) => void; suffix: string; value: number }) {
-  return <label className="rounded-lg bg-slate-50 p-3"><span className="text-xs text-slate-500">{label}</span><span className="mt-1 flex items-center gap-1"><input aria-label={label} className="min-w-0 flex-1 bg-transparent text-sm font-semibold tabular-nums outline-none" min="0" onChange={(event) => onChange(Number(event.target.value))} step="0.1" type="number" value={Number(value.toFixed(3))} /><span className="text-[10px] text-slate-400">{suffix}</span></span></label>;
+  return <label className="block w-full min-w-0 rounded-lg bg-slate-50 p-3"><span className="block break-words text-xs text-slate-500">{label}</span><span className="mt-2 flex min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 focus-within:ring-2 focus-within:ring-cyan-600"><input aria-label={label} className="w-full min-w-0 flex-1 bg-transparent text-sm font-semibold tabular-nums outline-none" min="0" onChange={(event) => onChange(Number(event.target.value))} step="0.1" type="number" value={Number(value.toFixed(3))} /><span className="shrink-0 whitespace-nowrap text-[10px] text-slate-500">{suffix}</span></span></label>;
 }
 
 function activateAdjacentTab(event: ReactKeyboardEvent<HTMLDivElement>) {
