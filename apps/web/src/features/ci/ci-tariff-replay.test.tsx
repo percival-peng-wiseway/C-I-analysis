@@ -41,6 +41,9 @@ const result = {
     physical_review_rank: 1,
     authored_inputs: {
       pv_capacity_kwp_dc: 141.123456789,
+      pv_annual_specific_yield_kwh_per_kw: 1000,
+      pv_derating_factor: 0.876158514,
+      max_discharge_kw: 150,
       nominal_capacity_kwh: 300.987654321,
       pv_inverter_capacity_kw_ac: 250.111222333,
       reactive_support_enabled: true,
@@ -327,6 +330,11 @@ describe("Tariff replay result workspace", () => {
     expect(screen.getAllByText("$83,000").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$37,000.00").length).toBeGreaterThan(0);
     expect(screen.getByText("Solar PV")).toBeTruthy();
+    expect(screen.getByText("Effective annual yield: 876.16 kWh/kWp/year")).toBeTruthy();
+    expect(screen.getByText("Base annual yield: 1,000 kWh/kWp/year")).toBeTruthy();
+    expect(screen.getByText("Site loss & availability factor: 87.62%")).toBeTruthy();
+    expect(screen.getByText(/before inverter clipping. Changes require regeneration/)).toBeTruthy();
+    expect(screen.getByText(/150 kW max discharge · 2.01 h nominal duration/)).toBeTruthy();
     expect(screen.getByText("Hybrid inverter / PCS")).toBeTruthy();
     const reactiveDiagnostics = screen.getByRole("region", { name: "Reactive support diagnostics" });
     expect(within(reactiveDiagnostics).getByText("On")).toBeTruthy();
@@ -336,6 +344,8 @@ describe("Tariff replay result workspace", () => {
 
     await user.selectOptions(screen.getByRole("combobox", { name: "Select solution analysis" }), "case-2");
     expect(screen.getByRole("heading", { name: "130 kWp PV · 250 kWh battery · 200 kW hybrid inverter / PCS" })).toBeTruthy();
+    expect(screen.getByText("Saved yield inputs unavailable. Regenerate this solution and run analysis again.")).toBeTruthy();
+    expect(screen.queryByText(/Effective annual yield:/)).toBeNull();
     expect(screen.getAllByText("$31,000.25").length).toBeGreaterThan(0);
     const disabledReactiveDiagnostics = screen.getByRole("region", { name: "Reactive support diagnostics" });
     expect(within(disabledReactiveDiagnostics).getByText("Off")).toBeTruthy();
@@ -347,14 +357,9 @@ describe("Tariff replay result workspace", () => {
     expect(screen.getByRole("heading", { name: "Cost composition" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Annual cash flow" })).toBeTruthy();
     expect(screen.getAllByText("Gross CAPEX").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Upfront rebates").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Upfront rebates")).toBeNull();
     expect(screen.getAllByText("Net upfront cost").length).toBeGreaterThan(0);
-    expect(screen.getByRole("heading", { name: "Rebate calculation audit" })).toBeTruthy();
-    expect(screen.getByText("Applied to device-profile gross cost")).toBeTruthy();
-    expect(screen.getByText("Solar STCs")).toBeTruthy();
-    expect(screen.getByText("Battery STCs")).toBeTruthy();
-    expect(screen.getByText("Victorian deemed VEECs")).toBeTruthy();
-    expect(screen.getByText("$5,300.00")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Rebate calculation audit" })).toBeNull();
     expect(screen.getByText("0 · Investment")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Bills" }));

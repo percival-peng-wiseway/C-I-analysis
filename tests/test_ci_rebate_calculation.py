@@ -401,7 +401,7 @@ def test_no_approved_profile_is_zero_and_manual_quote_is_never_reduced() -> None
     assert manual["gross_upfront_cost_aud_ex_gst"] == 90000.0
     assert manual["upfront_rebate_aud_ex_gst"] == 0
     assert manual["upfront_cost_aud_ex_gst"] == 90000.0
-    assert manual["rebate_calculation"]["total_rebate_aud_ex_gst"] == 26949.0
+    assert manual["rebate_calculation"]["total_rebate_aud_ex_gst"] == 0
     assert manual["rebate_application_status"] == "not_applied_to_manual_quote"
 
     device_profile = suggested_ci_device_profile()
@@ -415,9 +415,9 @@ def test_no_approved_profile_is_zero_and_manual_quote_is_never_reduced() -> None
         device_profile=device_profile,
         rebate_profile=profile,
     )["solutions"][0]
-    assert device["upfront_rebate_aud_ex_gst"] == 26949.0
+    assert device["upfront_rebate_aud_ex_gst"] == 0
     assert device["upfront_cost_aud_ex_gst"] == round(
-        device["gross_upfront_cost_aud_ex_gst"] - 26949.0, 2
+        device["gross_upfront_cost_aud_ex_gst"], 2
     )
     assert device["annual_om_cost_aud_ex_gst"] == round(
         device["gross_upfront_cost_aud_ex_gst"] * 0.015, 2

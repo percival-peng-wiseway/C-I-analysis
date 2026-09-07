@@ -18,7 +18,7 @@ import {
   ShieldCheck,
   SunMedium,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { invalidateCiCalculationHandbook } from "@/features/ci/api/ci-calculation-handbook";
@@ -243,11 +243,6 @@ export function CiTariffReplay({
     queryFn: () => fetchCiProjectTariffProfile(project.project_id),
     retry: false,
   });
-  const rebateProfile = useQuery({
-    queryKey: ciProjectRebateProfileQueryKey(project.project_id),
-    queryFn: () => fetchCiProjectRebateProfile(project.project_id),
-    retry: false,
-  });
   const [equipmentSelection, setEquipmentSelection] = useState<CiEquipmentSelection | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<FinanceAnalysisProgress | null>(null);
   const localRunInFlight = useRef(false);
@@ -360,10 +355,10 @@ export function CiTariffReplay({
     },
   });
 
-  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending || rebateProfile.isPending || (Boolean(design.data) && pricePreview.isPending)) {
+  if (evidence.isPending || design.isPending || dispatch.isPending || replay.isPending || finance.isPending || deviceProfile.isPending || tariffProfile.isPending || (Boolean(design.data) && pricePreview.isPending)) {
     return <section aria-labelledby="tariff-replay-title" className="space-y-5"><FinanceRunHeader canRun={false} count={project.design_candidate_count} hasResult={false} onRun={() => undefined} pending={false} /><ReplayLoading /></section>;
   }
-  if (evidence.isError || design.isError || dispatch.isError || replay.isError || finance.isError || deviceProfile.isError || tariffProfile.isError || rebateProfile.isError) {
+  if (evidence.isError || design.isError || dispatch.isError || replay.isError || finance.isError || deviceProfile.isError || tariffProfile.isError) {
     const failed = [
       evidence.isError ? "Evidence" : null,
       design.isError ? "solution space" : null,
@@ -372,9 +367,8 @@ export function CiTariffReplay({
       finance.isError ? "saved Finance result" : null,
       deviceProfile.isError ? "equipment profile" : null,
       tariffProfile.isError ? "tariff profile" : null,
-      rebateProfile.isError ? "rebate profile" : null,
     ].filter((value): value is string => value !== null);
-    const retry = () => { void Promise.all([evidence.refetch(), design.refetch(), dispatch.refetch(), replay.refetch(), finance.refetch(), deviceProfile.refetch(), tariffProfile.refetch(), rebateProfile.refetch(), pricePreview.refetch()]); };
+    const retry = () => { void Promise.all([evidence.refetch(), design.refetch(), dispatch.refetch(), replay.refetch(), finance.refetch(), deviceProfile.refetch(), tariffProfile.refetch(), pricePreview.refetch()]); };
     return <section aria-labelledby="tariff-replay-title" className="space-y-5"><FinanceRunHeader canRun={false} count={project.design_candidate_count} hasResult={false} onRun={() => undefined} pending={false} /><ReplayError failed={failed} onRetry={retry} /></section>;
   }
 
@@ -408,13 +402,6 @@ export function CiTariffReplay({
     && approvedDemandRates.rolling_demand_aud_per_kva_month === 0
     && approvedDemandRates.incentive_demand_aud_per_kva_month === 0,
   );
-  const enabledRebateCount = countEnabledRebates(rebateProfile.data);
-  const rebateReady = enabledRebateCount === 0 || rebateProfile.data.status === "approved";
-  const rebateDetail = enabledRebateCount === 0
-    ? "No rebate programs selected; Finance will use $0 upfront rebates."
-    : rebateProfile.data.status === "approved"
-      ? `${enabledRebateCount} approved program${enabledRebateCount === 1 ? "" : "s"} will be calculated by Python.`
-      : rebateProfile.data.blockers.map((blocker) => blocker.message).join(" ") || "Save and approve the project rebate profile in Solution Generator.";
   const profileLabel = tariffProfile.data?.profile?.display_label ?? tariffProfile.data?.suggested_profile?.display_label ?? null;
   const tariffDetail = tariffProfile.isError
     ? "The project tariff profile could not be loaded."
@@ -433,7 +420,6 @@ export function CiTariffReplay({
       ready: annualIntervalReady,
     },
     { detail: tariffDetail, label: "Project tariff profile approved", ready: tariffApproved },
-    { detail: rebateDetail, label: "Rebate plan resolved", ready: rebateReady },
     { label: "Equipment & finance profile saved", ready: Boolean(savedDeviceProfile) },
     { detail: resolvedSelection ? `${resolvedSelection.scenarioIds.length} selected ${resolvedSelection.scenarioIds.length === 1 ? "solution" : "solutions"} will be analysed.` : selectionError ?? undefined, label: "Solution selection saved", ready: Boolean(resolvedSelection) },
   ];
@@ -600,7 +586,7 @@ function SolutionGallery({ financeResult, onOpen, result }: { financeResult: CiA
           <div className="flex flex-wrap items-center justify-between gap-3"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">#{solution.financial_review_rank}</span><span className={`text-base font-semibold tabular-nums ${solution.metrics.net_present_value_aud >= 0 ? "text-emerald-700" : "text-red-700"}`}>{signedAud2(solution.metrics.net_present_value_aud)} NPV</span></div>
           <h3 className="mt-4 text-sm font-semibold leading-6 text-slate-950" title={configuration(scenario)}>{configuration(scenario)}</h3>
           <ReactiveStatusPill scenario={scenario} />
-          <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-4 border-t border-slate-100 pt-4"><GalleryMetric label="Net upfront" value={aud(solution.upfront_cost_aud_ex_gst)} /><GalleryMetric label="Rebates" value={solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)} /><GalleryMetric label="Bill after" value={aud2(solution.annual_cost_aud_ex_gst)} /><GalleryMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /></dl>
+          <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-4 border-t border-slate-100 pt-4"><GalleryMetric label="Net upfront" value={aud(solution.upfront_cost_aud_ex_gst)} /><GalleryMetric label="Bill after" value={aud2(solution.annual_cost_aud_ex_gst)} /><GalleryMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /></dl>
           <span className="mt-5 flex items-center justify-between border-t border-slate-100 pt-3 text-xs font-semibold text-cyan-800">View analysis <span aria-hidden="true" className="transition group-hover:translate-x-0.5">→</span></span>
         </button>;
       })}
@@ -611,16 +597,26 @@ function SolutionGallery({ financeResult, onOpen, result }: { financeResult: CiA
 function SystemConfiguration({ scenario }: { scenario: CiPhysicalScenarioResult["scenarios"][number] }) {
   const input = scenario.authored_inputs;
   const duration = input.max_discharge_kw > 0 ? input.nominal_capacity_kwh / input.max_discharge_kw : 0;
+  // Display the saved Python operands, never the current editable resource form.
+  const baseYield = input.pv_annual_specific_yield_kwh_per_kw;
+  const derating = input.pv_derating_factor;
+  const yieldAvailable = Number.isFinite(baseYield) && baseYield > 0
+    && Number.isFinite(derating) && derating > 0 && derating <= 1;
   return <div className="grid gap-px border-y border-slate-200 bg-slate-200 sm:grid-cols-3">
-    <SystemTile icon={SunMedium} label="Solar PV" value={`${capacityLabel(input.pv_capacity_kwp_dc)} kWp DC`} detail={`${numberLabel(input.pv_annual_specific_yield_kwh_per_kw, 0)} kWh/kWp annual yield`} />
-    <SystemTile icon={BatteryCharging} label="Battery" value={`${capacityLabel(input.nominal_capacity_kwh)} kWh`} detail={`${numberLabel(input.max_discharge_kw)} kW · ${numberLabel(duration)} h`} />
+    <SystemTile icon={SunMedium} label="Solar PV" value={`${capacityLabel(input.pv_capacity_kwp_dc)} kWp DC`} detail={yieldAvailable ? <>
+      <span className="block font-semibold text-slate-950">Effective annual yield: {numberLabel(baseYield * derating, 2)} kWh/kWp/year</span>
+      <span className="block">Base annual yield: {numberLabel(baseYield, 2)} kWh/kWp/year</span>
+      <span className="block">Site loss & availability factor: {numberLabel(derating * 100, 2)}%</span>
+      <span className="block">Saved analysis inputs; after site losses, before inverter clipping. Changes require regeneration and re-analysis.</span>
+    </> : "Saved yield inputs unavailable. Regenerate this solution and run analysis again."} />
+    <SystemTile icon={BatteryCharging} label="Battery" value={`${capacityLabel(input.nominal_capacity_kwh)} kWh`} detail={`${numberLabel(input.max_discharge_kw)} kW max discharge · ${numberLabel(duration, 2)} h nominal duration (before SOC reserve and losses)`} />
     <SystemTile icon={Cpu} label={input.dispatch_topology === "separate_ac" ? "Separate AC inverters" : "Hybrid inverter / PCS"} value={inverterDescription(input)} detail={input.dispatch_topology === "separate_ac" ? "PV inverter and battery PCS have separate AC ports" : "Shared AC port; DC PV charging"} />
   </div>;
 }
 
 function KeyMetricStrip({ result, scenario, solution }: { result: CiPhysicalScenarioResult; scenario: CiPhysicalScenarioResult["scenarios"][number]; solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {
   const demandReduction = Math.max(0, result.baseline.raw_rolling_demand_kva - scenario.post_dispatch.raw_rolling_demand_kva);
-  return <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8"><DetailMetric label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} /><DetailMetric label="Upfront rebates" positive={solution.upfront_rebate_aud_ex_gst > 0} value={solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)} /><DetailMetric label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} /><DetailMetric label="Annual saving" positive value={aud2(solution.first_year_value_aud_ex_gst)} /><DetailMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /><DetailMetric label="IRR" value={percent(solution.metrics.internal_rate_of_return)} /><DetailMetric label="NPV" positive={solution.metrics.net_present_value_aud >= 0} value={signedAud2(solution.metrics.net_present_value_aud)} /><DetailMetric label="Demand reduction" value={`${numberLabel(demandReduction, 3)} kVA`} /></div>;
+  return <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8"><DetailMetric label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} /><DetailMetric label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} /><DetailMetric label="Annual saving" positive value={aud2(solution.first_year_value_aud_ex_gst)} /><DetailMetric label="Payback" value={payback(solution.metrics.payback_period_years)} /><DetailMetric label="IRR" value={percent(solution.metrics.internal_rate_of_return)} /><DetailMetric label="NPV" positive={solution.metrics.net_present_value_aud >= 0} value={signedAud2(solution.metrics.net_present_value_aud)} /><DetailMetric label="Demand reduction" value={`${numberLabel(demandReduction, 3)} kVA`} /></div>;
 }
 
 function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancialComparisonResult; solution: CiAnnualFinancialComparisonResult["solutions"][number] }) {
@@ -642,7 +638,6 @@ function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancial
     <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">Representative-year financial projection. Value degradation is applied to savings; physical battery ageing is not re-simulated each year.</p>
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
       <Metric icon={BadgeDollarSign} label="Gross CAPEX" value={aud(solution.gross_upfront_cost_aud_ex_gst)} detail="Equipment · ex GST" />
-      <Metric icon={ShieldCheck} label="Upfront rebates" value={solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)} detail="Python-calculated · ex GST" tone="emerald" />
       <Metric icon={BadgeDollarSign} label="Net upfront cost" value={aud(solution.upfront_cost_aud_ex_gst)} detail="Used for year 0" />
       <Metric icon={BarChart3} label="Net present value" value={signedAud(solution.metrics.net_present_value_aud)} detail={`${(result.assumptions.discount_rate * 100).toFixed(1)}% discount rate`} tone="emerald" />
       <Metric icon={Activity} label="Internal rate of return" value={percent(solution.metrics.internal_rate_of_return)} detail={`${result.assumptions.analysis_term_years}-year analysis`} />
@@ -652,7 +647,7 @@ function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancial
       <section className="rounded-xl border border-slate-200 p-5">
         <h3 className="font-semibold text-slate-950">Cost composition</h3>
         <p className="mt-1 text-sm text-slate-500">{solution.inverter_pricing?.disclosure ?? "Python-priced equipment and annual operating cost."}</p>
-        {capexParts.length ? <><div className="mt-6 flex h-5 overflow-hidden rounded-full bg-slate-100">{capexParts.map((part) => <div className={part.color} key={part.label} style={{ width: `${part.value / solution.gross_upfront_cost_aud_ex_gst * 100}%` }}><span className="sr-only">{part.label} {aud(part.value)}</span></div>)}</div><dl className="mt-5 divide-y divide-slate-100">{capexParts.map((part) => <div className="flex items-center justify-between gap-4 py-3" key={part.label}><dt className="flex items-center gap-2 text-sm text-slate-600"><span className={`size-2.5 rounded-sm ${part.color}`} />{part.label}</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(part.value)}</dd></div>)}<div className="flex items-center justify-between gap-4 py-3"><dt className="font-medium text-slate-800">Gross CAPEX</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.gross_upfront_cost_aud_ex_gst)}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="font-medium text-emerald-800">Approved upfront rebates</dt><dd className="font-semibold tabular-nums text-emerald-700">{solution.upfront_rebate_aud_ex_gst > 0 ? `−${aud(solution.upfront_rebate_aud_ex_gst)}` : aud(0)}</dd></div><div className="flex items-center justify-between gap-4 bg-slate-50 px-2 py-3"><dt className="font-semibold text-slate-950">Net upfront cost</dt><dd className="font-bold tabular-nums text-slate-950">{aud(solution.upfront_cost_aud_ex_gst)}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-sm text-slate-600">Annual O&amp;M</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.annual_om_cost_aud_ex_gst)} / yr</dd></div></dl></> : <p className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-500">A component breakdown is unavailable for a manually entered total quotation. Modelled rebates are not deducted from manual quotes.</p>}
+        {capexParts.length ? <><div className="mt-6 flex h-5 overflow-hidden rounded-full bg-slate-100">{capexParts.map((part) => <div className={part.color} key={part.label} style={{ width: `${part.value / solution.gross_upfront_cost_aud_ex_gst * 100}%` }}><span className="sr-only">{part.label} {aud(part.value)}</span></div>)}</div><dl className="mt-5 divide-y divide-slate-100">{capexParts.map((part) => <div className="flex items-center justify-between gap-4 py-3" key={part.label}><dt className="flex items-center gap-2 text-sm text-slate-600"><span className={`size-2.5 rounded-sm ${part.color}`} />{part.label}</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(part.value)}</dd></div>)}<div className="flex items-center justify-between gap-4 py-3"><dt className="font-medium text-slate-800">Gross CAPEX</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.gross_upfront_cost_aud_ex_gst)}</dd></div><div className="flex items-center justify-between gap-4 bg-slate-50 px-2 py-3"><dt className="font-semibold text-slate-950">Net upfront cost</dt><dd className="font-bold tabular-nums text-slate-950">{aud(solution.upfront_cost_aud_ex_gst)}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-sm text-slate-600">Annual O&amp;M</dt><dd className="font-semibold tabular-nums text-slate-950">{aud(solution.annual_om_cost_aud_ex_gst)} / yr</dd></div></dl></> : <p className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-500">A component breakdown is unavailable for a manually entered total quotation. Modelled rebates are not deducted from manual quotes.</p>}
       </section>
       <section className="overflow-hidden rounded-xl border border-slate-200">
         <div className="border-b border-slate-200 p-5"><h3 className="font-semibold text-slate-950">Annual cash flow</h3><p className="mt-1 text-sm text-slate-500">Year 0 CAPEX followed by Python-calculated net operating cash flow.</p></div>
@@ -660,7 +655,6 @@ function SelectedFinancialView({ result, solution }: { result: CiAnnualFinancial
       </section>
     </div>
     <AnnualProjectionAudit solution={solution} />
-    <RebateAudit solution={solution} />
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Basis label="Discount rate" value={`${(result.assumptions.discount_rate * 100).toFixed(1)}%`} /><Basis label="Value escalation" value={`${(result.assumptions.annual_value_escalation_rate * 100).toFixed(1)}% / yr`} /><Basis label="Value degradation" value={`${(result.assumptions.annual_value_degradation_rate * 100).toFixed(1)}% / yr`} /><Basis label="Analysis term" value={`${result.assumptions.analysis_term_years} years`} /><Basis label="Pricing basis" value={result.assumptions.price_source === "workspace_device_profile" ? "Device profile" : "Manual quote"} /></div>
   </div>;
 }
@@ -780,7 +774,6 @@ function ReplayReadyState({
             ))}
           </div>
           {!checks.find((item) => item.label === "Project tariff profile approved")?.ready ? <Button className="mt-4" onClick={onConfigureTariff} type="button" variant="outline">Review tariff profile in Evidence</Button> : null}
-          {!checks.find((item) => item.label === "Rebate plan resolved")?.ready ? <Button className="ml-2 mt-4" onClick={onConfigureRebates} type="button" variant="outline">Review rebates in Solution Generator</Button> : null}
           <div className="mt-7 grid gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 sm:grid-cols-3">
             <ProcessStep icon={Activity} label="1. Interval replay" text="Apply scenario grid import and export to each metered interval." />
             <ProcessStep icon={Gauge} label="2. Billing demand" text="Recalculate chargeable kVA inside approved billing windows." />
@@ -993,7 +986,7 @@ function ReplayError({ failed, onRetry }: { failed: string[]; onRetry: () => voi
 function ProcessStep({ icon: Icon, label, text }: { icon: typeof Activity; label: string; text: string }) { return <div className="bg-white p-4"><Icon className="size-4 text-cyan-700" /><h3 className="mt-3 text-sm font-semibold text-slate-900">{label}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{text}</p></div>; }
 function Metric({ detail, icon: Icon, label, tone = "default", value }: { detail: string; icon: typeof Activity; label: string; tone?: "default" | "emerald"; value: string }) { return <div className={`rounded-xl border p-4 ${tone === "emerald" ? "border-emerald-200 bg-emerald-50/60" : "border-slate-200 bg-white"}`}><Icon className={`size-4 ${tone === "emerald" ? "text-emerald-700" : "text-cyan-700"}`} /><p className="mt-4 text-xs text-slate-500">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{value}</p><p className="mt-1 text-xs text-slate-500">{detail}</p></div>; }
 function GalleryMetric({ label, value }: { label: string; value: string }) { return <div className="min-w-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 break-words text-sm font-semibold tabular-nums text-slate-800">{value}</dd></div>; }
-function SystemTile({ detail, icon: Icon, label, value }: { detail: string; icon: typeof Activity; label: string; value: string }) { return <div className="bg-white p-4 sm:p-5"><div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-cyan-50 text-cyan-800"><Icon className="size-4" /></span><div className="min-w-0"><p className="text-xs font-medium text-slate-500">{label}</p><p className="mt-1 text-base font-semibold tabular-nums text-slate-950">{value}</p><p className="mt-1 text-xs leading-5 text-slate-500">{detail}</p></div></div></div>; }
+function SystemTile({ detail, icon: Icon, label, value }: { detail: ReactNode; icon: typeof Activity; label: string; value: string }) { return <div className="bg-white p-4 sm:p-5"><div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-cyan-50 text-cyan-800"><Icon className="size-4" /></span><div className="min-w-0"><p className="text-xs font-medium text-slate-500">{label}</p><p className="mt-1 text-base font-semibold tabular-nums text-slate-950">{value}</p><p className="mt-1 text-xs leading-5 text-slate-500">{detail}</p></div></div></div>; }
 function DetailMetric({ label, positive = false, value }: { label: string; positive?: boolean; value: string }) { return <div className="bg-white p-4"><p className="text-[10px] font-medium uppercase tracking-[.12em] text-slate-400">{label}</p><p className={`mt-2 text-lg font-semibold tabular-nums ${positive ? "text-emerald-700" : "text-slate-950"}`}>{value}</p></div>; }
 function OutcomeRow({ label, value }: { label: string; value: string }) { return <div className="flex items-center justify-between gap-4 py-3.5"><dt className="text-sm text-slate-500">{label}</dt><dd className="text-right text-sm font-semibold tabular-nums text-slate-950">{value}</dd></div>; }
 function BillBar({ colour, label, maximum, value }: { colour: string; label: string; maximum: number; value: number }) { return <div><div className="mb-2 flex justify-between gap-3 text-sm"><span className="text-slate-600">{label}</span><strong className="tabular-nums text-slate-950">{aud(value)}</strong></div><div className="h-4 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${colour}`} style={{ width: `${Math.max(1, value / maximum * 100)}%` }} /></div></div>; }

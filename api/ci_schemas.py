@@ -194,7 +194,7 @@ class CiCustomDesignCandidateRequest(BaseModel):
     battery_capacity_kwh: float = Field(ge=0, le=1_000_000)
     inverter_capacity_kw_ac: float = Field(gt=0, le=1_000_000)
     quoted_net_capex_aud_ex_gst: float = Field(gt=0, le=1_000_000_000_000)
-    stc_settings: CiProjectStcSettingsSaveRequest
+    stc_settings: CiProjectStcSettingsSaveRequest | None = None
 
 
 class CiIntervalActivityRequest(BaseModel):

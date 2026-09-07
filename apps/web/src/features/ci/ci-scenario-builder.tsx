@@ -204,6 +204,22 @@ export function CiScenarioBuilder({
   const [resource, setResource] = useState(solarResource);
   const [resourcePending, setResourcePending] = useState(false);
   const [resourceError, setResourceError] = useState<string | null>(null);
+  // A lookup can finish after the builder mounts. Expose it without overwriting
+  // saved designs or an analyst's in-progress form edits.
+  useEffect(() => {
+    if (solarResource) setResource(solarResource);
+  }, [solarResource]);
+  const resourceMatchesOrientation = resource?.status === "ready"
+    && resource.address === siteAddress
+    && resource.tilt_degrees === Number(site.array_tilt_degrees)
+    && resource.azimuth_degrees === Number(site.array_azimuth_degrees) % 360;
+  const resourceApplied = resourceMatchesOrientation
+    && site.resource_label.startsWith("PVGIS 5.3 / ERA5")
+    && resource.annual_specific_yield_kwh_per_kw === Number(site.annual_specific_yield_kwh_per_kw)
+    && resource.latitude === Number(site.latitude_degrees)
+    && resource.longitude === Number(site.longitude_degrees)
+    && Number(site.temperature_loss_percent) === 0
+    && site.pv_timing_model === "solar_geometry_screening_v1";
   const resourceStale = site.resource_label.startsWith("PVGIS 5.3 / ERA5") && (!resource || resource.status !== "ready" ||
     resource.address !== siteAddress || resource.tilt_degrees !== Number(site.array_tilt_degrees) ||
     resource.azimuth_degrees !== Number(site.array_azimuth_degrees) % 360 ||
@@ -328,6 +344,10 @@ export function CiScenarioBuilder({
               <p className="mt-2">{resource?.message ?? "Upload a bill to automatically look up its site address and solar resource. No lookup result: 1000 kWh/kWp screening assumption."}</p>
               {resourceError ? <p className="mt-2 text-red-800" role="alert">{resourceError}</p> : null}
               {resource?.status === "ready" ? <>
+                {!resourceApplied ? <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-950">
+                  <p>PVGIS is available but not applied to this configuration. The form below still controls generation; existing results retain their saved inputs.</p>
+                  {resourceMatchesOrientation ? <Button className="mt-2" type="button" variant="outline" disabled={resourcePending || isPending} onClick={() => setSite((current) => applySolarResource(current, resource))}>Apply available PVGIS to form</Button> : <p className="mt-1">Address or orientation differs. Use Refresh &amp; apply PVGIS to query the current location, tilt and azimuth.</p>}
+                </div> : <p className="mt-2 font-medium">PVGIS applied to form. Confirm coordinates, then save and generate solutions; run analysis again to update results.</p>}
                 <p className="mt-2 font-medium">{resource.annual_specific_yield_kwh_per_kw.toFixed(1)} kWh/kWp/year · {resource.tilt_degrees}° tilt · {resource.azimuth_degrees}° azimuth</p>
                 <p className="mt-1 text-xs">{resource.matched_address} · {resource.latitude}, {resource.longitude} · Retrieved {resource.queried_at.slice(0, 10)}</p>
                 <details className="mt-3"><summary className="cursor-pointer">Monthly generation per 1 kWp</summary><div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{resource.monthly_kwh_per_kwp.map((value, index) => <div className="rounded border bg-white p-2 text-xs" key={index}>{["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][index]}<strong className="block">{value.toFixed(1)} kWh</strong></div>)}</div></details>
@@ -379,7 +399,7 @@ export function CiScenarioBuilder({
               </details>
               <div className="mt-4 rounded-xl border-2 border-emerald-600 bg-emerald-50 p-5 text-emerald-950" aria-live="polite">
                 <p className="text-sm font-semibold">Effective yield</p>
-                <p className="mt-2 text-3xl font-bold tabular-nums">{effectiveYield === null ? "Complete site factors" : effectiveYield.toLocaleString("en-AU", { maximumFractionDigits: 1 })}<span className="ml-2 text-sm font-medium">kWh/kWp/year</span></p>
+                <p className="mt-2 text-3xl font-bold tabular-nums">{effectiveYield === null ? "Complete site factors" : effectiveYield.toLocaleString("en-AU", { maximumFractionDigits: 2 })}<span className="ml-2 text-sm font-medium">kWh/kWp/year</span></p>
                 <p className="mt-2 text-sm">Gross yield × retained output after site losses × availability. Used for PV generation before inverter conversion and clipping.</p>
                 <p className="mt-1 text-xs">{siteDirty ? "Unsaved site factors" : "Site factors saved"} · Regenerate solutions after changing these values to update subsequent calculations.</p>
               </div>

@@ -26,7 +26,7 @@ export interface CiDesignPricePreview {
   contract_version: "ci_design_price_preview_v1";
   project_id: string;
   status: "ready";
-  pricing_basis: "workspace_device_profile_less_approved_rebates";
+  pricing_basis: "workspace_device_profile_no_rebates";
   design_candidates_sha256: string;
   device_profile_sha256: string;
   rebate_profile_sha256: string | null;
@@ -64,10 +64,10 @@ export function assertCiDesignPricePreview(value: unknown, projectId: string): C
     payload?.contract_version !== "ci_design_price_preview_v1" ||
     payload.project_id !== projectId ||
     payload.status !== "ready" ||
-    payload.pricing_basis !== "workspace_device_profile_less_approved_rebates" ||
+    payload.pricing_basis !== "workspace_device_profile_no_rebates" ||
     !isSha256(payload.design_candidates_sha256) ||
     !isSha256(payload.device_profile_sha256) ||
-    !(payload.rebate_profile_sha256 === null || isSha256(payload.rebate_profile_sha256)) ||
+    payload.rebate_profile_sha256 !== null ||
     !Number.isInteger(payload.candidate_count) ||
     payload.candidate_count < 1 ||
     payload.candidate_count > 200 ||
@@ -102,6 +102,7 @@ function validSolution(solution: CiDesignPricePreviewSolution) {
     values.every((item) => Number.isFinite(item) && item >= 0) &&
     solution.gross_capex_aud_ex_gst > 0 &&
     solution.net_capex_aud_ex_gst > 0 &&
+    solution.upfront_rebate_aud_ex_gst === 0 &&
     nearlyEqual(breakdownTotal, solution.gross_capex_aud_ex_gst) &&
     nearlyEqual(solution.gross_capex_aud_ex_gst - solution.upfront_rebate_aud_ex_gst, solution.net_capex_aud_ex_gst) &&
     solution.rebate_calculation?.scenario_id === solution.scenario_id &&

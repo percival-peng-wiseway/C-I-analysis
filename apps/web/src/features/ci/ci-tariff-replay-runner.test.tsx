@@ -308,7 +308,8 @@ describe("Finance analysis runner", () => {
 
     const start = await screen.findByRole("button", { name: "Start analysis" });
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(true));
-    expect(screen.getAllByText(/Return to Solution Generator, select the solutions to analyse/).length).toBeGreaterThan(0);
+    // The button is also disabled during loading; wait for the resolved reason.
+    expect((await screen.findAllByText(/Return to Solution Generator, select the solutions to analyse/)).length).toBeGreaterThan(0);
     expect(mocks.runFeasibility).not.toHaveBeenCalled();
     expect(mocks.runTariffReplay).not.toHaveBeenCalled();
     expect(mocks.compareFinance).not.toHaveBeenCalled();

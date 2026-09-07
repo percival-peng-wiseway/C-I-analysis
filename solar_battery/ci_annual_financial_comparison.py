@@ -35,6 +35,8 @@ def preview_ci_design_candidate_prices(
     device_profile: dict[str, Any],
     rebate_profile: dict[str, Any] | None = None,
 ) -> dict[str, object]:
+    # STC is a standalone worksheet. Legacy approved profiles must not reduce CAPEX.
+    rebate_profile = None
     if not 1 <= len(candidates) <= 200:
         raise CiProjectError(
             "ci_design_price_preview_invalid",
@@ -115,7 +117,7 @@ def preview_ci_design_candidate_prices(
     return {
         "contract_version": CI_DESIGN_PRICE_PREVIEW_CONTRACT_VERSION,
         "status": "ready",
-        "pricing_basis": "workspace_device_profile_less_approved_rebates",
+        "pricing_basis": "workspace_device_profile_no_rebates",
         "device_profile_sha256": device_profile_sha256(validated_profile),
         "rebate_profile_sha256": (
             rebate_calculation_profile_sha256(rebate_profile)
@@ -141,6 +143,8 @@ def compare_ci_annual_financial_scenarios(
     device_profile: dict[str, Any] | None = None,
     rebate_profile: dict[str, Any] | None = None,
 ) -> dict[str, object]:
+    # Retain the argument for old clients, but do not use certificate assumptions.
+    rebate_profile = None
     scenarios = _tariff_scenarios(tariff_replay_result)
     pricing_mode = str(request.get("pricing_mode", "manual_quotes"))
     if pricing_mode == "device_profile":

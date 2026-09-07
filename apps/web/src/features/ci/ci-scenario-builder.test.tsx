@@ -13,6 +13,34 @@ import type { CiSolarResource } from "./api/ci-solar-resource";
 afterEach(cleanup);
 
 describe("CiScenarioBuilder", () => {
+  it("exposes a late PVGIS lookup without overwriting form edits or generating solutions", async () => {
+    const onSubmit = vi.fn();
+    const resource: CiSolarResource = {
+      version: "ci_solar_resource_v1", status: "ready", message: "Climate-based estimate",
+      address: "Example", matched_address: "Example, Australia", queried_at: "2026-09-06T00:00:00Z",
+      annual_specific_yield_kwh_per_kw: 1440, tilt_degrees: 20, azimuth_degrees: 0,
+      latitude: -37.8, longitude: 144.9, monthly_kwh_per_kwp: Array(12).fill(120),
+      source: "PVGIS 5.3 / ERA5", customer_facing_permission: false,
+    };
+    const props = { deviceProfile, error: null, isPending: false, onSubmit, siteAddress: "Example", projectId: "example-project" };
+    const { rerender } = render(<CiScenarioBuilder {...props} />);
+    expect(screen.getByText("876.16").textContent).toContain("kWh/kWp/year");
+    fireEvent.change(screen.getByLabelText("Gross annual specific yield (kWh/kWp)"), { target: { value: "1100" } });
+    rerender(<CiScenarioBuilder {...props} solarResource={resource} />);
+    expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1100");
+    expect(screen.getByText(/PVGIS is available but not applied/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Array tilt (°)"), { target: { value: "30" } });
+    expect(screen.queryByRole("button", { name: "Apply available PVGIS to form" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Array tilt (°)"), { target: { value: "20" } });
+    await userEvent.click(screen.getByRole("button", { name: "Apply available PVGIS to form" }));
+    expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1440");
+    expect(screen.getByLabelText("Temperature loss (%)")).toHaveProperty("value", "0");
+    expect(screen.getByLabelText("PV interval model")).toHaveProperty("value", "solar_geometry_screening_v1");
+    expect(screen.getByLabelText("Coordinates confirmed")).toHaveProperty("checked", false);
+    expect(screen.getByText(/PVGIS applied to form/)).toBeTruthy();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("uses 1000 as fallback and applies PVGIS without multiplying or double temperature loss", async () => {
     const onSubmit = vi.fn();
     const resource: CiSolarResource = {
@@ -618,7 +646,7 @@ it("saves site factors independently, restores them after remount and uses them 
   render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} onSaveSiteFactors={onSaveSiteFactors} initialSiteFactors={saved} />);
   expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1200");
   expect(screen.getByLabelText("Array tilt (°)")).toHaveProperty("value", "15");
-  expect(screen.getByText("1,051.4")).toBeTruthy();
+  expect(screen.getByText("1,051.39")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
   expect(onSubmit.mock.calls[0][0].site_factors).toMatchObject(saved);
 });

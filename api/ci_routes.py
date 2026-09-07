@@ -12,6 +12,11 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from solar_battery.ci_solar_resource import lookup_solar_resource
+from solar_battery.ci_stc_calculator import (
+    CiStcCalculatorInput,
+    save_stc_calculator,
+    stc_calculator_state,
+)
 
 from api.ci_schemas import (
     CiAnnualFinancialComparisonRequest,
@@ -344,7 +349,7 @@ def get_ci_project_calculation_handbook(
             tariff_profile_state = ci_project_tariff_profile_state(
                 session, project_id=project_id, actor=actor
             )
-            rebate_profile_state = ci_project_rebate_profile_state(
+            rebate_profile_state = _calculation_rebate_state(
                 session, project_id=project_id, actor=actor
             )
             approved_tariff_profile = (
@@ -359,7 +364,7 @@ def get_ci_project_calculation_handbook(
                 active_tariff_profile=approved_tariff_profile,
             )
             approved_rebate_profile = (
-                approved_ci_project_rebate_calculation_profile(
+                _calculation_rebate_profile(
                     session, project_id=project_id, actor=actor
                 )
             )
@@ -650,6 +655,29 @@ def get_ci_project_evidence(
             return ci_project_evidence_state(
                 session, project_id=project_id, actor=actor
             )
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.get("/commercial-industrial/projects/{project_id}/stc-calculator")
+def get_ci_stc_calculator(project_id: UUID, response: Response,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory)):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        with session_factory() as session:
+            return stc_calculator_state(session, project_id=project_id, actor=identity_provider.current())
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.put("/commercial-industrial/projects/{project_id}/stc-calculator")
+def put_ci_stc_calculator(project_id: UUID, payload: CiStcCalculatorInput,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory)):
+    try:
+        with session_factory() as session, session.begin():
+            return save_stc_calculator(session, project_id=project_id, actor=identity_provider.current(), inputs=payload)
     except CiProjectError as exc:
         raise _project_http_error(exc) from exc
 
@@ -1128,19 +1156,20 @@ def post_ci_custom_design_candidate(
                     design_context=context,
                     actor=actor,
                 )
-                save_ci_project_stc_settings(
-                    session,
-                    project_id=project_id,
-                    actor=actor,
-                    solar_stc_enabled=payload.stc_settings.solar_stc_enabled,
-                    solar_stc_price_aud_ex_gst=(
-                        payload.stc_settings.solar_stc_price_aud_ex_gst
-                    ),
-                    battery_stc_enabled=payload.stc_settings.battery_stc_enabled,
-                    battery_stc_price_aud_ex_gst=(
-                        payload.stc_settings.battery_stc_price_aud_ex_gst
-                    ),
-                )
+                if payload.stc_settings is not None:
+                    save_ci_project_stc_settings(
+                        session,
+                        project_id=project_id,
+                        actor=actor,
+                        solar_stc_enabled=payload.stc_settings.solar_stc_enabled,
+                        solar_stc_price_aud_ex_gst=(
+                            payload.stc_settings.solar_stc_price_aud_ex_gst
+                        ),
+                        battery_stc_enabled=payload.stc_settings.battery_stc_enabled,
+                        battery_stc_price_aud_ex_gst=(
+                            payload.stc_settings.battery_stc_price_aud_ex_gst
+                        ),
+                    )
                 price_preview = _calculate_ci_design_price_preview_if_ready(
                     session,
                     project_id=project_id,
@@ -1680,12 +1709,12 @@ def get_ci_annual_financial_comparison(
                 project_id=project_id,
                 actor=actor,
             )
-            rebate_state = ci_project_rebate_profile_state(
+            rebate_state = _calculation_rebate_state(
                 session,
                 project_id=project_id,
                 actor=actor,
             )
-            rebate_profile = approved_ci_project_rebate_calculation_profile(
+            rebate_profile = _calculation_rebate_profile(
                 session,
                 project_id=project_id,
                 actor=actor,
@@ -1747,7 +1776,7 @@ def post_ci_annual_financial_comparison(
                     "ci_project_tariff_profile_required",
                     "Review and approve the project tariff table before running Finance Analysis.",
                 )
-            rebate_state = ci_project_rebate_profile_state(
+            rebate_state = _calculation_rebate_state(
                 session,
                 project_id=project_id,
                 actor=actor,
@@ -1757,7 +1786,7 @@ def post_ci_annual_financial_comparison(
                     "ci_project_rebate_profile_required",
                     "Review and approve the enabled project rebate programs before running Finance Analysis.",
                 )
-            rebate_profile = approved_ci_project_rebate_calculation_profile(
+            rebate_profile = _calculation_rebate_profile(
                 session,
                 project_id=project_id,
                 actor=actor,
@@ -1866,13 +1895,13 @@ def post_ci_annual_financial_comparison(
                             "ci_project_annual_financial_inputs_changed",
                             "The Device profile changed while finance was running. Run finance again.",
                         )
-                current_rebate_state = ci_project_rebate_profile_state(
+                current_rebate_state = _calculation_rebate_state(
                     session,
                     project_id=project_id,
                     actor=actor,
                 )
                 current_rebate_profile = (
-                    approved_ci_project_rebate_calculation_profile(
+                    _calculation_rebate_profile(
                         session,
                         project_id=project_id,
                         actor=actor,
@@ -2420,10 +2449,16 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
 
 
 def _rebate_profile_blocks_finance(state: dict[str, object]) -> bool:
-    return (
-        state.get("status") in {"draft", "stale"}
-        and rebate_profile_has_enabled_program(state.get("profile"))
-    )
+    return False
+
+
+def _calculation_rebate_profile(session, *, project_id, actor, for_update=False):
+    # Historical approvals are retained, but cannot affect current pricing.
+    return None
+
+
+def _calculation_rebate_state(session, *, project_id, actor):
+    return {"status": "not_configured", "profile": None, "blockers": []}
 
 
 def _calculate_ci_design_price_preview(
@@ -2466,7 +2501,7 @@ def _calculate_ci_design_price_preview(
                 "Save the workspace Device profile in Settings before calculating Net CAPEX.",
             )
         active_device_profile = device_state["profile"]
-    rebate_state = ci_project_rebate_profile_state(
+    rebate_state = _calculation_rebate_state(
         session,
         project_id=project_id,
         actor=actor,
@@ -2478,7 +2513,7 @@ def _calculate_ci_design_price_preview(
             "ci_project_rebate_profile_required",
             "Review and approve the enabled project rebate programs before calculating Net CAPEX.",
         )
-    rebate_profile = approved_ci_project_rebate_calculation_profile(
+    rebate_profile = _calculation_rebate_profile(
         session,
         project_id=project_id,
         actor=actor,
@@ -2533,12 +2568,12 @@ def _validate_saved_ci_design_price_preview(
         session, project_id=project_id, actor=actor
     )
     device_state = ci_device_profile_state(session, actor=actor)
-    rebate_state = ci_project_rebate_profile_state(
+    rebate_state = _calculation_rebate_state(
         session,
         project_id=project_id,
         actor=actor,
     )
-    rebate_profile = approved_ci_project_rebate_calculation_profile(
+    rebate_profile = _calculation_rebate_profile(
         session,
         project_id=project_id,
         actor=actor,
@@ -2569,6 +2604,7 @@ def _validate_saved_ci_design_price_preview(
         or preview_device_digest not in compatible_device_digests
         or _rebate_profile_blocks_finance(rebate_state)
         or preview.get("rebate_profile_sha256") != rebate_digest
+        or preview.get("pricing_basis") != "workspace_device_profile_no_rebates"
     )
     if stale:
         raise CiProjectError(

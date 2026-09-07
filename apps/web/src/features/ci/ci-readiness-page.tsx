@@ -56,7 +56,7 @@ import {
 } from "@/features/ci/api/ci-workspace-readiness";
 import { CiDesignFeasibility } from "@/features/ci/ci-design-feasibility";
 import { CiEvidenceIntake } from "@/features/ci/ci-evidence-intake";
-import { CiRebateProfilePanel, type CiRebateProfilePanelHandle } from "@/features/ci/ci-rebate-profile-panel";
+import { CiStcCalculatorPanel } from "@/features/ci/ci-stc-calculator-panel";
 import { CiScenarioBuilder } from "@/features/ci/ci-scenario-builder";
 import {
   CI_ANALYSIS_MUTATION_KEY,
@@ -191,7 +191,6 @@ type AnalysisLaunch = { launchId: number; projectId: string; snapshot: CiAnalysi
 
 function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack, onValidated, project }: { analysisPending: boolean; onAnalysisStart: (snapshot: CiAnalysisPriceSnapshot) => boolean; onBack: () => void; onValidated: (candidateCount: number) => void; project: CiProject }) {
   const queryClient = useQueryClient();
-  const stcSettingsRef = useRef<CiRebateProfilePanelHandle>(null);
   const savedDesign = useQuery({ queryKey: ciSavedDesignQueryKey(project.project_id), queryFn: () => fetchCiSavedDesign(project.project_id) });
   const evidence = useQuery({ queryKey: ciProjectEvidenceQueryKey(project.project_id), queryFn: () => fetchCiProjectEvidence(project.project_id) });
   const deviceProfile = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
@@ -202,13 +201,9 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const run = useMutation({
     mutationFn: async (request: Parameters<typeof generateCiDesignCandidates>[1]) => {
-      if (!stcSettingsRef.current) {
-        throw new Error("The project STC settings are not ready yet.");
-      }
       return generateCiDesignCandidates(
         project.project_id,
         request,
-        stcSettingsRef.current.settingsForGeneration(),
       );
     },
     onSuccess: (design) => {
@@ -274,13 +269,9 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
   }, [hydratedQuoteRevision, hydrationKey, pricePreview.data, project.project_id, quoteRevision, quotedNetCapex, selectedSolutions]);
   const addCustom = useMutation({
     mutationFn: (request: CiCustomDesignCandidateRequest) => {
-      if (!stcSettingsRef.current) {
-        throw new Error("The project STC settings are not ready yet.");
-      }
       return addCiCustomDesignCandidate(
         project.project_id,
         request,
-        stcSettingsRef.current.settingsForGeneration(),
       );
     },
     onSuccess: (design) => {
@@ -361,7 +352,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
         projectId={project.project_id}
         solarResource={evidence.data.evidence?.inspection.solar_resource}
         onSolarResourceUpdated={() => { void evidence.refetch(); }}
-        stcSettings={<CiRebateProfilePanel projectId={project.project_id} ref={stcSettingsRef} />}
+        stcSettings={<CiStcCalculatorPanel projectId={project.project_id} />}
       />
     {siteFactorsNeedRegeneration && generatedDesign ? <p role="alert" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">Site factors changed. Generate solutions again before running analysis.</p> : null}
     {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} analysisPending={analysisPending} generationSummary={generatedDesign.generation_summary ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
@@ -493,9 +484,8 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, analysisPendin
         <table className="w-full min-w-[920px] table-fixed border-separate border-spacing-0 text-left text-sm">
           <caption className="sr-only">Generated solutions, equipment capacities, model pricing and editable quotations. Select the solutions to analyze.</caption>
           <colgroup><col className="w-[4%]" /><col className="w-[14%]" /><col className="w-[8%]" /><col className="w-[9%]" /><col className="w-[8%]" /><col className="w-[10%]" /><col className="w-[10%]" /><col className="w-[11%]" /><col className="w-[16%]" /></colgroup>
-          <thead className="sticky top-0 z-10 bg-white text-[11px] font-semibold uppercase tracking-wide text-slate-500"><tr><th className="border-b border-slate-200 px-2 py-3" scope="col"><input aria-label="Select all solutions" checked={allSelected} className="size-4 cursor-pointer rounded accent-cyan-700 disabled:cursor-not-allowed" disabled={controlsBusy} onChange={(event) => onSelectAll(event.target.checked)} ref={(input) => { if (input) input.indeterminate = selectedCount > 0 && !allSelected; }} type="checkbox" /></th><th className="border-b border-slate-200 py-3 pr-2" scope="col">Solution</th><th className="border-b border-slate-200 px-2 py-3" scope="col">PV</th><th className="border-b border-slate-200 px-2 py-3" scope="col">Battery</th><th className="border-b border-slate-200 px-2 py-3" scope="col">PCS</th><th className="border-b border-slate-200 px-2 py-3 text-right" scope="col">Gross CAPEX</th><th className="border-b border-slate-200 px-2 py-3 text-right" scope="col">Upfront rebates</th><th className="border-b border-slate-200 px-2 py-3 text-right" scope="col">Model Net CAPEX</th><th className="border-b border-slate-200 px-2 py-3" scope="col">Quoted Net CAPEX</th></tr></thead>
+          <thead className="sticky top-0 z-10 bg-white text-[11px] font-semibold uppercase tracking-wide text-slate-500"><tr><th className="border-b border-slate-200 px-2 py-3" scope="col"><input aria-label="Select all solutions" checked={allSelected} className="size-4 cursor-pointer rounded accent-cyan-700 disabled:cursor-not-allowed" disabled={controlsBusy} onChange={(event) => onSelectAll(event.target.checked)} ref={(input) => { if (input) input.indeterminate = selectedCount > 0 && !allSelected; }} type="checkbox" /></th><th className="border-b border-slate-200 py-3 pr-2" scope="col">Solution</th><th className="border-b border-slate-200 px-2 py-3" scope="col">PV</th><th className="border-b border-slate-200 px-2 py-3" scope="col">Battery</th><th className="border-b border-slate-200 px-2 py-3" scope="col">PCS</th><th className="border-b border-slate-200 px-2 py-3 text-right" scope="col">Gross CAPEX</th><th className="border-b border-slate-200 px-2 py-3 text-right" scope="col">Model Net CAPEX</th><th className="border-b border-slate-200 px-2 py-3" scope="col">Quoted Net CAPEX</th></tr></thead>
           <tbody className="divide-y divide-slate-100">{preview.solutions.map((solution, index) => {
-            const rebateStatus = scenarioRebateStatus(solution.rebate_calculation);
             const selected = Boolean(selectedSolutions[solution.scenario_id]);
             const quoteInvalid = selected && !(Number.isFinite(Number(quotes[solution.scenario_id])) && Number(quotes[solution.scenario_id]) > 0);
             return <tr className={`group transition-colors hover:bg-slate-50 ${selected ? "bg-cyan-50/25" : "bg-white"}`} key={solution.scenario_id}>
@@ -505,7 +495,6 @@ function GeneratedSolutionQuotes({ addCustomError, analysisError, analysisPendin
               <td className="whitespace-nowrap border-b border-slate-100 px-2 py-3 tabular-nums">{numberLabel(solution.battery_capacity_kwh)} <span className="text-xs text-slate-500">kWh</span></td>
               <td className="whitespace-nowrap border-b border-slate-100 px-2 py-3 tabular-nums">{numberLabel(solution.inverter_capacity_kw_ac)} <span className="text-xs text-slate-500">kW</span></td>
               <td className="whitespace-nowrap border-b border-slate-100 px-2 py-3 text-right tabular-nums text-slate-600">{aud(solution.gross_capex_aud_ex_gst)}</td>
-              <td className="border-b border-slate-100 px-2 py-3 text-right tabular-nums"><span className={solution.upfront_rebate_aud_ex_gst > 0 ? "text-emerald-700" : "text-slate-600"}>−{aud(solution.upfront_rebate_aud_ex_gst)}</span>{rebateStatus ? <span className="mt-1 block text-xs font-medium text-slate-500" title={rebateStatus.title}>{rebateStatus.label}</span> : null}</td>
               <td className="whitespace-nowrap border-b border-slate-100 px-2 py-3 text-right font-semibold tabular-nums text-slate-950">{aud(solution.net_capex_aud_ex_gst)}</td>
               <td className="border-b border-slate-100 px-2 py-3"><div className="relative min-w-0"><span aria-hidden="true" className="pointer-events-none absolute left-2.5 top-2.5 text-slate-400">$</span><input aria-describedby={quoteInvalid ? "analysis-blocker" : undefined} aria-invalid={quoteInvalid || undefined} aria-label={`Quoted Net CAPEX for Solution ${index + 1}`} className={`h-10 w-full min-w-0 rounded-lg border bg-white pl-6 pr-2 text-sm tabular-nums outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:bg-slate-50 ${quoteInvalid ? "border-red-400" : "border-slate-200"}`} disabled={controlsBusy} min="0.01" onChange={(event) => onQuoteChange(solution.scenario_id, event.target.value)} step="0.01" type="number" value={quotes[solution.scenario_id] ?? ""} /></div></td>
             </tr>;
@@ -747,7 +736,6 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
       || !validatedSnapshot
       || savedDesign.isError
       || savedDesign.isPending
-      || savedDesign.isFetching
     ) return;
     autoStarted.current = true;
     const started = fullAnalysis.start({ projectId: project.project_id, snapshot: validatedSnapshot });
@@ -763,7 +751,6 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
     fullAnalysis.isPending,
     fullAnalysis.start,
     project.project_id,
-    savedDesign.isFetching,
     savedDesign.isError,
     savedDesign.isPending,
     validatedSnapshot,
@@ -773,11 +760,8 @@ function DispatchWorkspace({ analysisBusy, analysisLaunch, analysisSnapshot, cla
   }
   if (
     savedDesign.isPending
-    || savedDesign.isFetching
     || savedFeasibility.isPending
-    || savedFeasibility.isFetching
     || savedTariffReplay.isPending
-    || savedTariffReplay.isFetching
   ) return <PageState title="Loading dispatch workspace" description="Restoring the generated scenarios and any saved simulation results." />;
   if (savedDesign.isError || !savedDesign.data) return <ModulePrerequisite description="The generated solution space could not be restored. Return to Physical feasibility and generate it again." project={project} title="Dispatch" />;
   const fullRunForProject = fullAnalysis.projectId === project.project_id;

@@ -30,6 +30,7 @@ def test_standalone_migration_creates_only_ci_tables(tmp_path, monkeypatch) -> N
     }
     assert "design_context_json" in project_columns
     assert "site_factors_json" in project_columns
+    assert "stc_calculator_json" in project_columns
     tariff_profile_columns = {
         column["name"]
         for column in inspect(engine).get_columns("ci_project_tariff_profiles")

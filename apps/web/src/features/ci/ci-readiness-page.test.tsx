@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,7 @@ import { CiReadinessPage } from "./ci-readiness-page";
 import { CiProductShell } from "./ci-product-shell";
 import { createCiQueryClient } from "./ci-query-client";
 import { CiWorkspaceProvider } from "./ci-workspace-context";
+import { ciSavedDesignQueryKey } from "./api/ci-projects";
 import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
 
 const readiness = {
@@ -189,6 +190,7 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
+    if (path.endsWith("/stc-calculator")) return new Response(JSON.stringify({ contract_version: "ci_stc_calculator_state_v1", project_id: path.includes("project-2") ? "project-2" : "project-1", estimate: null }));
     if (path.endsWith("/settings/device-profile")) {
       const suggested = deviceProfileFixture;
       if (init?.method === "PUT") return new Response(JSON.stringify({ contract_version: "ci_device_profile_state_v1", status: "ready", updated_at: "2026-08-19", profile_sha256: "a".repeat(64), profile: JSON.parse(String(init.body)), suggested_profile: suggested }), { status: 200 });
@@ -223,10 +225,10 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
         contract_version: "ci_design_price_preview_v1",
         project_id: path.includes("project-2") ? "project-2" : "project-1",
         status: "ready",
-        pricing_basis: "workspace_device_profile_less_approved_rebates",
+        pricing_basis: "workspace_device_profile_no_rebates",
         design_candidates_sha256: "b".repeat(64),
         device_profile_sha256: "c".repeat(64),
-        rebate_profile_sha256: currentRebateState.status === "approved" ? "d".repeat(64) : null,
+        rebate_profile_sha256: null,
         equipment_selection: deviceProfileFixture.default_equipment_selection,
         candidate_count: currentSavedDesign.candidate_count,
         solutions: currentSavedDesign.candidates.map((candidate, index) => ({
@@ -235,10 +237,10 @@ function mockApi(projects = [project], savedDesign: typeof generatedDesign | nul
           pv_capacity_kwp_dc: candidate.pv_capacity_kwp_dc,
           battery_capacity_kwh: candidate.nominal_capacity_kwh,
           inverter_capacity_kw_ac: candidate.pv_inverter_capacity_kw_ac,
-          gross_capex_aud_ex_gst: 100_000 + index * 10_000,
-          upfront_rebate_aud_ex_gst: 10_000,
+          gross_capex_aud_ex_gst: 90_000 + index * 10_000,
+          upfront_rebate_aud_ex_gst: 0,
           net_capex_aud_ex_gst: 90_000 + index * 10_000,
-          capex_breakdown_aud_ex_gst: { pv_aud: 50_000 + index * 10_000, battery_aud: 40_000, inverter_aud: 10_000 },
+          capex_breakdown_aud_ex_gst: { pv_aud: 40_000 + index * 10_000, battery_aud: 40_000, inverter_aud: 10_000 },
           rebate_calculation: { scenario_id: candidate.scenario_id, customer_facing_permission: false },
         })),
         quotation_override_basis: "Entered quotation replaces modelled Net CAPEX.",
@@ -410,13 +412,13 @@ describe("C&I project workspace", () => {
     const runButton = screen.getByRole("button", { name: "Start analysis" });
     expect(runButton.hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Review tariff profile in Evidence" })).toBeTruthy();
-    expect(screen.getByText("No rebate programs selected; Finance will use $0 upfront rebates.")).toBeTruthy();
+    expect(screen.queryByText("Rebate plan resolved")).toBeNull();
 
     expect(screen.getByRole("button", { name: "Previous: Scenario Analysis" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Next:/ })).toBeNull();
   });
 
-  it("keeps Finance visible but blocks a selected rebate program until its draft is approved", async () => {
+  it("keeps Finance independent of a legacy unapproved rebate program", async () => {
     const user = userEvent.setup();
     const enabledProfile = {
       ...rebateProfileFixture,
@@ -438,8 +440,8 @@ describe("C&I project workspace", () => {
     await screen.findByRole("region", { name: "Evidence sources" });
 
     await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
-    expect(await screen.findByText("Solar STCs require a current price and source before approval.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Review rebates in Solution Generator" })).toBeTruthy();
+    await screen.findByRole("heading", { name: "Annual bill reconstruction" });
+    expect(screen.queryByRole("button", { name: "Review rebates in Solution Generator" })).toBeNull();
     expect(screen.getByRole("button", { name: "Start analysis" }).hasAttribute("disabled")).toBe(true);
   });
 
@@ -456,6 +458,35 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("heading", { name: "Select solutions before analysis" })).toBeTruthy();
     expect(screen.queryByText("Solution 1")).toBeNull();
     expect(screen.queryByText("Solution 2")).toBeNull();
+  });
+
+  it("keeps the Dispatch workspace visible while saved data refreshes in the background", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
+    mockApi([readyProject], generatedDesign);
+    const queryClient = createCiQueryClient();
+    renderPage(queryClient);
+    await screen.findByRole("region", { name: "Evidence sources" });
+
+    await user.click(screen.getByRole("button", { name: "Scenario Analysis" }));
+    await screen.findByRole("heading", { name: "Scenario dispatch analysis" });
+
+    const cachedDesign = queryClient.getQueryData(ciSavedDesignQueryKey(readyProject.project_id));
+    const refresh = deferred<unknown>();
+    const refreshPromise = queryClient.fetchQuery({
+      queryKey: ciSavedDesignQueryKey(readyProject.project_id),
+      queryFn: () => refresh.promise,
+      staleTime: 0,
+    });
+    await waitFor(() => expect(queryClient.isFetching({ queryKey: ciSavedDesignQueryKey(readyProject.project_id) })).toBe(1));
+
+    expect(screen.getByRole("heading", { name: "Scenario dispatch analysis" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Loading dispatch workspace" })).toBeNull();
+
+    await act(async () => {
+      refresh.resolve(cachedDesign);
+      await refreshPromise;
+    });
   });
 
   it("keeps saved module data cached while navigating without an explicit action", async () => {
@@ -516,7 +547,7 @@ describe("C&I project workspace", () => {
     await screen.findByRole("region", { name: "Evidence sources" });
 
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
-    const rebateHeading = await screen.findByRole("heading", { name: "STC" });
+    const rebateHeading = await screen.findByText(/^STC calculator/);
     const quoteHeading = screen.getByRole("heading", { name: "Solutions" });
     expect(screen.getByLabelText("Solution generation summary").textContent).toBe("2 configured combinations·2 feasible");
     expect(screen.queryByRole("heading", { name: "Solution preview & quotations" })).toBeNull();
@@ -631,13 +662,8 @@ describe("C&I project workspace", () => {
     expect(screen.queryByRole("heading", { name: "Net CAPEX is not ready" })).toBeNull();
     expect(screen.getByLabelText("Solution generation summary").textContent).toContain("+1 custom solution=3 solutions");
     const customSave = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/design-candidates/custom") && init?.method === "POST");
-    expect(JSON.parse(String(customSave?.[1]?.body)).stc_settings).toEqual({
-      solar_stc_enabled: true,
-      solar_stc_price_aud_ex_gst: 39,
-      battery_stc_enabled: false,
-      battery_stc_price_aud_ex_gst: 39,
-    });
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/rebate-profile") && !init?.method)).toHaveLength(2));
+    expect(JSON.parse(String(customSave?.[1]?.body)).stc_settings).toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/rebate-profile"))).toHaveLength(0);
   });
 
   it("restores model quotes and default selections after regenerating the same solutions", async () => {
@@ -689,7 +715,7 @@ describe("C&I project workspace", () => {
     expect(JSON.parse(String(designSave?.[1]?.body)).generation_request.pv_range.minimum_kwp_dc).toBe(120);
   });
 
-  it("saves the current STC settings atomically with generated solutions", async () => {
+  it("generates solutions without submitting STC settings", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 } as const;
     const fetchMock = mockApi([readyProject], generatedDesign);
@@ -697,19 +723,13 @@ describe("C&I project workspace", () => {
     await screen.findByRole("region", { name: "Evidence sources" });
 
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
-    await screen.findByRole("heading", { name: "STC" });
-    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await screen.findByText(/^STC calculator/);
     await user.click(screen.getByRole("button", { name: /Save configuration & generate/ }));
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/design-candidates") && init?.method === "POST")).toBe(true));
     const designSave = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/design-candidates") && init?.method === "POST");
     expect(designSave).toBeTruthy();
-    expect(JSON.parse(String(designSave?.[1]?.body)).stc_settings).toEqual({
-      solar_stc_enabled: true,
-      solar_stc_price_aud_ex_gst: 39,
-      battery_stc_enabled: false,
-      battery_stc_price_aud_ex_gst: 39,
-    });
+    expect(JSON.parse(String(designSave?.[1]?.body)).stc_settings).toBeUndefined();
     expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/rebate-profile/stc-settings") && init?.method === "PUT")).toHaveLength(0);
   });
 
@@ -721,8 +741,7 @@ describe("C&I project workspace", () => {
     await screen.findByRole("region", { name: "Evidence sources" });
 
     await user.click(screen.getByRole("button", { name: "Solution Generator" }));
-    await screen.findByRole("heading", { name: "STC" });
-    await user.click(screen.getByLabelText("Include Solar STCs"));
+    await screen.findByText(/^STC calculator/);
     await user.click(screen.getByRole("button", { name: /Save configuration & generate/ }));
 
     expect(await screen.findAllByText("Synthetic STC save failed.")).not.toHaveLength(0);

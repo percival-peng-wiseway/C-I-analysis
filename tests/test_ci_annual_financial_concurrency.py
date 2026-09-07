@@ -44,6 +44,7 @@ def _assert_changed_input_is_not_saved(
         {"status": "not_configured", "profile": None},
     ),
     rebate_profiles: tuple[dict[str, object] | None, ...] = (None,),
+    expect_saved: bool = False,
 ) -> list[dict[str, object]]:
     record_calls: list[dict[str, object]] = []
     rebate_loader_calls: list[dict[str, object]] = []
@@ -87,6 +88,14 @@ def _assert_changed_input_is_not_saved(
     )
 
     identity_provider = LocalIdentityProvider(local_actor(), bearer_token="test")
+    if expect_saved:
+        post_ci_annual_financial_comparison(
+            project_id=uuid4(), payload=CiAnnualFinancialComparisonRequest(pricing_mode=pricing_mode, prices=[]),
+            identity_provider=identity_provider, session_factory=_FakeSession,
+        )
+        assert len(record_calls) == 1
+        assert record_calls[0]["expected_rebate_profile_sha256"] is None
+        return rebate_loader_calls
     with pytest.raises(HTTPException) as error:
         post_ci_annual_financial_comparison(
             project_id=uuid4(),
@@ -157,7 +166,7 @@ def test_annual_finance_does_not_save_if_device_profile_changes_during_calculati
     )
 
 
-def test_annual_finance_does_not_save_if_rebate_profile_changes_during_calculation(
+def test_annual_finance_never_reads_or_binds_legacy_rebate_profiles(
     monkeypatch,
 ) -> None:
     tariff = {"revision": "tariff-a"}
@@ -166,6 +175,7 @@ def test_annual_finance_does_not_save_if_rebate_profile_changes_during_calculati
 
     rebate_loader_calls = _assert_changed_input_is_not_saved(
         monkeypatch,
+        expect_saved=True,
         pricing_mode="manual_quotes",
         profiles=(tariff, tariff),
         replay_states=(replay, replay),
@@ -179,6 +189,4 @@ def test_annual_finance_does_not_save_if_rebate_profile_changes_during_calculati
             {"revision": "rebate-b"},
         ),
     )
-    assert [
-        call.get("for_update", False) for call in rebate_loader_calls
-    ] == [False, True]
+    assert rebate_loader_calls == []

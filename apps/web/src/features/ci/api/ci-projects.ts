@@ -298,7 +298,7 @@ export async function generateCiDesignCandidates(
 export async function addCiCustomDesignCandidate(
   projectId: string,
   request: CiCustomDesignCandidateRequest,
-  stcSettings: CiProjectStcSettings,
+  stcSettings?: CiProjectStcSettings,
   fetcher: typeof fetch = fetch,
 ): Promise<CiCustomDesignCandidateResult> {
   const response = await fetcher(`/api/commercial-industrial/projects/${encodeURIComponent(projectId)}/design-candidates/custom`, {
@@ -306,12 +306,12 @@ export async function addCiCustomDesignCandidate(
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify({
       ...request,
-      stc_settings: {
+      ...(stcSettings ? { stc_settings: {
         solar_stc_enabled: stcSettings.solarStcEnabled,
         solar_stc_price_aud_ex_gst: stcSettings.solarStcPriceAudExGst,
         battery_stc_enabled: stcSettings.batteryStcEnabled,
         battery_stc_price_aud_ex_gst: stcSettings.batteryStcPriceAudExGst,
-      },
+      } } : {}),
     }),
   });
   if (!response.ok) throw new Error(await errorMessage(response, "Custom solution could not be added."));

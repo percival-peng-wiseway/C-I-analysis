@@ -710,8 +710,17 @@ def test_project_annual_finance_prices_selected_tariff_scenarios_and_ranks_by_np
         blocked_saved_finance = client.get(
             f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
         ).json()
-        assert blocked_saved_finance["status"] == "stale"
-        assert blocked_saved_finance["result"] is None
-        assert "rebate_profile_approval_required" in blocked_saved_finance[
-            "stale_reasons"
-        ]
+        assert blocked_saved_finance["status"] == "ready"
+        assert blocked_saved_finance["result"] == selected_one.json()
+        assert blocked_saved_finance["stale_reasons"] == []
+        worksheet = client.put(
+            f"/api/commercial-industrial/projects/{project['project_id']}/stc-calculator",
+            json={"solar_installation_year": 2025, "solar_zone": 4, "pv_capacity_kwp": 140,
+                  "solar_certificate_price": 39, "battery_installation_period": "2026-05_12",
+                  "battery_usable_capacity_kwh": 100, "battery_certificate_price": 39},
+        )
+        assert worksheet.status_code == 200
+        assert worksheet.json()["estimate"]["total_rebate_aud"] == 65340.60
+        assert client.get(
+            f"/api/commercial-industrial/projects/{project['project_id']}/annual-financial-comparison"
+        ).json() == blocked_saved_finance

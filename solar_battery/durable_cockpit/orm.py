@@ -64,6 +64,7 @@ class CiProjectModel(Base):
     )
     design_context_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
     site_factors_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    stc_calculator_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
     design_price_preview_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
     created_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
     updated_by_actor_id: Mapped[str] = mapped_column(String(120), nullable=False)

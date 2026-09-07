@@ -1252,9 +1252,9 @@ def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready
         assert preview.status_code == 200, preview.json()
         assert preview.json()["status"] == "ready"
         assert preview.json()["candidate_count"] == generated_count + 1
-        assert preview.json()["rebate_profile_sha256"] is not None
+        assert preview.json()["rebate_profile_sha256"] is None
         assert all(
-            item["upfront_rebate_aud_ex_gst"] > 0
+            item["upfront_rebate_aud_ex_gst"] == 0
             for item in preview.json()["solutions"]
         )
         restored_preview = client.get(
@@ -1275,10 +1275,8 @@ def test_custom_route_rebinds_approved_enabled_stc_and_keeps_price_preview_ready
         stale_preview = client.get(
             f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
         )
-        assert stale_preview.status_code == 409
-        assert stale_preview.json()["detail"]["code"] == (
-            "ci_design_price_preview_stale"
-        )
+        assert stale_preview.status_code == 200
+        assert stale_preview.json() == preview.json()
         assert preview_calls == 2
 
     with session_factory() as session:
@@ -1375,7 +1373,7 @@ def test_v4_price_preview_and_rebate_binding_survive_only_reversible_v5_migratio
         assert current_preview.status_code == 200, current_preview.json()
         assert current_preview.json()["solutions"][0][
             "upfront_rebate_aud_ex_gst"
-        ] > 0
+        ] == 0
 
         predecessor = copy.deepcopy(profile)
         predecessor["contract_version"] = "ci_device_profile_v4"
@@ -1431,8 +1429,8 @@ def test_v4_price_preview_and_rebate_binding_survive_only_reversible_v5_migratio
         restored = client.get(
             f"/api/commercial-industrial/projects/{project_id}/design-price-preview"
         )
-        assert restored.status_code == 200, restored.json()
-        assert restored.json() == expected_preview
+        assert restored.status_code == 409, restored.json()
+        assert restored.json()["detail"]["code"] == "ci_design_price_preview_stale"
         assert preview_calls == 0
         with session_factory() as session:
             project = session.get(CiProjectModel, UUID(project_id))
