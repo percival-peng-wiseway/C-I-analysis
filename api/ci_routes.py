@@ -17,6 +17,7 @@ from api.ci_schemas import (
     CiAnnualFinancialComparisonRequest,
     CiAnnualFinancialSimulationRequest,
     CiBillReviewRequest,
+    CiSolutionSiteFactorsRequest,
     CiDesignCandidatesRequest,
     CiCustomDesignCandidateRequest,
     CiDesignFeasibilityRequest,
@@ -653,8 +654,32 @@ def get_ci_project_evidence(
         raise _project_http_error(exc) from exc
 
 
+@router.get("/commercial-industrial/projects/{project_id}/site-factors")
+def get_ci_site_factors(project_id: UUID,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory)):
+    from solar_battery.ci_project_site_factors import site_factors_state
+    try:
+        with session_factory() as session:
+            return site_factors_state(session, project_id=project_id, actor=identity_provider.current())
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
+@router.put("/commercial-industrial/projects/{project_id}/site-factors")
+def put_ci_site_factors(project_id: UUID, payload: CiSolutionSiteFactorsRequest,
+    identity_provider: Annotated[LocalIdentityProvider, Depends(get_identity_provider)],
+    session_factory=Depends(get_durable_session_factory)):
+    from solar_battery.ci_project_site_factors import save_site_factors
+    try:
+        with session_factory() as session, session.begin():
+            return save_site_factors(session, project_id=project_id, actor=identity_provider.current(), factors=payload.model_dump(mode="json"))
+    except CiProjectError as exc:
+        raise _project_http_error(exc) from exc
+
+
 class CiSolarResourceRequest(BaseModel):
-    tilt_degrees: float = Field(default=20, ge=0, le=90, allow_inf_nan=False)
+    tilt_degrees: float = Field(default=0, ge=0, le=90, allow_inf_nan=False)
     azimuth_degrees: float = Field(default=0, ge=0, le=360, allow_inf_nan=False)
 
 
@@ -939,6 +964,7 @@ def post_ci_design_candidates(
                     candidates=list(result["candidates"]),
                     design_context=design_context,
                     actor=actor,
+                    persist_site_factors=payload.generation_request is not None,
                 )
                 if payload.stc_settings is not None:
                     save_ci_project_stc_settings(

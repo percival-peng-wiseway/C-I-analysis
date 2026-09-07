@@ -18,11 +18,14 @@ import type {
 } from "@/features/ci/api/ci-device-profile";
 import type {
   CiDesignContext,
+  CiSiteFactors,
   CiDesignContextV2,
   CiSolutionGenerationRequest,
 } from "@/features/ci/api/ci-projects";
 import type { CiScenarioInput } from "@/features/ci/api/ci-scenarios";
 import { refreshCiSolarResource, type CiSolarResource } from "@/features/ci/api/ci-solar-resource";
+
+import type { CiSiteFactorsState } from "./api/ci-site-factors";
 
 type NumericRange = { minimum: string; maximum: string; step: string };
 type CompleteBatterySolutionProfile = CiBatterySolutionProfile & {
@@ -89,7 +92,7 @@ const defaultSiteFactors = (): SiteFactorsForm => ({
   resource_label: "Workspace screening assumption",
   annual_specific_yield_kwh_per_kw: "1000",
   array_azimuth_degrees: "0",
-  array_tilt_degrees: "20",
+  array_tilt_degrees: "0",
   shading_loss_percent: "3",
   soiling_loss_percent: "2",
   temperature_loss_percent: "5",
@@ -129,6 +132,8 @@ export function CiScenarioBuilder({
   deviceProfile,
   error,
   initialContext,
+  initialSiteFactors,
+  onSaveSiteFactors,
   initialSolutions,
   isPending,
   onSubmit,
@@ -141,6 +146,8 @@ export function CiScenarioBuilder({
   deviceProfile: CiDeviceProfile;
   error: string | null;
   initialContext?: CiDesignContext;
+  initialSiteFactors?: CiSiteFactors;
+  onSaveSiteFactors?: (factors: CiSiteFactors) => Promise<CiSiteFactorsState>;
   initialSolutions?: CiScenarioInput[];
   isPending: boolean;
   onSubmit: (request: CiSolutionGenerationRequest) => void;
@@ -171,8 +178,29 @@ export function CiScenarioBuilder({
   );
   const [pvRange, setPvRange] = useState(restored.pvRange);
   const [batteryRange, setBatteryRange] = useState(restored.batteryRange);
-  const [site, setSite] = useState(() => !initialContext && solarResource?.status === "ready"
-    ? applySolarResource(restored.site, solarResource) : restored.site);
+  const [site, setSite] = useState(() => initialSiteFactors ? siteFormFromFactors(initialSiteFactors) : restored.site);
+  const [savedSite, setSavedSite] = useState<SiteFactorsForm | null>(() => initialSiteFactors ? siteFormFromFactors(initialSiteFactors) : initialContext?.contract_version === "ci_design_context_v2" ? restored.site : null);
+  useEffect(() => {
+    if (initialSiteFactors) { setSavedSite(siteFormFromFactors(initialSiteFactors)); setSavedYield(null); }
+  }, [initialSiteFactors]);
+  const [savedYield, setSavedYield] = useState<number | null>(null);
+  const [siteSavePending, setSiteSavePending] = useState(false);
+  const [siteSaveError, setSiteSaveError] = useState<string | null>(null);
+  const siteDirty = !savedSite || !siteFactorsInput(site) || JSON.stringify(siteFactorsInput(site)) !== JSON.stringify(siteFactorsInput(savedSite));
+  const siteInput = siteFactorsInput(site);
+  const saveSite = async () => {
+    if (!onSaveSiteFactors || !siteInput) return;
+    setSiteSavePending(true);
+    setSiteSaveError(null);
+    const snapshot = { ...site };
+    try {
+      const saved = await onSaveSiteFactors(siteInput);
+      setSavedSite(snapshot);
+      setSavedYield(saved.effective_yield_kwh_per_kwp);
+    } catch (error) {
+      setSiteSaveError(error instanceof Error ? error.message : "Site factors could not be saved.");
+    } finally { setSiteSavePending(false); }
+  };
   const [resource, setResource] = useState(solarResource);
   const [resourcePending, setResourcePending] = useState(false);
   const [resourceError, setResourceError] = useState<string | null>(null);
@@ -259,10 +287,10 @@ export function CiScenarioBuilder({
   const emissionsError = emissionsValue && !between(parseNumber(emissionsValue), 0, 5)
     ? "Grid emissions factor must be between 0 and 5 kg CO2-e/kWh, or blank. Check Environmental assumptions."
     : null;
-  const generationBlocker = (resourcePending ? "Solar resource lookup in progress." : resourceStale ? "Location or orientation changed. Refresh PVGIS before generating, or choose an explicitly labelled manual assumption." : null) ?? candidateLimitError ?? quantityError ?? emissionsError ?? (!request
+  const generationBlocker = (siteSavePending ? "Saving site factors." : resourcePending ? "Solar resource lookup in progress." : resourceStale ? "Location or orientation changed. Refresh PVGIS before generating, or choose an explicitly labelled manual assumption." : null) ?? candidateLimitError ?? quantityError ?? emissionsError ?? (!request
     ? "Complete the site resource, published profiles, capacity ranges and connection limits."
     : null);
-  const effectiveYield = effectiveSpecificYield(site);
+  const effectiveYield = !siteDirty && savedYield !== null ? savedYield : effectiveSpecificYield(site);
 
   const selectInverterProfile = (profileId: string) => {
     const selected = publishedInverter.find((profile) => profile.profile_id === profileId);
@@ -303,7 +331,7 @@ export function CiScenarioBuilder({
                 <p className="mt-2 font-medium">{resource.annual_specific_yield_kwh_per_kw.toFixed(1)} kWh/kWp/year · {resource.tilt_degrees}° tilt · {resource.azimuth_degrees}° azimuth</p>
                 <p className="mt-1 text-xs">{resource.matched_address} · {resource.latitude}, {resource.longitude} · Retrieved {resource.queried_at.slice(0, 10)}</p>
                 <details className="mt-3"><summary className="cursor-pointer">Monthly generation per 1 kWp</summary><div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{resource.monthly_kwh_per_kwp.map((value, index) => <div className="rounded border bg-white p-2 text-xs" key={index}>{["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][index]}<strong className="block">{value.toFixed(1)} kWh</strong></div>)}</div></details>
-                <p className="mt-2 text-xs">PVGIS replaces the 1000 default; it does not multiply it. Model includes temperature and terrain horizon, not nearby trees or buildings. Existing saved designs are unchanged until you apply and regenerate.</p>
+                <p className="mt-2 text-xs">Refresh & apply PVGIS replaces the 1000 default; it does not multiply it. Model includes temperature and terrain horizon, not nearby trees or buildings. Existing saved designs are unchanged until you apply and regenerate.</p>
               </> : null}
               <p className="mt-2 text-xs">Address geocoding: <a href="https://www.geoapify.com/" target="_blank" rel="noreferrer" className="underline">Geoapify</a> / <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline">OpenStreetMap</a>. Solar model: <a href="https://re.jrc.ec.europa.eu/pvg_tools/en/" target="_blank" rel="noreferrer" className="underline">European Commission JRC PVGIS</a>. Only the address is sent to Geoapify; PVGIS receives coordinates and system assumptions.</p>
             </div>
@@ -349,10 +377,17 @@ export function CiScenarioBuilder({
                   <NumberField label="System availability (%)" onChange={(system_availability_percent) => setSite({ ...site, system_availability_percent })} value={site.system_availability_percent} />
                 </div>
               </details>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-950">
-                <span>Effective yield</span>
-                <strong className="tabular-nums">{effectiveYield === null ? "Complete site factors" : `${formatNumber(effectiveYield)} kWh/kWp`}</strong>
+              <div className="mt-4 rounded-xl border-2 border-emerald-600 bg-emerald-50 p-5 text-emerald-950" aria-live="polite">
+                <p className="text-sm font-semibold">Effective yield</p>
+                <p className="mt-2 text-3xl font-bold tabular-nums">{effectiveYield === null ? "Complete site factors" : effectiveYield.toLocaleString("en-AU", { maximumFractionDigits: 1 })}<span className="ml-2 text-sm font-medium">kWh/kWp/year</span></p>
+                <p className="mt-2 text-sm">Gross yield × retained output after site losses × availability. Used for PV generation before inverter conversion and clipping.</p>
+                <p className="mt-1 text-xs">{siteDirty ? "Unsaved site factors" : "Site factors saved"} · Regenerate solutions after changing these values to update subsequent calculations.</p>
               </div>
+              {onSaveSiteFactors ? <div className="mt-4 flex flex-wrap items-center gap-3">
+                <Button type="button" disabled={siteSavePending || isPending || resourcePending || resourceStale || !siteInput || !siteDirty} onClick={() => { void saveSite(); }}>{siteSavePending ? "Saving site factors…" : "Save site factors"}</Button>
+                {!siteDirty ? <span className="text-sm text-emerald-800">Saved for this project. Restored after refresh.</span> : null}
+                {siteSaveError ? <p className="text-sm text-red-800" role="alert">{siteSaveError}</p> : null}
+              </div> : null}
             </section>
           </div>
         </WorkflowSection>
@@ -776,24 +811,7 @@ function restoreV2(context: CiDesignContextV2): RestoredBuilderState {
       maximum: formatCandidateValue(context.search_space.battery_range.maximum_kwh),
       step: formatCandidateValue(context.search_space.battery_range.step_kwh),
     },
-    site: {
-      pv_timing_model: context.site_factors.pv_timing_model ?? "generic_normalized_solar_shape_v1",
-      latitude_degrees: context.site_factors.latitude_degrees == null ? "" : String(context.site_factors.latitude_degrees),
-      longitude_degrees: context.site_factors.longitude_degrees == null ? "" : String(context.site_factors.longitude_degrees),
-      location_source_label: context.site_factors.location_source_label ?? "",
-      location_confirmed: context.site_factors.location_confirmed === true,
-      resource_source: context.site_factors.resource_source,
-      resource_label: context.site_factors.resource_label,
-      annual_specific_yield_kwh_per_kw: formatNumber(context.site_factors.annual_specific_yield_kwh_per_kw),
-      array_azimuth_degrees: formatNumber(context.site_factors.array_azimuth_degrees),
-      array_tilt_degrees: formatNumber(context.site_factors.array_tilt_degrees),
-      shading_loss_percent: formatNumber(context.site_factors.shading_loss_percent),
-      soiling_loss_percent: formatNumber(context.site_factors.soiling_loss_percent),
-      temperature_loss_percent: formatNumber(context.site_factors.temperature_loss_percent),
-      wiring_mismatch_loss_percent: formatNumber(context.site_factors.wiring_mismatch_loss_percent),
-      other_system_loss_percent: formatNumber(context.site_factors.other_system_loss_percent),
-      system_availability_percent: formatNumber(context.site_factors.system_availability_percent),
-    },
+    site: siteFormFromFactors(context.site_factors),
     connection: connectionFormFromTechnical(options),
     solarProfileId: context.profile_selection.solar_profile_id,
     batteryProfileId: context.profile_selection.battery_profile_id,
@@ -959,4 +977,37 @@ function formatCandidateValue(value: number) {
 
 function humanize(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function siteFormFromFactors(factors: CiSiteFactors): SiteFactorsForm {
+  return {
+      pv_timing_model: factors.pv_timing_model ?? "generic_normalized_solar_shape_v1",
+      latitude_degrees: factors.latitude_degrees == null ? "" : String(factors.latitude_degrees),
+      longitude_degrees: factors.longitude_degrees == null ? "" : String(factors.longitude_degrees),
+      location_source_label: factors.location_source_label ?? "",
+      location_confirmed: factors.location_confirmed === true,
+      resource_source: factors.resource_source,
+      resource_label: factors.resource_label,
+      annual_specific_yield_kwh_per_kw: formatNumber(factors.annual_specific_yield_kwh_per_kw),
+      array_azimuth_degrees: formatNumber(factors.array_azimuth_degrees),
+      array_tilt_degrees: formatNumber(factors.array_tilt_degrees),
+      shading_loss_percent: formatNumber(factors.shading_loss_percent),
+      soiling_loss_percent: formatNumber(factors.soiling_loss_percent),
+      temperature_loss_percent: formatNumber(factors.temperature_loss_percent),
+      wiring_mismatch_loss_percent: formatNumber(factors.wiring_mismatch_loss_percent),
+      other_system_loss_percent: formatNumber(factors.other_system_loss_percent),
+      system_availability_percent: formatNumber(factors.system_availability_percent),
+  };
+}
+
+function siteFactorsInput(site: SiteFactorsForm): CiSiteFactors | null {
+  const { latitude_degrees, longitude_degrees, location_source_label, location_confirmed, ...rest } = site;
+  const numbers = Object.fromEntries(Object.entries(rest).filter(([key]) => !["resource_source", "resource_label", "pv_timing_model"].includes(key)).map(([key, value]) => [key, parseNumber(value)]));
+  if (effectiveSpecificYield(site) === null || !between(numbers.annual_specific_yield_kwh_per_kw, 500, 3000) || !between(numbers.array_azimuth_degrees, 0, 360) || !between(numbers.array_tilt_degrees, 0, 90) || !site.resource_label.trim() || site.resource_label.trim().length > 160) return null;
+  if (site.pv_timing_model === "solar_geometry_screening_v1" && (!between(parseNumber(latitude_degrees), -90, 90) || !between(parseNumber(longitude_degrees), -180, 180) || !location_source_label.trim() || !location_confirmed)) return null;
+  return {
+    ...numbers, resource_basis: "gross_specific_yield_before_site_losses", resource_source: site.resource_source,
+    resource_label: site.resource_label.trim(), pv_timing_model: site.pv_timing_model,
+    ...(site.pv_timing_model === "solar_geometry_screening_v1" ? { latitude_degrees: parseNumber(latitude_degrees), longitude_degrees: parseNumber(longitude_degrees), location_source_label, location_confirmed } : {}),
+  } as CiSiteFactors;
 }

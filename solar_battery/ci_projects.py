@@ -120,12 +120,15 @@ def record_ci_design_candidates(
     candidates: list[dict[str, object]],
     design_context: dict[str, object],
     actor: LocalActorContext,
+    persist_site_factors: bool = False,
 ) -> dict[str, object]:
     row = require_ci_project(session, project_id=project_id, actor=actor)
     row.current_stage = "system_design"
     row.design_candidate_count = candidate_count
     row.design_candidates_json = candidates
     row.design_context_json = design_context
+    if persist_site_factors and design_context.get("contract_version") == "ci_design_context_v2":
+        row.site_factors_json = dict(design_context["site_factors"])
     row.design_price_preview_json = None
     row.updated_by_actor_id = actor.actor_id
     row.updated_at = datetime.now(timezone.utc)
@@ -196,6 +199,7 @@ def _project_contract(row: CiProjectModel) -> dict[str, object]:
             "ready" if row.design_candidates_json is not None else "input_required"
         ),
         "design_candidate_count": row.design_candidate_count,
+        "site_factors": row.site_factors_json,
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
     }

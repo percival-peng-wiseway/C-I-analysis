@@ -1,4 +1,5 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { saveCiSiteFactors } from "./api/ci-site-factors";
 import { inverterDescription } from "./ci-scenario-labels";
 import { Activity, ArrowLeft, ArrowRight, Play, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -296,7 +297,14 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
       void invalidateCiCalculationHandbook(queryClient, project.project_id);
     },
   });
+  const savedSiteFactors = project.site_factors;
+  const generatedSiteFactors = generatedDesign?.design_context?.contract_version === "ci_design_context_v2" ? generatedDesign.design_context.site_factors : null;
+  const siteFactorsNeedRegeneration = Boolean(savedSiteFactors && (!generatedSiteFactors || Object.entries(savedSiteFactors).some(([key, value]) => generatedSiteFactors[key as keyof typeof generatedSiteFactors] !== value)));
   const startAnalysis = () => {
+    if (siteFactorsNeedRegeneration) {
+      setAnalysisError("Site factors changed. Generate solutions again before running analysis.");
+      return;
+    }
     if (analysisPending) {
       setAnalysisError("A full analysis is already running.");
       return;
@@ -340,6 +348,12 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
         deviceProfile={activeDeviceProfile}
         error={run.error instanceof Error ? run.error.message : null}
         initialContext={generatedDesign?.design_context ?? undefined}
+        initialSiteFactors={project.site_factors ?? undefined}
+        onSaveSiteFactors={async (factors) => {
+          const saved = await saveCiSiteFactors(project.project_id, factors);
+          void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
+          return saved;
+        }}
         initialSolutions={generatedDesign?.candidates}
         isPending={run.isPending}
         onSubmit={(request) => run.mutate(request)}
@@ -349,6 +363,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
         onSolarResourceUpdated={() => { void evidence.refetch(); }}
         stcSettings={<CiRebateProfilePanel projectId={project.project_id} ref={stcSettingsRef} />}
       />
+    {siteFactorsNeedRegeneration && generatedDesign ? <p role="alert" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">Site factors changed. Generate solutions again before running analysis.</p> : null}
     {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} analysisPending={analysisPending} generationSummary={generatedDesign.generation_summary ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
   </div>;
 }

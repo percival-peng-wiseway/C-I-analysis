@@ -35,7 +35,7 @@ def _number(value: object, low: float, high: float) -> float:
     return number
 
 
-def lookup_solar_resource(address: str | None, *, tilt: float = 20, azimuth: float = 0,
+def lookup_solar_resource(address: str | None, *, tilt: float = 0, azimuth: float = 0,
                           previous: dict | None = None) -> dict:
     """1 kWp model output is specific yield, NOT a multiplier for the 1000 fallback.
 

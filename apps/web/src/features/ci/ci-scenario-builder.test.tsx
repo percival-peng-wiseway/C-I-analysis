@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CiDeviceProfile } from "./api/ci-device-profile";
-import type { CiDesignContextV2 } from "./api/ci-projects";
+import type { CiDesignContextV2, CiSiteFactors } from "./api/ci-projects";
 import type { CiScenarioInput } from "./api/ci-scenarios";
 import { CiScenarioBuilder } from "./ci-scenario-builder";
 import type { CiSolarResource } from "./api/ci-solar-resource";
@@ -18,7 +18,7 @@ describe("CiScenarioBuilder", () => {
     const resource: CiSolarResource = {
       version: "ci_solar_resource_v1", status: "ready", message: "Climate-based estimate",
       address: "Example", matched_address: "Example, Australia", queried_at: "2026-09-06T00:00:00Z",
-      annual_specific_yield_kwh_per_kw: 1440, tilt_degrees: 20, azimuth_degrees: 0,
+      annual_specific_yield_kwh_per_kw: 1440, tilt_degrees: 0, azimuth_degrees: 0,
       latitude: -37.8, longitude: 144.9, monthly_kwh_per_kwp: Array(12).fill(120),
       source: "PVGIS 5.3 / ERA5", customer_facing_permission: false,
     };
@@ -26,6 +26,11 @@ describe("CiScenarioBuilder", () => {
     expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1000");
     first.unmount();
     render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} solarResource={resource} siteAddress="Example" projectId="example-project" />);
+    expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1000");
+    expect(screen.getByLabelText("Array tilt (°)")).toHaveProperty("value", "0");
+    const initialFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(resource)));
+    await userEvent.click(screen.getByRole("button", { name: "Refresh & apply PVGIS" }));
+    initialFetch.mockRestore();
     expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1440");
     expect(screen.getByLabelText("Temperature loss (%)")).toHaveProperty("value", "0");
     const save = screen.getByRole("button", { name: "Save configuration & generate solutions" });
@@ -156,7 +161,7 @@ describe("CiScenarioBuilder", () => {
         resource_source: "analyst_assumption",
         resource_label: "Workspace screening assumption",
         array_azimuth_degrees: 0,
-        array_tilt_degrees: 20,
+        array_tilt_degrees: 0,
       },
       connection_options: {
         site_ac_headroom_kw: 250,
@@ -593,3 +598,36 @@ const deviceProfile: CiDeviceProfile = {
   annual_om_fraction_of_capex: 0.015,
   analysis_term_years: 15,
 };
+
+it("saves site factors independently, restores them after remount and uses them for generation", async () => {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn();
+  const onSaveSiteFactors = vi.fn(async (factors: CiSiteFactors) => ({ site_factors: factors, effective_yield_kwh_per_kwp: 1051.3902168 }));
+  const view = render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} onSaveSiteFactors={onSaveSiteFactors} />);
+  expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1000");
+  expect(screen.getByLabelText("Array azimuth (°; 0 = north)")).toHaveProperty("value", "0");
+  expect(screen.getByLabelText("Array tilt (°)")).toHaveProperty("value", "0");
+  fireEvent.change(screen.getByLabelText("Gross annual specific yield (kWh/kWp)"), { target: { value: "1200" } });
+  fireEvent.change(screen.getByLabelText("Array tilt (°)"), { target: { value: "15" } });
+  await user.click(screen.getByRole("button", { name: "Save site factors" }));
+  expect(onSaveSiteFactors).toHaveBeenCalledOnce();
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(screen.getByText("Saved for this project. Restored after refresh.")).toBeTruthy();
+  const saved = onSaveSiteFactors.mock.calls[0][0];
+  view.unmount();
+  render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={onSubmit} onSaveSiteFactors={onSaveSiteFactors} initialSiteFactors={saved} />);
+  expect(screen.getByLabelText("Gross annual specific yield (kWh/kWp)")).toHaveProperty("value", "1200");
+  expect(screen.getByLabelText("Array tilt (°)")).toHaveProperty("value", "15");
+  expect(screen.getByText("1,051.4")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Save configuration & generate solutions" }));
+  expect(onSubmit.mock.calls[0][0].site_factors).toMatchObject(saved);
+});
+
+it("keeps site factors unsaved when persistence fails", async () => {
+  const onSaveSiteFactors = vi.fn().mockRejectedValue(new Error("Network unavailable"));
+  render(<CiScenarioBuilder deviceProfile={deviceProfile} error={null} isPending={false} onSubmit={vi.fn()} onSaveSiteFactors={onSaveSiteFactors} />);
+  await userEvent.click(screen.getByRole("button", { name: "Save site factors" }));
+  expect(screen.getByRole("alert").textContent).toBe("Network unavailable");
+  expect(screen.queryByText("Saved for this project. Restored after refresh.")).toBeNull();
+  expect(screen.getByRole("button", { name: "Save site factors" })).toHaveProperty("disabled", false);
+});

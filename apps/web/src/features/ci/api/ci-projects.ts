@@ -3,6 +3,7 @@ import type { CiBatterySolutionProfile, CiInverterSolutionProfile, CiSolarSoluti
 import type { CiProjectStcSettings } from "./ci-rebate-profile";
 
 export interface CiProject {
+  site_factors?: CiSiteFactors | null;
   project_id: string;
   display_name: string;
   current_stage: "setup" | "system_design" | "financial_simulation";
