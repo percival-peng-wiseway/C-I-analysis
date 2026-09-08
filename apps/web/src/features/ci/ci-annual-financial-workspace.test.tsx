@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import type { CiAnnualFinancialComparisonResult, CiAnnualFinancialRebateBreakdown, CiScenarioRebateCalculation } from "./api/ci-annual-financial-comparison";
 import { CiAnnualFinancialWorkspace, CiPortfolioReturnChart } from "./ci-annual-financial-workspace";
+import { ciDeviceProfileQueryKey, fetchCiDeviceProfile } from "./api/ci-device-profile";
 
 const fixtures = vi.hoisted(() => {
   const rebateCalculation = (scenarioId: string): CiScenarioRebateCalculation => ({
@@ -178,4 +179,30 @@ it("never substitutes a named project's hardcoded report when saved tariff resul
   expect(screen.queryByRole("img", { name: "Top 3 financial return comparison" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Run .*solutions/ })).toBeNull();
   expect(fixtures.compare).not.toHaveBeenCalled();
+});
+
+it("refreshes mounted finance inputs after Settings save and removes the previous run's charts", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  render(<QueryClientProvider client={client}><CiAnnualFinancialWorkspace onComplete={() => undefined} profileReady project={project} /></QueryClientProvider>);
+  await user.click(await screen.findByRole("button", { name: "Run 4 solutions" }));
+  await screen.findByRole("heading", { name: "NPV and payback across all solutions" });
+  const state = await fetchCiDeviceProfile();
+  act(() => client.setQueryData(ciDeviceProfileQueryKey, {
+    ...state, updated_at: "2099-09-08T01:00:00Z", profile_sha256: "b".repeat(64),
+    profile: { ...state.profile, discount_rate: 0.05, annual_value_escalation_rate: 0.02,
+      annual_value_degradation_rate: 0.01, annual_om_fraction_of_capex: 0.003, analysis_term_years: 20 },
+  }));
+  await waitFor(() => expect(screen.getByRole("spinbutton", { name: /^Discount rate/ })).toHaveProperty("value", "5"));
+  expect(screen.getByRole("spinbutton", { name: /^Value escalation/ })).toHaveProperty("value", "2");
+  expect(screen.getByRole("spinbutton", { name: /^Value degradation/ })).toHaveProperty("value", "1");
+  expect(screen.getByRole("spinbutton", { name: /^Annual O&M/ })).toHaveProperty("value", "0.3");
+  expect(screen.getByRole("spinbutton", { name: /^Analysis term/ })).toHaveProperty("value", "20");
+  expect(screen.queryByRole("heading", { name: "NPV and payback across all solutions" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Run 4 solutions" }));
+  await waitFor(() => expect(fixtures.compare).toHaveBeenCalledTimes(2));
+  expect(fixtures.compare.mock.calls[1]?.[0]).toMatchObject({ assumptions: {
+    discountRate: 0.05, annualValueEscalationRate: 0.02,
+    annualValueDegradationRate: 0.01, annualOmFractionOfCapex: 0.003, analysisTermYears: 20,
+  } });
 });

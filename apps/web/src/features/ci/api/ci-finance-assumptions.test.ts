@@ -29,6 +29,26 @@ const workspaceProfile = {
 } as CiDeviceProfileState;
 
 describe("one-click finance assumption provenance", () => {
+  it.each([
+    ["2026-09-08T01:00:00", "2026-09-08T01:01:00+00:00"],
+    ["2026-09-08T01:00:00Z", "2026-09-08T11:01:00+10:00"],
+  ])("uses later Settings defaults over an existing manual quote (%s, %s)", (saved_at, updated_at) => {
+    expect(resolveCiAnnualFinanceAssumptions(
+      { ...currentFinance, saved_at }, { ...workspaceProfile, updated_at },
+    )).toEqual({
+      discountRate: 0.09, annualValueEscalationRate: 0.04,
+      annualValueDegradationRate: 0.01, annualOmFractionOfCapex: 0.025,
+      analysisTermYears: 12,
+    });
+  });
+
+  it("keeps finance inputs authored after Settings, including mixed SQLite and UTC timestamps", () => {
+    expect(resolveCiAnnualFinanceAssumptions(
+      { ...currentFinance, saved_at: "2026-09-08T01:02:00Z" },
+      { ...workspaceProfile, updated_at: "2026-09-08T01:01:00" },
+    ).discountRate).toBe(0.06);
+  });
+
   it("preserves current saved finance inputs ahead of workspace defaults", () => {
     expect(resolveCiAnnualFinanceAssumptions(currentFinance, workspaceProfile)).toEqual({
       discountRate: 0.06,

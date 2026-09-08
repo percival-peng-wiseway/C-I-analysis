@@ -14,6 +14,32 @@ afterEach(() => {
 });
 
 describe("CiSettingsPanel solution profile library", () => {
+  it("saves all five displayed finance defaults as calculation units and restores them", async () => {
+    let profile = deviceProfile();
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async (_input, init) => {
+      if (init?.method === "PUT") profile = JSON.parse(String(init.body));
+      return new Response(JSON.stringify(readyState(profile)));
+    }));
+    const view = renderSettings();
+    await screen.findByRole("heading", { name: "Solution profile library" });
+    await user.click(screen.getByRole("tab", { name: "Equipment & finance" }));
+    const inputs = { "Discount rate": "5", "Analysis term": "15", "Value escalation": "2", "Value degradation": "0.5", "Annual O&M": "0.3" };
+    for (const [label, value] of Object.entries(inputs)) {
+      await user.clear(screen.getByLabelText(label));
+      await user.type(screen.getByLabelText(label), value);
+    }
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    await screen.findByText(/Run Analysis again to apply the saved prices and finance defaults/);
+    expect(profile).toMatchObject({ discount_rate: 0.05, analysis_term_years: 15,
+      annual_value_escalation_rate: 0.02, annual_value_degradation_rate: 0.005, annual_om_fraction_of_capex: 0.003 });
+    view.unmount();
+    renderSettings();
+    await screen.findByRole("heading", { name: "Solution profile library" });
+    await user.click(screen.getByRole("tab", { name: "Equipment & finance" }));
+    for (const [label, value] of Object.entries(inputs)) expect(screen.getByLabelText(label)).toHaveProperty("value", value);
+  });
+
   it("defaults Plan A installation cost to 70000 and saves edits independently of equipment prices", async () => {
     let profile = deviceProfile();
     vi.stubGlobal("fetch", vi.fn(async (_input, init) => {

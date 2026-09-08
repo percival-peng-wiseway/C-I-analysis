@@ -23,7 +23,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { invalidateCiCalculationHandbook } from "@/features/ci/api/ci-calculation-handbook";
-import { resolveCiAnnualFinanceAssumptions } from "@/features/ci/api/ci-finance-assumptions";
+import { ciFinanceDefaultsChanged, resolveCiAnnualFinanceAssumptions } from "@/features/ci/api/ci-finance-assumptions";
 import {
   ciProjectEvidenceQueryKey,
   fetchCiProjectEvidence,
@@ -63,8 +63,6 @@ import {
 import {
   ciDeviceProfileQueryKey,
   fetchCiDeviceProfile,
-  type CiDeviceProfile,
-  type CiEquipmentSelection,
 } from "@/features/ci/api/ci-device-profile";
 import {
   ciProjectTariffProfileQueryKey,
@@ -76,6 +74,7 @@ import {
   type CiProjectRebateProfileState,
 } from "@/features/ci/api/ci-rebate-profile";
 import { CiPortfolioReturnChart } from "@/features/ci/ci-annual-financial-workspace";
+import { CiEquipmentProfiles } from "./ci-equipment-profiles";
 import { CiTariffDispatchChart } from "@/features/ci/ci-tariff-dispatch-chart";
 import {
   restoreCiAnalysisPriceSnapshot,
@@ -201,10 +200,12 @@ const tabs: Array<{ id: ReplayTab; label: string }> = [
 ];
 
 export function CiTariffReplay({
+  onConfigureEquipment,
   onConfigureRebates,
   onConfigureTariff,
   project,
 }: {
+  onConfigureEquipment: () => void;
   onConfigureRebates: () => void;
   onConfigureTariff: () => void;
   project: CiProject;
@@ -244,7 +245,6 @@ export function CiTariffReplay({
     queryFn: () => fetchCiProjectTariffProfile(project.project_id),
     retry: false,
   });
-  const [equipmentSelection, setEquipmentSelection] = useState<CiEquipmentSelection | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<FinanceAnalysisProgress | null>(null);
   const localRunInFlight = useRef(false);
   const activeAnalysisCount = useIsMutating({ mutationKey: CI_ANALYSIS_MUTATION_KEY });
@@ -252,14 +252,6 @@ export function CiTariffReplay({
   const workspaceSnapshot = pricePreview.data
     ? restoreCiAnalysisPriceSnapshot(project.project_id, pricePreview.data)
     : null;
-
-  useEffect(() => {
-    if (deviceProfile.data?.status === "ready" && deviceProfile.data.profile) {
-      setEquipmentSelection(deviceProfile.data.profile.default_equipment_selection);
-    } else if (deviceProfile.data?.status === "not_configured") {
-      setEquipmentSelection(null);
-    }
-  }, [deviceProfile.data?.profile_sha256, deviceProfile.data?.status]);
 
   const runReplay = useMutation({
     mutationKey: CI_ANALYSIS_MUTATION_KEY,
@@ -428,7 +420,8 @@ export function CiTariffReplay({
   const completedRun = runReplay.isSuccess ? runReplay.data : null;
   const savedDispatchResult = completedRun?.feasibilityResult ?? dispatch.data.result;
   const savedResult = completedRun?.tariffResult ?? replay.data.result;
-  const savedFinanceResult = completedRun?.financeResult ?? (finance.data.status === "ready" ? finance.data.result : null);
+  const defaultsChanged = ciFinanceDefaultsChanged(finance.data, deviceProfile.data);
+  const savedFinanceResult = finance.data.status === "ready" && !defaultsChanged ? finance.data.result : null;
   const savedScenarios = savedResult && Array.isArray(savedResult.scenarios)
     ? savedResult.scenarios
     : null;
@@ -447,12 +440,6 @@ export function CiTariffReplay({
     localRunInFlight.current = true;
     runReplay.mutate({ savedFinance: finance.data, savedDeviceProfile: deviceProfile.data, selectionSnapshot: workspaceSnapshot });
   };
-  const changeEquipmentSelection = (selection: CiEquipmentSelection) => {
-    if (analysisBusy) return;
-    setEquipmentSelection(selection);
-    setAnalysisProgress(null);
-    runReplay.reset();
-  };
 
   return (
     <section aria-labelledby="tariff-replay-title" className="space-y-5">
@@ -463,9 +450,10 @@ export function CiTariffReplay({
       {error ? <p aria-live="assertive" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">{error}</p> : null}
       {replay.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">The saved replay no longer matches the current project inputs. Run the scenarios again to refresh the annual bills.</p> : null}
       {finance.data.status === "stale" ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{financeStaleMessage(finance.data.stale_reasons)}</p> : null}
+      {defaultsChanged ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Settings were saved after this financial result. Run Analysis again to apply the saved finance defaults.</p> : null}
       {demandOptimisationHasNoTariffValue ? <ZeroDemandRateNotice onConfigureTariff={onConfigureTariff} /> : null}
 
-      <EquipmentSelectionPanel disabled={analysisBusy} onChange={changeEquipmentSelection} profile={savedDeviceProfile} selection={equipmentSelection} />
+      <CiEquipmentProfiles disabled={analysisBusy} onChange={onConfigureEquipment} profile={savedDeviceProfile} selection={design.data?.design_context?.contract_version === "ci_design_context_v2" ? design.data.design_context.profile_selection : null} />
 
       {result ? (
         financeResult ? <CiTariffReplayResult evidenceCode={inspection?.bill.network_tariff_code ?? "Not recorded"} feasibilityResult={savedDispatchResult} financeResult={financeResult} profileLabel={profileLabel} result={result} /> : <ReplayReadyState canRun={canRun} checks={checks} design={design.data} onConfigureRebates={onConfigureRebates} onConfigureTariff={onConfigureTariff} profileLabel={profileLabel} replayed />
@@ -715,18 +703,6 @@ function RebateAudit({ solution }: { solution: CiAnnualFinancialComparisonResult
 function RebateStatus({ status }: { status: CiAnnualFinancialComparisonResult["solutions"][number]["rebate_breakdown"][number]["status"] }) {
   const tone = status === "applied" ? "bg-emerald-100 text-emerald-800" : status === "ineligible" ? "bg-amber-100 text-amber-900" : "bg-slate-100 text-slate-600";
   return <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>{humanize(status)}</span>;
-}
-
-function EquipmentSelectionPanel({ disabled, onChange, profile, selection }: { disabled: boolean; onChange: (selection: CiEquipmentSelection) => void; profile: CiDeviceProfile | null; selection: CiEquipmentSelection | null }) {
-  if (!profile || !selection) return <section className="rounded-xl border border-amber-200 bg-amber-50 p-5"><h2 className="font-semibold text-amber-950">Equipment catalog required</h2><p className="mt-1 text-sm text-amber-800">Open Settings and save the supported PV, battery and hybrid inverter / PCS catalog before calculating.</p></section>;
-  const pv = profile.equipment_catalog.pv_products[0];
-  const battery = profile.equipment_catalog.battery_products[0];
-  const inverter = profile.equipment_catalog.inverter_products[0];
-  return <section aria-busy={disabled} aria-labelledby="equipment-selection-title" className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-cyan-700">Equipment</p><h2 className="mt-1 text-lg font-semibold text-slate-950" id="equipment-selection-title">Select pricing references</h2></div><div className="mt-4 grid gap-3 lg:grid-cols-3"><EquipmentSelect disabled={disabled} label="PV" onChange={(productId) => onChange({ ...selection, pv_product_id: productId as CiEquipmentSelection["pv_product_id"] })} options={profile.equipment_catalog.pv_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary={`${aud(pv.capital_cost_aud_per_kwp_dc)} / kWp DC`} value={selection.pv_product_id} /><EquipmentSelect disabled={disabled} label="Battery" onChange={(productId) => onChange({ ...selection, battery_product_id: productId as CiEquipmentSelection["battery_product_id"] })} options={profile.equipment_catalog.battery_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary="Continuous capacity cost curve" value={selection.battery_product_id} /><EquipmentSelect disabled={disabled} label="Hybrid inverter / PCS" onChange={(productId) => onChange({ ...selection, inverter_product_id: productId as CiEquipmentSelection["inverter_product_id"] })} options={profile.equipment_catalog.inverter_products.map((item) => ({ id: item.product_id, label: `${item.manufacturer} ${item.model}` }))} summary="Continuous capacity cost curve" value={selection.inverter_product_id} /></div></section>;
-}
-
-function EquipmentSelect({ disabled, label, onChange, options, summary, value }: { disabled: boolean; label: string; onChange: (value: string) => void; options: Array<{ id: string; label: string }>; summary: string; value: string }) {
-  return <label className="rounded-xl border border-slate-200 bg-slate-50/60 p-4"><span className="text-xs font-semibold text-slate-600">{label}</span><select aria-label={label} className="mt-2 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500" disabled={disabled} onChange={(event) => onChange(event.target.value)} value={value}>{options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><span className="mt-2 block text-xs text-slate-500">{summary}</span></label>;
 }
 
 function ReplayReadyState({

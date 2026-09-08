@@ -164,6 +164,7 @@ export function CiReadinessPage() {
           />
         ) : (
           <CiTariffReplay
+            onConfigureEquipment={() => workspace.setStage("physical_feasibility")}
             key={activeProject.project_id}
             onConfigureRebates={() => {
               workspace.setStage("physical_feasibility");

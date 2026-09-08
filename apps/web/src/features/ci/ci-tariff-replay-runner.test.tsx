@@ -131,12 +131,14 @@ function deferred<T>() {
 }
 
 function renderReplay(client = createCiQueryClient(), onConfigureTariff = vi.fn()) {
+  const onConfigureEquipment = vi.fn();
   return {
     client,
+    onConfigureEquipment,
     onConfigureTariff,
     ...render(
       <QueryClientProvider client={client}>
-        <CiTariffReplay onConfigureRebates={vi.fn()} onConfigureTariff={onConfigureTariff} project={project as never} />
+        <CiTariffReplay onConfigureEquipment={onConfigureEquipment} onConfigureRebates={vi.fn()} onConfigureTariff={onConfigureTariff} project={project as never} />
       </QueryClientProvider>,
     ),
   };
@@ -168,6 +170,7 @@ beforeEach(() => {
       annual_value_degradation_rate: 0.01,
       annual_om_fraction_of_capex: 0.02,
       analysis_term_years: 20,
+      solution_profiles: { solar_profiles: [], battery_profiles: [], inverter_profiles: [] },
       default_equipment_selection: {
         pv_product_id: "pv-one",
         battery_product_id: "battery-one",
@@ -329,7 +332,7 @@ describe("Finance analysis runner", () => {
 
     const pending = await screen.findByRole("button", { name: "Analysis running…" });
     expect(pending.hasAttribute("disabled")).toBe(true);
-    expect((screen.getByRole("combobox", { name: "PV" }) as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Change equipment profiles" })).toHaveProperty("disabled", true);
 
     const client = first.client;
     first.unmount();
@@ -422,23 +425,13 @@ describe("Finance analysis runner", () => {
     });
   });
 
-  it("clears a completed progress state when equipment selection changes", async () => {
+  it("opens the solution generator to change profiles instead of editing unused pricing selections", async () => {
     const user = userEvent.setup();
-    mocks.runFeasibility.mockImplementation(async (_projectId, _fetcher, _signal, scenarioIds, options) => {
-      options?.onProgress?.({ completedScenarioCount: scenarioIds.length, totalScenarioCount: scenarioIds.length });
-      return {};
-    });
-    mocks.runTariffReplay.mockImplementation(async (_projectId, _fetcher, _signal, scenarioIds, options) => {
-      options?.onProgress?.({ completedScenarioCount: scenarioIds.length, totalScenarioCount: scenarioIds.length });
-      return null;
-    });
-    renderReplay();
-    const start = await screen.findByRole("button", { name: "Start analysis" });
-    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
-    await user.click(start);
-
-    expect(await screen.findByRole("progressbar", { name: "Analysis complete" })).toBeTruthy();
-    await user.selectOptions(screen.getByRole("combobox", { name: "PV" }), "pv-two");
-    expect(screen.queryByRole("progressbar", { name: "Analysis complete" })).toBeNull();
+    const view = renderReplay();
+    await user.click(await screen.findByRole("button", { name: "Change equipment profiles" }));
+    expect(view.onConfigureEquipment).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("combobox", { name: "PV" })).toBeNull();
+    expect(mocks.runFeasibility).not.toHaveBeenCalled();
+    expect(mocks.compareFinance).not.toHaveBeenCalled();
   });
 });

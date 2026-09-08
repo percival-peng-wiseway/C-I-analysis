@@ -107,3 +107,21 @@ it("requires a configured finance basis before starting any expensive dispatch",
   expect(mocks.runTariff).not.toHaveBeenCalled();
   expect(mocks.compareFinance).not.toHaveBeenCalled();
 });
+
+it("applies all five newly saved Settings values when rerunning an existing manual quotation", async () => {
+  mocks.fetchFinance.mockResolvedValue({ status: "ready", saved_at: "2026-09-07T01:00:00", result: { assumptions: saved } });
+  mocks.fetchDevice.mockResolvedValue({ status: "ready", updated_at: "2026-09-08T01:00:00Z", profile: {
+    discount_rate: 0.05, annual_value_escalation_rate: 0.02,
+    annual_value_degradation_rate: 0.005, annual_om_fraction_of_capex: 0.003,
+    analysis_term_years: 15,
+  } });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={createCiQueryClient()}><CiReadinessPage /></QueryClientProvider>);
+  await user.click(await screen.findByRole("button", { name: "Run full analysis" }));
+  await waitFor(() => expect(mocks.compareFinance).toHaveBeenCalledOnce());
+  expect(mocks.compareFinance).toHaveBeenCalledWith({
+    projectId: "project-1", pricingMode: "manual_quotes", prices: mocks.snapshot.prices,
+    assumptions: { discountRate: 0.05, annualValueEscalationRate: 0.02,
+      annualValueDegradationRate: 0.005, annualOmFractionOfCapex: 0.003, analysisTermYears: 15 },
+  });
+});

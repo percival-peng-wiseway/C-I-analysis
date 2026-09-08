@@ -21,6 +21,7 @@ import {
   fetchCiDeviceProfile,
 } from "@/features/ci/api/ci-device-profile";
 import type { CiProject } from "@/features/ci/api/ci-projects";
+import { ciFinanceDefaultsChanged, resolveCiAnnualFinanceAssumptions } from "@/features/ci/api/ci-finance-assumptions";
 import { ciProjectTariffReplayQueryKey, fetchCiSavedTariffReplay } from "@/features/ci/api/ci-scenarios";
 
 const defaultAssumptions = {
@@ -34,7 +35,7 @@ const defaultAssumptions = {
 type AnnualFinancialWorkspaceProps = { onComplete: () => void; profileReady: boolean; project: CiProject };
 
 export function CiAnnualFinancialWorkspace(props: AnnualFinancialWorkspaceProps) {
-  return <CiAnnualFinancialInteractiveWorkspace {...props} />;
+  return <CiAnnualFinancialInteractiveWorkspace key={props.project.project_id} {...props} />;
 }
 
 function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorkspaceProps) {
@@ -49,7 +50,7 @@ function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorks
   });
   const deviceProfile = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
   const [assumptions, setAssumptions] = useState(defaultAssumptions);
-  const hydrated = useRef(false);
+  const hydratedProfile = useRef<string | null>(null);
 
   const scenarios = useMemo(() => {
     const items = tariff.data?.status === "ready" ? tariff.data.result?.scenarios ?? [] : [];
@@ -57,27 +58,13 @@ function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorks
   }, [tariff.data]);
 
   useEffect(() => {
-    if (hydrated.current || !scenarios.length || savedFinance.isPending || deviceProfile.isPending) return;
-    const saved = savedFinance.data?.status === "ready" ? savedFinance.data.result : null;
-    if (saved) {
-      setAssumptions({
-        discountRate: saved.assumptions.discount_rate,
-        annualValueEscalationRate: saved.assumptions.annual_value_escalation_rate,
-        annualValueDegradationRate: saved.assumptions.annual_value_degradation_rate,
-        annualOmFractionOfCapex: saved.assumptions.annual_om_fraction_of_capex,
-        analysisTermYears: saved.assumptions.analysis_term_years,
-      });
-    } else if (deviceProfile.data?.status === "ready" && deviceProfile.data.profile) {
-      const profile = deviceProfile.data.profile;
-      setAssumptions({
-        discountRate: profile.discount_rate,
-        annualValueEscalationRate: profile.annual_value_escalation_rate,
-        annualValueDegradationRate: profile.annual_value_degradation_rate,
-        annualOmFractionOfCapex: profile.annual_om_fraction_of_capex,
-        analysisTermYears: profile.analysis_term_years,
-      });
+    if (!scenarios.length || savedFinance.isPending || deviceProfile.isPending) return;
+    const profileRevision = `${deviceProfile.data?.profile_sha256}:${deviceProfile.data?.updated_at}`;
+    if (hydratedProfile.current === profileRevision) return;
+    if (savedFinance.data?.status === "ready" || deviceProfile.data?.status === "ready") {
+      setAssumptions(resolveCiAnnualFinanceAssumptions(savedFinance.data, deviceProfile.data));
     }
-    hydrated.current = true;
+    hydratedProfile.current = profileRevision;
   }, [deviceProfile.data, deviceProfile.isPending, savedFinance.data, savedFinance.isPending, scenarios]);
 
   const run = useMutation({
@@ -104,7 +91,8 @@ function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorks
   }
 
   const profile = deviceProfile.data.status === "ready" ? deviceProfile.data.profile : null;
-  const result = run.data ?? (savedFinance.data.status === "ready" ? savedFinance.data.result : null);
+  const defaultsChanged = ciFinanceDefaultsChanged(savedFinance.data, deviceProfile.data);
+  const result = savedFinance.data.status === "ready" && !defaultsChanged ? savedFinance.data.result : null;
   const error = run.error instanceof Error ? run.error.message : null;
 
   return (
@@ -121,7 +109,7 @@ function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorks
       </header>
 
       {!profile ? <Notice text="Save PV, battery and hybrid inverter / PCS rates in Settings before running Annual finance." /> : null}
-      {savedFinance.data.status === "stale" ? <Notice text="The saved finance result is out of date because Tariff replay or the Device profile changed. Run all solutions again." /> : null}
+      {savedFinance.data.status === "stale" || defaultsChanged ? <Notice text="The saved finance result is out of date because Tariff replay or the Device profile changed. Run all solutions again." /> : null}
       {error ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p> : null}
 
       <section className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6">

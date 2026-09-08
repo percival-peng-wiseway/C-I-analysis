@@ -359,6 +359,20 @@ describe("C&I project workspace", () => {
     expect(screen.getByRole("button", { name: "Next: Scenario Analysis" })).toBeTruthy();
   });
 
+  it("opens the saved Solution Generator from Finance equipment profiles without regenerating implicitly", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 };
+    const fetchMock = mockApi([readyProject], generatedDesign);
+    const client = createCiQueryClient();
+    renderPage(client);
+    await screen.findByRole("region", { name: "Evidence sources" });
+    await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
+    await user.click(await screen.findByRole("button", { name: "Change equipment profiles" }));
+    expect(await screen.findByRole("heading", { name: "Configure solutions" })).toBeTruthy();
+    expect(client.getQueryData(ciSavedDesignQueryKey(project.project_id))).toEqual(generatedDesign);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
   it("shows the exact Solution Generator load error and retries every required query", async () => {
     const user = userEvent.setup();
     const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 6 } as const;

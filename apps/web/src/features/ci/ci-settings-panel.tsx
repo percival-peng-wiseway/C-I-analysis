@@ -186,7 +186,7 @@ export function CiSettingsPanel({ onClose }: { onClose: () => void }) {
 
               {validationMessage ? <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900" role="alert">{validationMessage}</p> : null}
               {save.error instanceof Error ? <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">{save.error.message}</p> : null}
-              {save.isSuccess ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />Device profile saved. Existing finance results are marked for recalculation.</p> : null}
+              {save.isSuccess ? <p aria-live="polite" className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status"><Check className="size-4" />Device profile saved. Run Analysis again to apply the saved prices and finance defaults.</p> : null}
               <div className="flex justify-end gap-2 border-t border-slate-200 pt-5"><Button disabled={save.isPending} onClick={onClose} type="button" variant="outline">Cancel</Button><Button disabled={save.isPending || Boolean(validationMessage)} type="submit">{save.isPending ? "Saving…" : "Save profile"}</Button></div>
             </form>
           ) : null}

@@ -8,10 +8,29 @@ export type CiAnnualFinanceAssumptions = NonNullable<
   Parameters<typeof compareCiAnnualFinancialScenarios>[0]["assumptions"]
 >;
 
+type SavedFinanceInputs = Pick<CiSavedAnnualFinancialState, "status" | "result"> & Partial<Pick<CiSavedAnnualFinancialState, "saved_at">>;
+type WorkspaceFinanceInputs = Pick<CiDeviceProfileState, "status" | "profile"> & Partial<Pick<CiDeviceProfileState, "updated_at">>;
+
+export function ciFinanceDefaultsChanged(
+  savedFinance: SavedFinanceInputs | undefined,
+  deviceProfile: WorkspaceFinanceInputs | undefined,
+): boolean {
+  // Manual quotations do not carry an equipment-profile hash. A later Settings
+  // save still supersedes their finance inputs, without changing the quotation.
+  return deviceProfile?.status === "ready" && Boolean(deviceProfile.profile)
+    && savedUtcTime(deviceProfile.updated_at) > savedUtcTime(savedFinance?.saved_at);
+}
+
+function savedUtcTime(value: string | null | undefined): number {
+  if (!value) return Number.NaN;
+  // SQLite restores UTC datetimes without an offset; PostgreSQL may retain it.
+  return Date.parse(/[zZ]$|[+-]\d{2}:\d{2}$/.test(value) ? value : `${value}Z`);
+}
+
 /** Forward saved inputs only; Python remains authoritative for financial math. */
 export function resolveCiAnnualFinanceAssumptions(
-  savedFinance: Pick<CiSavedAnnualFinancialState, "status" | "result"> | undefined,
-  deviceProfile: Pick<CiDeviceProfileState, "status" | "profile"> | undefined,
+  savedFinance: SavedFinanceInputs | undefined,
+  deviceProfile: WorkspaceFinanceInputs | undefined,
 ): CiAnnualFinanceAssumptions {
   const saved = savedFinance?.status === "ready" ? savedFinance.result : null;
   if (savedFinance?.status === "ready" && !saved) {
@@ -23,7 +42,7 @@ export function resolveCiAnnualFinanceAssumptions(
     // Never silently discard a future or unsupported authored replacement event.
     throw new Error("This analysis cannot preserve the saved replacement schedule. Review Finance before analysing again.");
   }
-  const source = saved?.assumptions
+  const source = (ciFinanceDefaultsChanged(savedFinance, deviceProfile) ? deviceProfile?.profile : saved?.assumptions)
     ?? (deviceProfile?.status === "ready" ? deviceProfile.profile : null);
   if (!source) {
     throw new Error("Save finance defaults in Settings before running financial analysis.");
