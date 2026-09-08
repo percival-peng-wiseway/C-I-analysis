@@ -293,9 +293,8 @@ def enrich_saved_ci_bill_tariff_lines(
     session, object_store: ObjectStore, *, project_id: UUID, actor: LocalActorContext,
 ) -> None:
     """Backfill rate evidence from the verified bill without changing approvals."""
-    from solar_battery.ci_bill_tariff_lines import extract_bill_tariff_lines
     from solar_battery.ci_evidence_intake import (
-        CiEvidenceIntakeError, _extract_pdf_text, _normalise_invoice_text,
+        CiEvidenceIntakeError, _extract_pdf_text, _parse_invoice_text,
     )
 
     state = ci_project_evidence_state(session, project_id=project_id, actor=actor)
@@ -310,7 +309,8 @@ def enrich_saved_ci_bill_tariff_lines(
     data = _read_verified(object_store, storage_key=row.bill_object_store_key,
                           expected_size=row.bill_size_bytes, expected_sha256=row.bill_sha256)
     try:
-        detected = extract_bill_tariff_lines(_normalise_invoice_text(_extract_pdf_text(data)))
+        parsed = _parse_invoice_text(_extract_pdf_text(data), bill_review=None)
+        detected = parsed.get("tariff_line_items", {"version": 1, "rates": {}, "factors": {}})
     except CiEvidenceIntakeError:
         detected = {"version": 1, "rates": {}, "factors": {}}
     update_ci_project_evidence_inspection_if_current(

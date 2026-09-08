@@ -1,10 +1,21 @@
 import type { CiSolarResource } from "./ci-solar-resource";
 
+export interface CiBillExtractionAudit {
+  version: 1;
+  line_items_reviewed?: boolean;
+  pages: Array<{ page: number; method: string; table_count: number }>;
+  sources: Array<{ field: string; page: number; method: string; bbox: number[]; confidence: number; text: string }>;
+  issues: Array<{ code: string; field?: string; page?: number; message: string; resolved_by_review: boolean }>;
+  checks: Array<{ code: string; passed: boolean; message: string }>;
+  line_items: Array<{ page: number; quantity: number; unit: string; rate: number; rate_unit: string; amount_aud: number; difference_aud: number; passed: boolean }>;
+}
+
 export interface CiEvidenceIntakeResult {
   solar_resource?: CiSolarResource;
   contract_version: "ci_evidence_intake_v7" | "ci_evidence_intake_v8" | "ci_evidence_intake_v9" | "ci_evidence_intake_v10";
   intake_status: "ready_for_profile_review" | "action_required";
   bill: {
+    extraction_audit?: CiBillExtractionAudit;
     fingerprint: string;
     retailer: string;
     invoice_kind: string;
@@ -210,6 +221,9 @@ export const ciProjectEvidenceQueryKey = (projectId: string) => ["ci-project-evi
 
 export interface CiBillReviewInput {
   confirmed: true;
+  expected_bill_fingerprint?: string;
+  line_items_reviewed?: boolean;
+  charge_categories_ex_gst_aud?: Record<string, number>;
   retailer: string;
   invoice_kind: string;
   nmi?: string;
@@ -639,10 +653,22 @@ function numberMatches(expected: number, actual: number, tolerance: number) {
   return Number.isFinite(expected) && Number.isFinite(actual) && Math.abs(expected - actual) <= tolerance;
 }
 
+function isSafeExtractionAudit(value: CiBillExtractionAudit | undefined) {
+  if (value === undefined) return true;
+  return Boolean(value && value.version === 1 &&
+    (value.line_items_reviewed === undefined || typeof value.line_items_reviewed === "boolean") &&
+    Array.isArray(value.pages) && value.pages.length <= 20 && value.pages.every((page) => page && Number.isInteger(page.page) && page.page > 0 && typeof page.method === "string" && Number.isInteger(page.table_count) && page.table_count >= 0) &&
+    Array.isArray(value.sources) && value.sources.length <= 200 && value.sources.every((source) => source && typeof source.field === "string" && typeof source.text === "string" && typeof source.method === "string" && Number.isInteger(source.page) && source.page > 0 && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1 && Array.isArray(source.bbox) && source.bbox.length === 4 && source.bbox.every(Number.isFinite)) &&
+    Array.isArray(value.issues) && value.issues.every((issue) => issue && typeof issue.code === "string" && typeof issue.message === "string" && typeof issue.resolved_by_review === "boolean") &&
+    Array.isArray(value.checks) && value.checks.every((check) => check && typeof check.code === "string" && typeof check.message === "string" && typeof check.passed === "boolean") &&
+    Array.isArray(value.line_items) && value.line_items.length <= 100 && value.line_items.every((line) => line && typeof line.unit === "string" && typeof line.rate_unit === "string" && typeof line.passed === "boolean" && [line.page, line.quantity, line.rate, line.amount_aud, line.difference_aud].every(Number.isFinite)));
+}
+
 function isSafeBill(value: CiEvidenceIntakeResult["bill"] | undefined) {
   const optionalFinite = (item: unknown) => item === null || (typeof item === "number" && Number.isFinite(item) && item >= 0);
   return Boolean(
     value &&
+    isSafeExtractionAudit(value.extraction_audit) &&
     typeof value.retailer === "string" &&
     typeof value.invoice_kind === "string" &&
     ["not_required", "confirmation_required", "analyst_confirmed"].includes(value.review_status) &&

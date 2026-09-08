@@ -1,6 +1,8 @@
 .git
 .github
 .local
+tmp
+C-I-analysis
 .tmp
 .pytest_cache
 .mypy_cache

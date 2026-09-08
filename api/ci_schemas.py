@@ -229,8 +229,19 @@ class CiTariffReplayRequest(CiScenarioSelectionRequest):
     persistence_mode: Literal["replace", "merge_checkpoint"] = "replace"
 
 
+class CiBillChargeCategories(BaseModel):
+    energy_charges: float = Field(ge=0, allow_inf_nan=False)
+    network_charges: float = Field(ge=0, allow_inf_nan=False)
+    regulated_charges: float = Field(ge=0, allow_inf_nan=False)
+    environmental_charges: float = Field(ge=0, allow_inf_nan=False)
+    metering_charges: float = Field(ge=0, allow_inf_nan=False)
+    additional_charges: float = Field(allow_inf_nan=False)
+
+
 class CiBillReviewRequest(BaseModel):
     confirmed: Literal[True]
+    expected_bill_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{12}$")
+    line_items_reviewed: bool = False
     retailer: str = Field(min_length=1, max_length=120)
     invoice_kind: str = Field(min_length=1, max_length=120)
     nmi: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{10,11}$")
@@ -243,6 +254,7 @@ class CiBillReviewRequest(BaseModel):
     subtotal_ex_gst_aud: float = Field(ge=0)
     gst_aud: float = Field(ge=0)
     total_inc_gst_aud: float = Field(ge=0)
+    charge_categories_ex_gst_aud: CiBillChargeCategories | None = None
 
 
 class CiAnnualFinancialSimulationRequest(BaseModel):

@@ -15,12 +15,20 @@ api = [
     "alembic>=1.13,<2",
     "fastapi>=0.115,<0.116",
     "pypdf==6.14.2",
+    "pdfplumber==0.11.10",
+    "pypdfium2==5.13.0",
     "python-multipart>=0.0.9,<0.1",
     "sqlalchemy>=2.0,<2.1",
     "uvicorn>=0.30,<1",
 ]
 postgres = [
     "psycopg[binary]>=3.2,<4",
+]
+ocr = [
+    "paddleocr==3.6.0",
+    "paddlex==3.6.1",
+    "paddlepaddle==3.3.1",
+    "psutil==7.2.2",
 ]
 pdf = [
     "weasyprint==69.0",
@@ -38,10 +46,13 @@ pdf = [
     "zopfli==0.4.3",
 ]
 dev = [
+    "psutil==7.2.2",
     "alembic>=1.13,<2",
     "fastapi>=0.115,<0.116",
     "httpx>=0.27",
     "pypdf==6.14.2",
+    "pdfplumber==0.11.10",
+    "pypdfium2==5.13.0",
     "pytest>=8",
     "pytest-xdist==3.8.0",
     "python-multipart>=0.0.9,<0.1",

@@ -110,3 +110,49 @@ The internal Python namespace remains `solar_battery` so the migrated C&I
 calculation contracts and historical test provenance stay traceable. The
 standalone product and package are named `E3 C&I Analyzer`; no Residential UI
 or database tables are present.
+
+## Local bill extraction and PaddleOCR
+
+Bill intake preserves PDF text coordinates and ruled table cells with
+`pdfplumber`. Scanned pages (including image tables beneath searchable headers)
+are rendered with PDFium and read with local PaddleOCR CPU models. The pipeline
+extracts candidate fields and source pages, rejects conflicting or low-score
+values, then reconciles amounts with Python Decimal arithmetic. It separates
+current invoice charges from amount-due balances. It does not infer demand units,
+missing categories, or tariff rates from aggregate costs.
+
+The CF Docker image includes the `ocr` extra and pre-provisions three lightweight
+models under `/opt/e3-paddle-models`: PP-OCRv5 mobile detection, English PP-OCRv5
+mobile recognition, and page orientation. Upload processing uses explicit local
+model paths and needs no OCR API key. Models run in a disposable subprocess in
+the existing API container; one OCR job is admitted at a time per API process
+(the deployed entrypoint runs one Uvicorn process). Each document has a 90-second
+wall-clock budget and a monitored 2 GiB OCR-process RSS ceiling. Pages are
+processed sequentially at no more than 8 million rendered pixels, with one CPU
+thread configured. The limits are safeguards, not a guaranteed memory reservation
+or a full-container CPU quota. Completed pages survive a later-page timeout;
+unread pages require review. Private temporary documents are deleted afterwards.
+
+To enable local OCR, install and pre-provision the optional models:
+
+```bash
+.venv/bin/python -m pip install -e '.[ocr]'
+PADDLE_PDX_MODEL_SOURCE=BOS .venv/bin/python -m solar_battery.ci_paddle_ocr --download .local/paddle-models
+export CI_PADDLE_MODEL_DIR="$PWD/.local/paddle-models"
+./scripts/dev.sh
+```
+
+Without the optional models, native PDFs still work; scanned pages explicitly
+require manual review. All OCR and generic fields require analyst confirmation.
+The UI shows selected source text, page, recognition score and Python checks.
+Analysts can correct the six charge categories, including signed adjustments.
+A flagged quantity/rate row requires a separate acknowledgement; its rates are
+never automatically imported. Existing tariff-profile and customer-dollar
+approval gates remain authoritative. Geometry-based scanned rows do not claim
+full reconstruction of complex merged-cell tables or arbitrary tariff terms.
+
+Run `./scripts/test.sh` and `pnpm frontend:build`. For an actual offline-model
+smoke test, set `CI_PADDLE_MODEL_DIR` and run
+`.venv/bin/python -m pytest tests/test_ci_bill_document.py -k real_offline -q`.
+These tests generate synthetic PDFs in memory, including rotated scans; no
+customer evidence is included in fixtures or images.

@@ -777,9 +777,15 @@ def test_project_intake_restores_files_for_generic_bill_confirmation(
         assert first_response.json()["intake_status"] == "action_required"
         assert first_response.json()["privacy"]["files_persisted"] is True
 
+        stale_response = client.post(
+            f"/api/commercial-industrial/projects/{project['project_id']}/evidence-intake/review",
+            json={**_generic_bill_review(), "expected_bill_fingerprint": "0" * 12},
+        )
+        assert stale_response.status_code == 409
+        assert stale_response.json()["detail"]["code"] == "bill_review_stale"
         response = client.post(
             f"/api/commercial-industrial/projects/{project['project_id']}/evidence-intake/review",
-            json=_generic_bill_review(),
+            json={**_generic_bill_review(), "expected_bill_fingerprint": first_response.json()["bill"]["fingerprint"]},
         )
 
     assert response.status_code == 200

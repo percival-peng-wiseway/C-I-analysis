@@ -189,7 +189,7 @@ it("inspects the usual bill and NEM12 pair and continues to physical feasibility
   expect(screen.queryByRole("heading", { name: "Uploaded roof photos" })).toBeNull();
 });
 
-it("confirms a retailer-neutral bill without adding a company adapter", async () => {
+it.each([false, true])("replaces a retailer-neutral bill without retaining old fields (confirmed=%s)", async (confirmFirstBill) => {
   const user = userEvent.setup();
   const baseResult = {
     contract_version: "ci_evidence_intake_v7",
@@ -210,15 +210,17 @@ it("confirms a retailer-neutral bill without adding a company adapter", async ()
     privacy: { files_persisted: true, customer_identifiers_returned: false, customer_facing_permission: false },
   };
   const confirmedResult = { ...baseResult, intake_status: "ready_for_profile_review", bill: { ...baseResult.bill, extraction_method: "generic_pdf_text_with_analyst_confirmation", review_status: "analyst_confirmed" }, pair_checks: [{ code: "bill_review_confirmed", passed: true, severity: "pass", message: "The retailer-neutral bill fields were confirmed for this request." }] };
+  const replacementResult = { ...baseResult, bill: { ...baseResult.bill, fingerprint: "replacement456", retailer: "EnergyAustralia", consumption_kwh: 900, subtotal_ex_gst_aud: 90, gst_aud: 9, total_inc_gst_aud: 99 } };
+  let currentResult = baseResult;
   let saved = false;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const pathname = new URL(String(input), "http://local.test").pathname;
     if (pathname.endsWith("/tariff-profile")) return new Response(JSON.stringify(tariffProfileState("not_available", null)), { status: 200 });
     if (!init?.method) return new Response(JSON.stringify(saved ? {
       contract_version: "ci_project_evidence_state_v1", status: "saved",
-      evidence: { saved_at: "2026-08-17T01:02:03+00:00", files: { bill: { filename: "agl.pdf", content_type: "application/pdf", size_bytes: 3 }, interval: { filename: "meter.csv", content_type: "text/csv", size_bytes: 5 } }, inspection: baseResult },
+      evidence: { saved_at: "2026-08-17T01:02:03+00:00", files: { bill: { filename: "bill.pdf", content_type: "application/pdf", size_bytes: 3 }, interval: { filename: "meter.csv", content_type: "text/csv", size_bytes: 5 } }, inspection: currentResult },
     } : { contract_version: "ci_project_evidence_state_v1", status: "not_saved", evidence: null }), { status: 200 });
-    if (pathname.endsWith("/inspect")) { saved = true; return new Response(JSON.stringify(baseResult), { status: 200 }); }
+    if (pathname.endsWith("/inspect")) { saved = true; return new Response(JSON.stringify(currentResult), { status: 200 }); }
     return new Response(JSON.stringify(confirmedResult), { status: 200 });
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -230,13 +232,33 @@ it("confirms a retailer-neutral bill without adding a company adapter", async ()
   expect(await screen.findByRole("heading", { name: "Confirm bill fields" })).toBeTruthy();
   await user.type(screen.getByLabelText("Manual tariff code"), "LLVT2");
   expect((screen.getByLabelText("Network tariff code") as HTMLInputElement).value).toBe("LLVT2");
-  await user.click(screen.getByRole("button", { name: "Confirm fields and re-check" }));
+  if (confirmFirstBill) {
+    for (const [label, value] of [["Energy charges", "11"], ["Network charges", "20"], ["Regulated charges", "3"], ["Environmental charges", "4"], ["Metering charges", "5"], ["Additional charges / credits", "-1"]]) {
+      await user.type(screen.getByLabelText(label), value);
+    }
+    await user.click(screen.getByRole("button", { name: "Confirm fields and re-check" }));
 
-  expect(await screen.findByText("Analyst confirmed")).toBeTruthy();
-  const reviewCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/evidence-intake/review"));
-  const submitted = JSON.parse(String(reviewCall?.[1]?.body));
-  expect(submitted).toMatchObject({ confirmed: true, retailer: "AGL", network_tariff_code: "LLVT2", total_inc_gst_aud: 46.2 });
-  expect(String(reviewCall?.[1]?.body)).not.toContain("SYNTH");
+    expect(await screen.findByText("Analyst confirmed")).toBeTruthy();
+    const reviewCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/evidence-intake/review"));
+    const submitted = JSON.parse(String(reviewCall?.[1]?.body));
+    expect(submitted).toMatchObject({ confirmed: true, retailer: "AGL", network_tariff_code: "LLVT2", total_inc_gst_aud: 46.2 });
+    expect(submitted.charge_categories_ex_gst_aud).toEqual({ energy_charges: 11, network_charges: 20, regulated_charges: 3, environmental_charges: 4, metering_charges: 5, additional_charges: -1 });
+    expect(String(reviewCall?.[1]?.body)).not.toContain("SYNTH");
+  } else {
+    await user.clear(screen.getByLabelText("Consumption (kWh)"));
+    await user.type(screen.getByLabelText("Consumption (kWh)"), "777");
+  }
+  currentResult = replacementResult;
+  await user.upload(screen.getByLabelText("Electricity bill PDF"), new File(["replacement"], "replacement.pdf", { type: "application/pdf" }));
+  expect(screen.queryByText("Analyst confirmed")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Confirm bill fields" })).toBeNull();
+  await user.upload(screen.getByLabelText("Matching interval CSV / NEM12"), new File(["nem12"], "new-meter.csv", { type: "text/csv" }));
+  await user.click(screen.getByRole("button", { name: "Inspect & replace" }));
+  expect(await screen.findByLabelText("Retailer")).toHaveProperty("value", "EnergyAustralia");
+  expect(screen.getByLabelText("Consumption (kWh)")).toHaveProperty("value", "900");
+  expect(screen.getByLabelText("Total inc GST (AUD)")).toHaveProperty("value", "99");
+  expect(screen.getByLabelText("Network tariff code")).toHaveProperty("value", "");
+  expect(screen.getByLabelText("Energy charges")).toHaveProperty("value", "");
 });
 
 const tariffProfileFixture = {

@@ -585,7 +585,8 @@ async def inspect_ci_project_evidence_uploads(
         )
         with session_factory() as session:
             require_ci_project(session, project_id=project_id, actor=actor)
-        result = inspect_ci_evidence_pair(
+        result = await run_in_threadpool(
+            inspect_ci_evidence_pair,
             bill_bytes,
             nem12_bytes,
             bill_review=bill_review,
@@ -884,12 +885,15 @@ def review_saved_ci_project_evidence(
     actor = identity_provider.current()
     try:
         with session_factory() as session:
+            source_state = ci_project_evidence_state(session, project_id=project_id, actor=actor)
             bill_source, interval_source = load_ci_project_evidence_sources(
                 session,
                 object_store,
                 project_id=project_id,
                 actor=actor,
             )
+        if payload.expected_bill_fingerprint is not None and payload.expected_bill_fingerprint != hashlib.sha256(bill_source.data).hexdigest()[:12]:
+            raise HTTPException(status_code=409, detail={"code": "bill_review_stale", "message": "The bill changed. Reload its fields before confirming."})
         result = inspect_ci_evidence_pair(
             bill_source.data,
             interval_source.data,
@@ -899,6 +903,12 @@ def review_saved_ci_project_evidence(
         result["solar_resource"] = lookup_solar_resource(result.get("bill", {}).get("site_address"))
         with session_factory() as session:
             with session.begin():
+                if not update_ci_project_evidence_inspection_if_current(
+                    session, project_id=project_id, actor=actor,
+                    expected_saved_at=source_state["evidence"]["saved_at"],
+                    inspection_result=result,
+                ):
+                    raise HTTPException(status_code=409, detail={"code": "bill_review_stale", "message": "The evidence changed during review. Reload before confirming."})
                 update_ci_project_evidence_inspection(
                     session,
                     project_id=project_id,
@@ -2044,7 +2054,7 @@ async def inspect_ci_evidence_uploads(
     bill_bytes = await bill.read(MAX_CI_BILL_UPLOAD_BYTES + 1)
     nem12_bytes = await nem12.read(MAX_CI_NEM12_UPLOAD_BYTES + 1)
     try:
-        return inspect_ci_evidence_pair(bill_bytes, nem12_bytes)
+        return await run_in_threadpool(inspect_ci_evidence_pair, bill_bytes, nem12_bytes)
     except CiEvidenceIntakeError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

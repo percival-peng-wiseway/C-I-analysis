@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import io
 import math
@@ -11,7 +12,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from pypdf import PdfReader
+from solar_battery.ci_bill_document import BillText, extract_bill_document
+from solar_battery.ci_bill_fields import structure_bill, reconcile_bill
 
 from solar_battery.ci_bill_tariff_lines import extract_bill_tariff_lines
 
@@ -1207,10 +1209,7 @@ def _annual_heatmap_contract(
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        if not reader.pages or len(reader.pages) > MAX_CI_BILL_PAGES:
-            raise ValueError("unsupported page count")
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        text = extract_bill_document(pdf_bytes)
     except Exception as exc:
         raise CiEvidenceIntakeError(
             "bill_pdf_unreadable",
@@ -1229,10 +1228,10 @@ def _parse_invoice_text(
 ) -> dict[str, Any]:
     try:
         bill = _parse_origin_invoice_text(raw_text)
-        if bill_review is None:
-            return bill
     except CiEvidenceIntakeError:
         bill = _parse_generic_invoice_text(raw_text)
+    if isinstance(raw_text, BillText):
+        bill = structure_bill(raw_text, bill, _parse_generic_date)
     return _apply_bill_review(bill, bill_review)
 
 
@@ -1411,6 +1410,8 @@ def _apply_bill_review(
             "The confirmed invoice period end must not be before its start.",
         )
     reviewed["billing_days"] = (billing_end - billing_start).days + 1
+    if bill_review.get("charge_categories_ex_gst_aud") is not None:
+        reviewed["charge_categories_ex_gst_aud"] = dict(bill_review["charge_categories_ex_gst_aud"])
     reviewed["invoice_arithmetic_scope"] = "invoice_totals_only"
     reviewed["invoice_arithmetic_reconciled"] = _totals_reconcile(
         reviewed["subtotal_ex_gst_aud"],
@@ -1426,6 +1427,10 @@ def _apply_bill_review(
     reviewed["review_status"] = (
         "analyst_confirmed" if not reviewed["missing_fields"] else "confirmation_required"
     )
+    if "extraction_audit" in reviewed:
+        # Deep-copy audit before marking source ambiguities reviewed.
+        reviewed["extraction_audit"] = copy.deepcopy(reviewed["extraction_audit"])
+        reconcile_bill(reviewed, confirmed=True, line_items_reviewed=bill_review.get("line_items_reviewed") is True)
     return reviewed
 
 
