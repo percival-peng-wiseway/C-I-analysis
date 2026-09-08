@@ -294,6 +294,7 @@ describe("Finance analysis runner", () => {
     expect(mocks.compareFinance).toHaveBeenCalledWith({
       projectId: "project-1",
       pricingMode: "manual_quotes",
+      expectedDeviceProfileSha256: "a".repeat(64),
       prices: [{ scenarioId: "case-1", upfrontCostAudExGst: 200000 }],
       assumptions: {
         discountRate: 0.07,

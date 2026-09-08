@@ -13,6 +13,7 @@ from solar_battery.ci_design_feasibility import (
     CI_PHYSICAL_REVIEW_ORDER_ID,
     rank_ci_design_feasibility_results,
 )
+from solar_battery.ci_design_freshness import design_input_changes, require_current_design_inputs
 from solar_battery.ci_projects import CiProjectError, require_ci_project
 from solar_battery.durable_cockpit.identity import LocalActorContext
 from solar_battery.durable_cockpit.orm import (
@@ -56,6 +57,7 @@ def record_ci_design_feasibility_result(
         # Serialize checkpoint merges through the project row. This is ignored
         # by SQLite and becomes a row lock when the adapter is PostgreSQL.
         session.refresh(project, with_for_update=True)
+    require_current_design_inputs(session, project=project, actor=actor)
     candidates = project.design_candidates_json
     evidence = _evidence_row(session, project_id=project_id, actor=actor)
     if (
@@ -327,7 +329,8 @@ def ci_design_feasibility_state(
     stale_reasons: list[str] = []
     candidates = project.design_candidates_json
     if (
-        candidates is None
+        design_input_changes(session, project=project, actor=actor)
+        or candidates is None
         or design_candidates_sha256(list(candidates))
         != row.design_candidates_sha256
     ):

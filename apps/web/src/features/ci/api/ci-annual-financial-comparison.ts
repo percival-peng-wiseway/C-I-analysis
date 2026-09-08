@@ -189,6 +189,7 @@ export async function compareCiAnnualFinancialScenarios(
   input: {
     projectId: string;
     pricingMode?: "manual_quotes" | "device_profile";
+    expectedDeviceProfileSha256?: string;
     prices?: Array<{ scenarioId: string; upfrontCostAudExGst: number }>;
     equipmentSelection?: CiEquipmentSelection;
     assumptions?: {
@@ -208,6 +209,7 @@ export async function compareCiAnnualFinancialScenarios(
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({
         pricing_mode: input.pricingMode ?? "manual_quotes",
+        expected_device_profile_sha256: input.expectedDeviceProfileSha256,
         prices: (input.prices ?? []).map((item) => ({
           scenario_id: item.scenarioId,
           upfront_cost_aud_ex_gst: item.upfrontCostAudExGst,

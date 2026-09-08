@@ -265,6 +265,7 @@ class CiAnnualFinancialComparisonRequest(BaseModel):
     pricing_mode: Literal["manual_quotes", "device_profile"] = "manual_quotes"
     prices: list[CiAnnualFinancialPriceInput] = Field(default_factory=list, max_length=200)
     equipment_selection: dict[str, str] | None = None
+    expected_device_profile_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     discount_rate: float | None = Field(default=None, ge=0, lt=1)
     annual_value_escalation_rate: float | None = Field(default=None, ge=0, lt=1)
     annual_value_degradation_rate: float | None = Field(default=None, ge=0, lt=1)

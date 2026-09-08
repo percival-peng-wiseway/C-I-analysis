@@ -308,6 +308,7 @@ export function CiTariffReplay({
       const financeResult = await compareCiAnnualFinancialScenarios({
         projectId: project.project_id,
         pricingMode: "manual_quotes",
+        ...(savedDeviceProfile?.profile_sha256 ? { expectedDeviceProfileSha256: savedDeviceProfile.profile_sha256 } : {}),
         prices: savedManualPrices,
         assumptions,
       });

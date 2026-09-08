@@ -11,6 +11,7 @@ import { CiProductShell } from "./ci-product-shell";
 import { createCiQueryClient } from "./ci-query-client";
 import { CiWorkspaceProvider } from "./ci-workspace-context";
 import { ciSavedDesignQueryKey } from "./api/ci-projects";
+import { ciDesignPricePreviewQueryKey, type CiDesignPricePreview } from "./api/ci-design-price-preview";
 import type { CiProjectRebateProfile, CiProjectRebateProfileState } from "./api/ci-rebate-profile";
 
 describe("saved dispatch selection matching", () => {
@@ -643,6 +644,29 @@ describe("C&I project workspace", () => {
     expect(screen.getByLabelText("Quoted Net CAPEX for Solution 1").getAttribute("aria-invalid")).toBeNull();
     await user.click(screen.getByRole("button", { name: /^Select all$/ }));
     expect(screen.getByText("3 / 3 selected")).toBeTruthy();
+  });
+
+  it("refreshes automatic quotes after a pricing revision while retaining authored quotations across navigation", async () => {
+    const user = userEvent.setup();
+    const readyProject = { ...project, setup_status: "ready", design_status: "ready", current_stage: "system_design", design_candidate_count: 2 };
+    mockApi([readyProject], generatedDesign);
+    const client = createCiQueryClient();
+    renderPage(client);
+    await screen.findByRole("region", { name: "Evidence sources" });
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    await screen.findByLabelText("Quoted Net CAPEX for Solution 1");
+    await user.clear(screen.getByLabelText("Quoted Net CAPEX for Solution 2"));
+    await user.type(screen.getByLabelText("Quoted Net CAPEX for Solution 2"), "123456");
+    const key = ciDesignPricePreviewQueryKey(project.project_id);
+    const initial = client.getQueryData<CiDesignPricePreview>(key)!;
+    const changed = { ...initial, device_profile_sha256: "f".repeat(64), solutions: initial.solutions.map((solution) => ({ ...solution, net_capex_aud_ex_gst: solution.net_capex_aud_ex_gst + 70000 })) };
+    act(() => client.setQueryData(key, changed));
+    await waitFor(() => expect(screen.getByLabelText("Quoted Net CAPEX for Solution 1")).toHaveProperty("value", "160000"));
+    expect(screen.getByLabelText("Quoted Net CAPEX for Solution 2")).toHaveProperty("value", "123456");
+    await user.click(screen.getByRole("button", { name: "Finance Analysis" }));
+    await user.click(screen.getByRole("button", { name: "Solution Generator" }));
+    expect(await screen.findByLabelText("Quoted Net CAPEX for Solution 1")).toHaveProperty("value", "160000");
+    expect(screen.getByLabelText("Quoted Net CAPEX for Solution 2")).toHaveProperty("value", "123456");
   });
 
   it("disables custom additions when the 200-solution limit is reached", async () => {

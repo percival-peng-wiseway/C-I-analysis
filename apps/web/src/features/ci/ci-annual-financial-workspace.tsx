@@ -71,6 +71,7 @@ function CiAnnualFinancialInteractiveWorkspace({ project }: AnnualFinancialWorks
     mutationFn: () => compareCiAnnualFinancialScenarios({
       projectId: project.project_id,
       pricingMode: "device_profile",
+      ...(deviceProfile.data?.profile_sha256 ? { expectedDeviceProfileSha256: deviceProfile.data.profile_sha256 } : {}),
       assumptions,
     }),
     onSuccess: (result) => {

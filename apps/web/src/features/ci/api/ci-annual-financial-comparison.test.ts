@@ -10,12 +10,13 @@ import {
 it("posts explicit Top 10 prices and accepts the fail-closed v4 comparison contract", async () => {
   const payload = comparisonPayload();
   const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-    expect(JSON.parse(String(init?.body))).toEqual({ pricing_mode: "manual_quotes", prices: [{ scenario_id: "scenario-1", upfront_cost_aud_ex_gst: 60000 }], discount_rate: 0.08, annual_value_escalation_rate: 0.025, annual_value_degradation_rate: 0.005, annual_om_fraction_of_capex: 0.015, analysis_term_years: 15 });
+    expect(JSON.parse(String(init?.body))).toEqual({ pricing_mode: "manual_quotes", expected_device_profile_sha256: "a".repeat(64), prices: [{ scenario_id: "scenario-1", upfront_cost_aud_ex_gst: 60000 }], discount_rate: 0.08, annual_value_escalation_rate: 0.025, annual_value_degradation_rate: 0.005, annual_om_fraction_of_capex: 0.015, analysis_term_years: 15 });
     return new Response(JSON.stringify(payload), { status: 200 });
   });
 
   await expect(compareCiAnnualFinancialScenarios({
     projectId: "project-1",
+    expectedDeviceProfileSha256: "a".repeat(64),
     prices: [{ scenarioId: "scenario-1", upfrontCostAudExGst: 60000 }],
     assumptions: { discountRate: 0.08, annualValueEscalationRate: 0.025, annualValueDegradationRate: 0.005, annualOmFractionOfCapex: 0.015, analysisTermYears: 15 },
   }, fetcher)).resolves.toMatchObject({

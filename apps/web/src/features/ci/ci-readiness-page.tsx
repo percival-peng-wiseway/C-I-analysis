@@ -196,6 +196,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
   const evidence = useQuery({ queryKey: ciProjectEvidenceQueryKey(project.project_id), queryFn: () => fetchCiProjectEvidence(project.project_id) });
   const deviceProfile = useQuery({ queryKey: ciDeviceProfileQueryKey, queryFn: () => fetchCiDeviceProfile() });
   const [quotedNetCapex, setQuotedNetCapex] = useState<Record<string, string>>({});
+  const [manualQuoteOverrides, setManualQuoteOverrides] = useState<Record<string, boolean>>({});
   const [selectedSolutions, setSelectedSolutions] = useState<Record<string, boolean>>({});
   const [generationRevision, setGenerationRevision] = useState(0);
   const [hydratedQuoteRevision, setHydratedQuoteRevision] = useState("");
@@ -210,6 +211,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
     onSuccess: (design) => {
       clearCiSolutionWorkspaceDraft(project.project_id);
       setQuotedNetCapex({});
+      setManualQuoteOverrides({});
       setSelectedSolutions({});
       setHydratedQuoteRevision("");
       setGenerationRevision((current) => current + 1);
@@ -249,7 +251,16 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
       solution.scenario_id,
       persistedMatches
         ? persisted.quotedNetCapex[solution.scenario_id]
-        : current[solution.scenario_id] ?? String(solution.net_capex_aud_ex_gst),
+        : manualQuoteOverrides[solution.scenario_id] && current[solution.scenario_id] !== undefined
+          ? current[solution.scenario_id]
+          : persisted?.manualQuoteOverrides?.[solution.scenario_id]
+            ? persisted.quotedNetCapex[solution.scenario_id]
+            : String(solution.net_capex_aud_ex_gst),
+    ])));
+    setManualQuoteOverrides((current) => Object.fromEntries(pricePreview.data.solutions.map((solution) => [
+      solution.scenario_id,
+      current[solution.scenario_id] ?? persisted?.manualQuoteOverrides?.[solution.scenario_id]
+        ?? (persistedMatches && Number(persisted.quotedNetCapex[solution.scenario_id]) !== solution.net_capex_aud_ex_gst),
     ])));
     setSelectedSolutions((current) => Object.fromEntries(
       pricePreview.data.solutions.map((solution) => [
@@ -258,16 +269,17 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
       ]),
     ));
     setHydratedQuoteRevision(hydrationKey);
-  }, [hydratedQuoteRevision, hydrationKey, pricePreview.data, project.project_id, quoteRevision]);
+  }, [hydratedQuoteRevision, hydrationKey, manualQuoteOverrides, pricePreview.data, project.project_id, quoteRevision]);
   useEffect(() => {
     if (!pricePreview.data || hydratedQuoteRevision !== hydrationKey) return;
     const scenarioIds = new Set(pricePreview.data.solutions.map((solution) => solution.scenario_id));
     saveCiSolutionWorkspaceDraft(project.project_id, {
       previewRevision: quoteRevision,
       quotedNetCapex: Object.fromEntries(Object.entries(quotedNetCapex).filter(([scenarioId]) => scenarioIds.has(scenarioId))),
+      manualQuoteOverrides: Object.fromEntries(Object.entries(manualQuoteOverrides).filter(([scenarioId]) => scenarioIds.has(scenarioId))),
       selectedSolutions: Object.fromEntries(Object.entries(selectedSolutions).filter(([scenarioId]) => scenarioIds.has(scenarioId))),
     });
-  }, [hydratedQuoteRevision, hydrationKey, pricePreview.data, project.project_id, quoteRevision, quotedNetCapex, selectedSolutions]);
+  }, [hydratedQuoteRevision, hydrationKey, manualQuoteOverrides, pricePreview.data, project.project_id, quoteRevision, quotedNetCapex, selectedSolutions]);
   const addCustom = useMutation({
     mutationFn: (request: CiCustomDesignCandidateRequest) => {
       return addCiCustomDesignCandidate(
@@ -277,6 +289,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
     },
     onSuccess: (design) => {
       setQuotedNetCapex((current) => ({ ...current, [design.added_scenario_id]: String(design.quoted_net_capex_aud_ex_gst) }));
+      setManualQuoteOverrides((current) => ({ ...current, [design.added_scenario_id]: true }));
       setSelectedSolutions((current) => ({ ...current, [design.added_scenario_id]: true }));
       queryClient.setQueryData(ciSavedDesignQueryKey(project.project_id), design);
       onValidated(design.candidate_count);
@@ -343,7 +356,14 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
         initialSiteFactors={project.site_factors ?? undefined}
         onSaveSiteFactors={async (factors) => {
           const saved = await saveCiSiteFactors(project.project_id, factors);
-          void queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey });
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ciProjectsQueryKey }),
+            queryClient.invalidateQueries({ queryKey: ciSavedFeasibilityQueryKey(project.project_id) }),
+            queryClient.invalidateQueries({ queryKey: ciProjectTariffReplayQueryKey(project.project_id) }),
+            queryClient.invalidateQueries({ queryKey: ciAnnualFinancialComparisonQueryKey(project.project_id) }),
+            queryClient.resetQueries({ queryKey: ciDesignPricePreviewQueryKey(project.project_id) }),
+            invalidateCiCalculationHandbook(queryClient, project.project_id),
+          ]);
           return saved;
         }}
         initialSolutions={generatedDesign?.candidates}
@@ -356,7 +376,7 @@ function PhysicalFeasibilityWorkspace({ analysisPending, onAnalysisStart, onBack
         stcSettings={<CiStcCalculatorPanel projectId={project.project_id} />}
       />
     {siteFactorsNeedRegeneration && generatedDesign ? <p role="alert" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">Site factors changed. Generate solutions again before running analysis.</p> : null}
-    {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} analysisPending={analysisPending} generationSummary={generatedDesign.generation_summary ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { setAnalysisError(null); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
+    {generatedDesign ? <GeneratedSolutionQuotes addCustomError={addCustom.error instanceof Error ? addCustom.error.message : null} analysisError={analysisError} analysisPending={analysisPending} generationSummary={generatedDesign.generation_summary ?? null} isAddingCustom={addCustom.isPending} isLoading={pricePreview.isPending || pricePreview.isFetching} onAddCustom={async (request) => { await addCustom.mutateAsync(request); }} onAnalyze={startAnalysis} onQuoteChange={(scenarioId, value) => { setAnalysisError(null); setManualQuoteOverrides((current) => ({ ...current, [scenarioId]: true })); setQuotedNetCapex((current) => ({ ...current, [scenarioId]: value })); }} onRetry={() => { void pricePreview.refetch(); }} onSelectionChange={(scenarioId, selected) => { setAnalysisError(null); setSelectedSolutions((current) => ({ ...current, [scenarioId]: selected })); }} onSelectAll={(selected) => { setAnalysisError(null); setSelectedSolutions(Object.fromEntries((pricePreview.data?.solutions ?? []).map((solution) => [solution.scenario_id, selected]))); }} preview={pricePreview.data ?? null} previewError={pricePreview.error instanceof Error ? pricePreview.error.message : null} quotes={quotedNetCapex} selectedSolutions={selectedSolutions} siteAcHeadroomKw={generatedDesign.design_context?.technical_options.site_ac_headroom_kw ?? null} /> : null}
   </div>;
 }
 
@@ -656,6 +676,7 @@ function useFullAnalysisRunner(onInvalidSnapshot: (projectId: string, snapshot: 
       const financeResult = await compareCiAnnualFinancialScenarios({
         projectId,
         pricingMode: "manual_quotes",
+        ...(deviceProfile?.profile_sha256 ? { expectedDeviceProfileSha256: deviceProfile.profile_sha256 } : {}),
         prices: snapshot.prices,
         assumptions: financeAssumptions,
       });

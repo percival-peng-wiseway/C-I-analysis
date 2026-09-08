@@ -45,6 +45,7 @@ def _assert_changed_input_is_not_saved(
     ),
     rebate_profiles: tuple[dict[str, object] | None, ...] = (None,),
     expect_saved: bool = False,
+    expected_device_profile_sha256: str | None = None,
 ) -> list[dict[str, object]]:
     record_calls: list[dict[str, object]] = []
     rebate_loader_calls: list[dict[str, object]] = []
@@ -102,6 +103,7 @@ def _assert_changed_input_is_not_saved(
             payload=CiAnnualFinancialComparisonRequest(
                 pricing_mode=pricing_mode,
                 prices=[],
+                expected_device_profile_sha256=expected_device_profile_sha256,
             ),
             identity_provider=identity_provider,
             session_factory=_FakeSession,
@@ -190,3 +192,18 @@ def test_annual_finance_never_reads_or_binds_legacy_rebate_profiles(
         ),
     )
     assert rebate_loader_calls == []
+
+
+@pytest.mark.parametrize("changed_before_request", [True, False])
+def test_manual_quote_finance_rejects_settings_changes_before_or_during_calculation(monkeypatch, changed_before_request):
+    from solar_battery.ci_device_profile import device_profile_sha256
+    tariff = {"revision": "tariff-a"}
+    replay = {"status": "ready", "result": {"revision": "replay-a"}}
+    old = {"revision": "device-a"}
+    new = {"revision": "device-b"}
+    _assert_changed_input_is_not_saved(
+        monkeypatch, pricing_mode="manual_quotes", profiles=(tariff, tariff), replay_states=(replay, replay),
+        device_states=({"status": "ready", "profile": new},) if changed_before_request else (
+            {"status": "ready", "profile": old}, {"status": "ready", "profile": new}),
+        expected_device_profile_sha256=device_profile_sha256(old),
+    )

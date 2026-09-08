@@ -71,6 +71,7 @@ from solar_battery.ci_design_context import (
     legacy_ci_design_context,
     validate_ci_design_context,
 )
+from solar_battery.ci_design_freshness import require_current_design_inputs
 from solar_battery.ci_device_profile import (
     ci_device_profile_state,
     compatible_device_profile_sha256s,
@@ -338,7 +339,7 @@ def get_ci_project_calculation_handbook(
                         preview=raw_price_preview,
                     )
                 except CiProjectError as exc:
-                    if exc.code != "ci_design_price_preview_stale":
+                    if exc.code not in {"ci_design_price_preview_stale", "ci_project_design_inputs_changed"}:
                         raise
                     price_preview_state = {
                         "status": "stale",
@@ -1111,6 +1112,7 @@ def post_ci_custom_design_candidate(
                         "ci_project_setup_required",
                         "Complete Setup & catalog before adding a custom system design.",
                     )
+                require_current_design_inputs(session, project=project, actor=actor, profile_loader=ci_device_profile_state)
                 candidates = saved_ci_design_candidates(
                     session, project_id=project_id, actor=actor
                 )
@@ -1242,6 +1244,7 @@ def post_ci_design_feasibility(
                     "ci_project_setup_required",
                     "Complete Setup & catalog before running system feasibility.",
                 )
+            require_current_design_inputs(session, project=project, actor=actor, profile_loader=ci_device_profile_state)
             candidates = saved_ci_design_candidates(
                 session, project_id=project_id, actor=actor
             )
@@ -1338,6 +1341,7 @@ def post_ci_interval_activity(
                     "ci_project_setup_required",
                     "Complete Setup & catalog before loading interval activity.",
                 )
+            require_current_design_inputs(session, project=project, actor=actor, profile_loader=ci_device_profile_state)
             candidates = saved_ci_design_candidates(
                 session, project_id=project_id, actor=actor
             )
@@ -1419,6 +1423,7 @@ def post_ci_project_tariff_replay(
                     "ci_project_setup_required",
                     "Complete Evidence before running tariff replay.",
                 )
+            require_current_design_inputs(session, project=project, actor=actor, profile_loader=ci_device_profile_state)
             candidates = saved_ci_design_candidates(
                 session, project_id=project_id, actor=actor
             )
@@ -1837,10 +1842,15 @@ def post_ci_annual_financial_comparison(
                 )
             expected_device_profile_sha256 = (
                 device_profile_sha256(device_profile)
-                if payload.pricing_mode == "device_profile"
+                if (payload.pricing_mode == "device_profile" or payload.expected_device_profile_sha256 is not None)
                 and device_profile is not None
                 else None
             )
+            if payload.expected_device_profile_sha256 is not None and payload.expected_device_profile_sha256 != expected_device_profile_sha256:
+                raise CiProjectError(
+                    "ci_project_annual_financial_inputs_changed",
+                    "Settings changed after the finance inputs were selected. Reload the saved defaults and run analysis again.",
+                )
         result = compare_ci_annual_financial_scenarios(
             tariff_replay_result=tariff_result,
             request=payload.model_dump(),
@@ -2446,6 +2456,7 @@ def _project_http_error(exc: CiProjectError) -> HTTPException:
                 "ci_project_tariff_profile_changed",
                 "ci_project_rebate_profile_required",
                 "ci_project_annual_financial_inputs_changed",
+                "ci_project_design_inputs_changed",
                 "ci_design_price_preview_required",
                 "ci_design_price_preview_stale",
                 "ci_analysis_in_progress",
@@ -2509,6 +2520,10 @@ def _calculate_ci_design_price_preview(
                 "Save the workspace Device profile in Settings before calculating Net CAPEX.",
             )
         active_device_profile = device_state["profile"]
+    require_current_design_inputs(
+        session, project=project, actor=actor,
+        profile_loader=lambda *_args, **_kwargs: {"status": "ready", "profile": active_device_profile},
+    )
     rebate_state = _calculation_rebate_state(
         session,
         project_id=project_id,
@@ -2572,6 +2587,7 @@ def _validate_saved_ci_design_price_preview(
             "Generate solutions to calculate and save their Net CAPEX snapshot.",
         )
     project = require_ci_project(session, project_id=project_id, actor=actor)
+    require_current_design_inputs(session, project=project, actor=actor, profile_loader=ci_device_profile_state)
     candidates = saved_ci_design_candidates(
         session, project_id=project_id, actor=actor
     )

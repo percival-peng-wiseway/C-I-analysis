@@ -11,6 +11,7 @@ from solar_battery.ci_project_feasibility import (
     canonical_sha256,
     design_candidates_sha256,
 )
+from solar_battery.ci_design_freshness import design_input_changes, require_current_design_inputs
 from solar_battery.ci_projects import CiProjectError, require_ci_project
 from solar_battery.ci_scenario_analysis import (
     CI_PHYSICAL_SCENARIO_CALCULATION_REVISION,
@@ -53,6 +54,8 @@ def reusable_ci_tariff_replay_result(
     """
 
     project = require_ci_project(session, project_id=project_id, actor=actor)
+    if design_input_changes(session, project=project, actor=actor):
+        return None
     candidates = project.design_candidates_json
     evidence = _evidence_row(session, project_id=project_id, actor=actor)
     row = session.scalar(
@@ -125,6 +128,7 @@ def record_ci_tariff_replay_result(
         # Serialize checkpoint merges through the project row. This is ignored
         # by SQLite and becomes a row lock when the adapter is PostgreSQL.
         session.refresh(project, with_for_update=True)
+    require_current_design_inputs(session, project=project, actor=actor)
     candidates = project.design_candidates_json
     evidence = _evidence_row(session, project_id=project_id, actor=actor)
     if (
@@ -396,7 +400,8 @@ def ci_tariff_replay_state(
     stale_reasons: list[str] = []
     candidates = project.design_candidates_json
     if (
-        candidates is None
+        design_input_changes(session, project=project, actor=actor)
+        or candidates is None
         or design_candidates_sha256(list(candidates))
         != row.design_candidates_sha256
     ):

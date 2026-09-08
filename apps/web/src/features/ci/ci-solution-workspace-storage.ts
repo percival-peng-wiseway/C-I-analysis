@@ -4,6 +4,7 @@ export interface CiSolutionWorkspaceDraft {
   previewRevision: string;
   quotedNetCapex: Record<string, string>;
   selectedSolutions: Record<string, boolean>;
+  manualQuoteOverrides?: Record<string, boolean>;
 }
 
 export type CiAnalysisPrice = {
@@ -28,11 +29,13 @@ export function loadCiSolutionWorkspaceDraft(projectId: string): CiSolutionWorks
       typeof value.previewRevision !== "string"
       || !isStringRecord(value.quotedNetCapex)
       || !isBooleanRecord(value.selectedSolutions)
+      || (value.manualQuoteOverrides !== undefined && !isBooleanRecord(value.manualQuoteOverrides))
     ) return null;
     return {
       previewRevision: value.previewRevision,
       quotedNetCapex: value.quotedNetCapex,
       selectedSolutions: value.selectedSolutions,
+      manualQuoteOverrides: value.manualQuoteOverrides,
     };
   } catch {
     return null;

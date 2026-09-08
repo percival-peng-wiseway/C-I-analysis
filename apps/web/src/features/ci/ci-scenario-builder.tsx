@@ -384,7 +384,7 @@ export function CiScenarioBuilder({
                   <TextField label="Coordinate source" value={site.location_source_label} onChange={(location_source_label) => setSite({ ...site, location_source_label })} />
                   <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={site.location_confirmed} onChange={(event) => setSite({ ...site, location_confirmed: event.target.checked })} />Coordinates confirmed</label>
                   <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Interval timing uses solar geometry, not hourly weather. Annual yield uses the selected resource above; PVGIS monthly values are reference values, not an hourly time series.</p>
-                </> : <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Legacy timing does not use location, tilt or azimuth.</p>}
+                </> : <p className="sm:col-span-2 lg:col-span-3 text-sm text-amber-900">Legacy timing does not use location, tilt or azimuth. Choose Location &amp; orientation screening to apply them to interval timing; annual energy still uses the entered yield and site losses.</p>}
               </div>
               <details className="mt-4 rounded-lg border border-slate-200 bg-white">
                 <summary className="cursor-pointer px-3 py-2.5 text-xs font-semibold text-slate-700">Site losses & availability</summary>
