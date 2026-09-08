@@ -113,6 +113,19 @@ or database tables are present.
 
 ## Local bill extraction and PaddleOCR
 
+Bill intake also prefills the Tariff profile review draft from explicit ex-GST
+charge rows in native PDF text/tables and PaddleOCR output. Retail/network TOU,
+named AEMO/service charges, explicit monthly kVA demand rates and named loss
+factors are matched to supported profile fields. Printed quantities, units,
+factor columns and line amounts must reconcile; uncertain or conflicting
+candidates remain blank. Source pages and extraction issues are visible in the
+Tariff dialog. Missing summary categories do not hide detected rates, but still
+block calculation approval. Time windows and demand floors remain reviewable
+defaults, and unrecognized charge types require manual evidence-backed entry.
+Previously saved bills with empty legacy rate extraction are upgraded once when
+Tariff is opened, using the private stored PDF. Existing nonempty rate evidence
+is preserved. No detected draft is approved automatically.
+
 Bill intake preserves PDF text coordinates and ruled table cells with
 `pdfplumber`. Scanned pages (including image tables beneath searchable headers)
 are rendered with PDFium and read with local PaddleOCR CPU models. The pipeline

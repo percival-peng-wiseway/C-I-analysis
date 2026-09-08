@@ -39,7 +39,8 @@ export interface CiProjectTariffProfile {
   minimum_chargeable_rolling_kva: number;
 }
 
-export type CiSuggestedTariffProfile = Omit<CiProjectTariffProfile, "rates" | "factors"> & {
+export type CiSuggestedTariffProfile = Omit<CiProjectTariffProfile, "rates" | "factors" | "additional_bill_adjustment_aud"> & {
+  additional_bill_adjustment_aud?: number | null;
   rates: { [K in keyof CiProjectTariffProfile["rates"]]: number | null };
   factors: { mlf: number | null; dlf: number | null };
 };
@@ -60,6 +61,8 @@ export interface CiProjectTariffProfileState {
     billed_consumption_kwh: number | null;
     charge_categories_ex_gst_aud: Record<string, number> | null;
     derivation_notice: string;
+    tariff_sources?: Array<{ field: string; page: number; text: string }>;
+    tariff_issues?: string[];
   } | null;
   blockers: Array<{ code: string; message: string }>;
 }
@@ -168,7 +171,10 @@ function isEvidenceBasis(value: unknown) {
       typeof basis.charge_categories_ex_gst_aud === "object" &&
       Object.values(basis.charge_categories_ex_gst_aud).every((amount) => typeof amount === "number" && Number.isFinite(amount))
     )) &&
-    isLabel(basis.derivation_notice, 1000)
+    isLabel(basis.derivation_notice, 1000) &&
+    (basis.tariff_sources === undefined || (Array.isArray(basis.tariff_sources) && basis.tariff_sources.every((source) =>
+      source && isLabel(source.field, 100) && Number.isInteger(source.page) && source.page > 0 && isLabel(source.text, 180)))) &&
+    (basis.tariff_issues === undefined || (Array.isArray(basis.tariff_issues) && basis.tariff_issues.every((issue) => isLabel(issue, 500))))
   );
 }
 
@@ -184,6 +190,8 @@ function isSuggestedTariffProfile(value: unknown): value is CiSuggestedTariffPro
   if (!profile?.rates || !profile?.factors) return false;
   return isTariffProfile({
     ...profile,
+    network_tariff_code: profile.network_tariff_code === "" ? "pending" : profile.network_tariff_code,
+    additional_bill_adjustment_aud: profile.additional_bill_adjustment_aud === null ? 0 : profile.additional_bill_adjustment_aud,
     rates: Object.fromEntries(Object.entries(profile.rates).map(([key, rate]) => [key, rate === null ? 0 : rate])),
     factors: Object.fromEntries(Object.entries(profile.factors).map(([key, factor]) => [key, factor === null ? 1 : factor])),
   });

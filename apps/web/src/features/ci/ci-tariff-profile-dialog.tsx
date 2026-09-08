@@ -57,15 +57,25 @@ export function CiTariffProfileDialog({
   const closeRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState<CiProjectTariffProfile>(() => initialDraft(state, detectedTariffCode));
+  const draftEditedRef = useRef(false);
+  const draftLoadedRef = useRef(false);
+  const [draft, setDraftState] = useState<CiProjectTariffProfile>(() => initialDraft(state, detectedTariffCode));
+  const setDraft: typeof setDraftState = (value) => {
+    draftEditedRef.current = true;
+    setDraftState(value);
+  };
   const [importMessage, setImportMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setDraft(initialDraft(state, detectedTariffCode));
+    setDraftState(initialDraft(state, detectedTariffCode));
+    draftEditedRef.current = false;
+    draftLoadedRef.current = Boolean(state?.profile || state?.suggested_profile);
     setImportMessage(null);
-    const frame = window.requestAnimationFrame(() => closeRef.current?.focus());
+    const frame = window.requestAnimationFrame(() => {
+      if (document.activeElement === previousFocusRef.current) closeRef.current?.focus();
+    });
     return () => {
       window.cancelAnimationFrame(frame);
       previousFocusRef.current?.focus();
@@ -73,6 +83,13 @@ export function CiTariffProfileDialog({
     // The draft is deliberately refreshed only when the dialog opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  useEffect(() => {
+    if (open && !draftEditedRef.current && !draftLoadedRef.current && (state?.profile || state?.suggested_profile)) {
+      setDraftState(initialDraft(state, detectedTariffCode));
+      draftLoadedRef.current = true;
+    }
+  }, [open, state, detectedTariffCode]);
 
   useEffect(() => {
     if (!open) return;
@@ -136,7 +153,20 @@ export function CiTariffProfileDialog({
           </div>
 
           {state?.evidence_basis ? <p className="mb-4 text-sm leading-6 text-slate-600">{state.evidence_basis.derivation_notice}</p> : null}
-          {state?.suggested_profile && state.profile ? <Button className="mb-4" disabled={busy} onClick={() => {
+          {state?.suggested_profile ? <p className="mb-3 text-sm text-slate-600">{Object.values(state.suggested_profile.rates).filter((value) => value !== null).length} rates detected from this bill. Blank fields need evidence or manual entry.</p> : null}
+          {state?.evidence_basis?.tariff_sources?.length ? <details className="mb-4 rounded-xl border border-slate-200 p-3 text-sm">
+            <summary className="cursor-pointer font-medium">Bill tariff sources</summary>
+            <ul className="mt-3 space-y-2">{state.evidence_basis.tariff_sources.map((source, index) => <li key={index}>
+              <span className="font-medium">Page {source.page} · {source.field.replace(/^tariff_/, "").replaceAll("_", " ")}</span>
+              <p className="break-words text-xs text-slate-500">{source.text}</p>
+            </li>)}</ul>
+          </details> : null}
+          {state?.evidence_basis?.tariff_issues?.length ? <details className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+            <summary className="cursor-pointer font-medium">Tariff fields needing review ({state.evidence_basis.tariff_issues.length})</summary>
+            <ul className="mt-2 list-disc space-y-1 pl-5">{state.evidence_basis.tariff_issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>
+          </details> : null}
+          {state?.suggested_profile ? <Button className="mb-4" disabled={busy} onClick={() => {
+            draftEditedRef.current = true;
             const detected = state.suggested_profile!;
             setDraft((current) => ({ ...current, ...numericDraft(detected), display_label: current.display_label,
               environmental: detected.environmental, windows: current.windows, minimum_chargeable_rolling_kva: current.minimum_chargeable_rolling_kva }));
@@ -236,6 +266,7 @@ function numericDraft(profile: CiSuggestedTariffProfile): CiProjectTariffProfile
   const copy = structuredClone(profile);
   return {
     ...copy,
+    additional_bill_adjustment_aud: copy.additional_bill_adjustment_aud === null ? Number.NaN : copy.additional_bill_adjustment_aud,
     rates: Object.fromEntries(Object.entries(copy.rates).map(([key, value]) => [key, value ?? Number.NaN])) as CiProjectTariffProfile["rates"],
     factors: { mlf: copy.factors.mlf ?? Number.NaN, dlf: copy.factors.dlf ?? Number.NaN },
   };

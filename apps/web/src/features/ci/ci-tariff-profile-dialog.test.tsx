@@ -142,3 +142,36 @@ it("replaces saved averages with detected rates only in the unsaved draft", asyn
     { label: "VEEC Charge", rate_c_per_kwh: 10, certificate_fraction: .1 },
   ]) }), true);
 });
+
+it("fills rates when evidence finishes loading after the dialog opens", () => {
+  const props = { busy: false, detectedTariffCode: "", error: null, onClose: vi.fn(), onSave: vi.fn(), open: true };
+  const { rerender } = render(<CiTariffProfileDialog {...props} state={null} />);
+  expect((screen.getByLabelText("Retail peak rate") as HTMLInputElement).value).toBe("");
+  rerender(<CiTariffProfileDialog {...props} state={state} />);
+  expect((screen.getByLabelText("Retail peak rate") as HTMLInputElement).value).toBe("10");
+  expect((screen.getByLabelText("Network tariff code") as HTMLInputElement).value).toBe("LLVT2");
+});
+
+it("keeps manual edits when evidence arrives and offers an explicit bill refill", async () => {
+  const user = userEvent.setup();
+  const props = { busy: false, detectedTariffCode: "", error: null, onClose: vi.fn(), onSave: vi.fn(), open: true };
+  const { rerender } = render(<CiTariffProfileDialog {...props} state={null} />);
+  await user.type(screen.getByLabelText("Retail peak rate"), "33");
+  rerender(<CiTariffProfileDialog {...props} state={state} />);
+  expect((screen.getByLabelText("Retail peak rate") as HTMLInputElement).value).toBe("33");
+  await user.click(screen.getByRole("button", { name: "Use detected bill rates" }));
+  expect((screen.getByLabelText("Retail peak rate") as HTMLInputElement).value).toBe("10");
+  expect(props.onSave).not.toHaveBeenCalled();
+});
+
+it("keeps legacy optional adjustments valid but leaves explicitly undetected adjustments blank", () => {
+  const legacy = { ...profile };
+  delete legacy.additional_bill_adjustment_aud;
+  const props = { busy: false, detectedTariffCode: "LLVT2", error: null, onClose: vi.fn(), onSave: vi.fn(), open: true };
+  const { unmount } = render(<CiTariffProfileDialog {...props} state={{ ...state, suggested_profile: legacy }} />);
+  expect((screen.getByRole("button", { name: "Save draft" }) as HTMLButtonElement).disabled).toBe(false);
+  unmount();
+  render(<CiTariffProfileDialog {...props} state={{ ...state, suggested_profile: { ...profile, additional_bill_adjustment_aud: null } }} />);
+  expect((screen.getByLabelText("Source bill adjustment") as HTMLInputElement).value).toBe("");
+  expect((screen.getByRole("button", { name: "Save draft" }) as HTMLButtonElement).disabled).toBe(true);
+});

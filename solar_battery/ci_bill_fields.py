@@ -13,6 +13,7 @@ import re
 from typing import Callable
 
 from solar_battery.ci_bill_document import BillText
+from solar_battery.ci_bill_tariff_layout import extract_layout_tariff_lines
 
 CATEGORY_LABELS = {
     "energy_charges": "Energy charges",
@@ -171,10 +172,13 @@ def structure_bill(document: BillText, bill: dict, parse_date: Callable[[str], d
     bill["extraction_audit"] = {"version": 1, "pages": [{"page": p["page"], "method": p["method"], "table_count": len(p["tables"])} for p in document.pages],
                                  "sources": sources, "issues": issues, "line_items": line_items[:100],
                                  "printed_billing_days": printed_days, "checks": []}
-    # Generic/OCR extraction must not later be backfilled by the legacy rate
-    # parser, which cannot associate OCR confidence with individual tariff rows.
+    # Each generic/OCR rate is independently checked against its source row.
+    # Missing summary categories must not hide valid candidates from the draft.
     if not verified_template or any(p["method"] == "paddle_ocr" for p in document.pages):
-        bill["tariff_line_items"] = {"version": 1, "rates": {}, "factors": {}}
+        detected = extract_layout_tariff_lines(document)
+        bill["tariff_line_items"] = detected
+        sources.extend(detected["sources"])
+        issues.extend(detected["issues"])
     if not verified_template:
         bill["extraction_method"] = "paddle_ocr_layout" if any(p["method"] == "paddle_ocr" for p in document.pages) else ("layout_pdf_text" if document.strip() else "manual_review_only")
     if issues or any(p["method"] == "paddle_ocr" for p in document.pages) or not verified_template:
@@ -215,7 +219,8 @@ def reconcile_bill(bill: dict, *, confirmed: bool = False, line_items_reviewed: 
         for issue in audit["issues"]:
             issue["resolved_by_review"] = True
     # Unreconciled OCR/detail evidence must never supply automatic tariff rates.
-    if any(not item["passed"] for item in audit["line_items"]) or (not confirmed and audit["issues"]):
+    if (bill.get("tariff_line_items", {}).get("version", 1) < 2
+            and (any(not item["passed"] for item in audit["line_items"]) or (not confirmed and audit["issues"]))):
         bill["tariff_line_items"] = {"version": 1, "rates": {}, "factors": {}}
         bill["review_status"] = "confirmation_required" if not confirmed else bill["review_status"]
     if not bill["invoice_arithmetic_reconciled"]:

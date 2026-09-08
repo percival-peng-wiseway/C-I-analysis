@@ -30,6 +30,12 @@ describe("project tariff profile API", () => {
     expect(() => assertCiProjectTariffProfile({ ...detailed, environmental: [{ ...detailed.environmental[0], certificate_fraction: 10 }] })).toThrow("Imported JSON");
   });
 
+  it("accepts missing code and adjustment only in the detected draft", () => {
+    const partial = { ...profile, network_tariff_code: "", additional_bill_adjustment_aud: null };
+    expect(assertCiProjectTariffProfileState({ ...state("not_available"), suggested_profile: partial }).suggested_profile).toEqual(partial);
+    expect(() => assertCiProjectTariffProfile(partial)).toThrow("Imported JSON");
+  });
+
   it("accepts an unavailable state without bill evidence or a suggestion", () => {
     expect(assertCiProjectTariffProfileState({ ...state("not_available"), suggested_profile: null })).toMatchObject({ status: "not_available", suggested_profile: null });
   });

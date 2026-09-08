@@ -303,16 +303,22 @@ def enrich_saved_ci_bill_tariff_lines(
         return
     inspection = saved["inspection"]
     bill = inspection.get("bill")
-    if not isinstance(bill, dict) or "tariff_line_items" in bill:
+    existing = bill.get("tariff_line_items", {}) if isinstance(bill, dict) else {}
+    if (not isinstance(bill, dict) or existing.get("version", 1) >= 2
+            or existing.get("rates") or existing.get("factors")):
         return
     row = _require_evidence(session, project_id=project_id, actor=actor)
     data = _read_verified(object_store, storage_key=row.bill_object_store_key,
                           expected_size=row.bill_size_bytes, expected_sha256=row.bill_sha256)
     try:
         parsed = _parse_invoice_text(_extract_pdf_text(data), bill_review=None)
+        if any(issue.get("code", "").startswith("ocr_")
+               for issue in parsed.get("extraction_audit", {}).get("issues", [])):
+            return  # A busy/unavailable OCR worker must be retried on a later read.
         detected = parsed.get("tariff_line_items", {"version": 1, "rates": {}, "factors": {}})
     except CiEvidenceIntakeError:
-        detected = {"version": 1, "rates": {}, "factors": {}}
+        return  # A failed read is retryable, not a completed extraction.
+    detected = {**detected, "version": 2}
     update_ci_project_evidence_inspection_if_current(
         session, project_id=project_id, actor=actor, expected_saved_at=saved["saved_at"],
         inspection_result={**inspection, "bill": {**bill, "tariff_line_items": detected}},

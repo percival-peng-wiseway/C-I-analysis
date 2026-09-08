@@ -95,6 +95,11 @@ def ci_project_tariff_profile_state(
             else [_blocker("tariff_evidence_required", "Upload and confirm a bill with detected tariff charge categories.")]
         )
         if suggestion is not None:
+            bill = evidence.inspection_result_json.get("bill", {})
+            if (bill.get("review_status") not in {"not_required", "analyst_confirmed"}
+                    or bill.get("invoice_arithmetic_scope") != "charge_categories_and_totals"):
+                blockers.append(_blocker("tariff_bill_confirmation_required",
+                    "Detected rates are prefilled for review. Confirm the bill and complete its charge categories in Evidence before calculation approval."))
             if annual_period is None:
                 blockers.append(_annual_interval_blocker())
             blockers.append(
@@ -400,42 +405,19 @@ def _suggested_profile(
 ) -> dict[str, object] | None:
     inspection = evidence.inspection_result_json if evidence is not None else None
     bill = inspection.get("bill") if isinstance(inspection, dict) else None
-    categories = bill.get("charge_categories_ex_gst_aud") if isinstance(bill, dict) else None
-    consumption = _positive(bill.get("consumption_kwh")) if isinstance(bill, dict) else None
-    billing_days = _positive(bill.get("billing_days")) if isinstance(bill, dict) else None
-    tariff_code = bill.get("network_tariff_code") if isinstance(bill, dict) else None
-    required_categories = {
-        "energy_charges",
-        "network_charges",
-        "regulated_charges",
-        "environmental_charges",
-        "metering_charges",
-        "additional_charges",
-    }
-    if (
-        not isinstance(categories, dict)
-        or not required_categories <= set(categories)
-        or consumption is None
-        or billing_days is None
-        or not isinstance(tariff_code, str)
-        or not tariff_code.strip()
-        or any(
-            not _finite(categories.get(key)) or float(categories[key]) < 0
-            for key in required_categories - {"additional_charges"}
-        )
-        or not _finite(categories.get("additional_charges"))
-        or abs(float(categories["additional_charges"])) > 1_000_000
-    ):
+    if not isinstance(bill, dict):
         return None
+    categories = bill.get("charge_categories_ex_gst_aud") or {}
+    tariff_code = bill.get("network_tariff_code")
     detected = bill.get("tariff_line_items", {})
     detected_rates = detected.get("rates", {})
     detected_factors = detected.get("factors", {})
-    normalized_tariff_code = tariff_code.strip()
+    normalized_tariff_code = tariff_code.strip() if isinstance(tariff_code, str) else ""
     suggestion = {
         "contract_version": CI_PROJECT_TARIFF_PROFILE_CONTRACT_VERSION,
-        "display_label": f"{normalized_tariff_code} · bill line items for review",
+        "display_label": f"{normalized_tariff_code} · bill line items for review" if normalized_tariff_code else "Bill line items for review",
         "network_tariff_code": normalized_tariff_code,
-        "additional_bill_adjustment_aud": float(categories["additional_charges"]),
+        "additional_bill_adjustment_aud": float(categories["additional_charges"]) if _finite(categories.get("additional_charges")) else None,
         "rates": {key: detected_rates.get(key) for key in sorted(_RATE_KEYS)},
         "factors": {key: detected_factors.get(key) for key in ("mlf", "dlf")},
         "windows": {
@@ -689,6 +671,11 @@ def _evidence_basis(
         "charge_categories_ex_gst_aud": (
             dict(categories) if isinstance(categories, dict) else None
         ),
+        "tariff_sources": [
+            {key: source[key] for key in ("field", "page", "text")}
+            for source in bill.get("tariff_line_items", {}).get("sources", [])
+        ],
+        "tariff_issues": [issue["message"] for issue in bill.get("tariff_line_items", {}).get("issues", [])],
         "derivation_notice": (
             "Rates are extracted from explicit bill line items before loss factors. "
             "Blank fields were not detected; category totals are never converted into tariff rates. "

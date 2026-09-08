@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import hashlib
 from uuid import UUID
 
+import pytest
 from sqlalchemy import select
 
 from solar_battery.ci_project_tariff_profile import (
@@ -778,12 +779,15 @@ def test_tariff_profile_rejects_unknown_fields_and_overnight_windows(
     assert unknown_envelope.status_code == 422
 
 
-def test_saved_legacy_bill_gets_line_rates_without_reupload(tmp_path, monkeypatch):
+@pytest.mark.parametrize('empty_rates', [False, True])
+def test_saved_legacy_bill_gets_line_rates_without_reupload(tmp_path, monkeypatch, empty_rates):
     from tests.test_ci_bill_tariff_lines import DETAILS
     from tests.test_ci_evidence_intake import BILL_TEXT
 
     legacy = _approved_evidence_inspection()
     del legacy['bill']['tariff_line_items']
+    if empty_rates:
+        legacy['bill']['tariff_line_items'] = {'version': 1, 'rates': {}, 'factors': {}}
     monkeypatch.setattr('api.ci_routes.inspect_ci_evidence_pair', lambda *_args, **_kwargs: legacy)
     monkeypatch.setattr('solar_battery.ci_evidence_intake._extract_pdf_text', lambda _: BILL_TEXT + DETAILS)
     database_url = sqlite_url_for_path(tmp_path / 'legacy-rates.sqlite3')
@@ -820,3 +824,23 @@ def test_environmental_line_items_reach_python_calculation_without_collapsing():
     quantities['import_kwh'] = 300
     charges = calculate_ci_tariff_charges(quantities, profile=profile, days=30)
     assert charges['categories']['environmental_charges'] == 6.6
+
+
+def test_partial_bill_prefills_rates_but_cannot_be_approved(tmp_path, monkeypatch):
+    partial = _approved_evidence_inspection()
+    partial['bill']['charge_categories_ex_gst_aud'] = {}
+    partial['bill']['invoice_arithmetic_scope'] = 'invoice_totals_only'
+    partial['bill']['review_status'] = 'confirmation_required'
+    monkeypatch.setattr('api.ci_routes.inspect_ci_evidence_pair', lambda *_args, **_kwargs: partial)
+    with create_test_client(sqlite_url_for_path(tmp_path / 'partial.sqlite3')) as client:
+        _, url = _create_project(client)
+        _save_evidence(client, url, bill_bytes=b'synthetic bill', nem12=_nem12_bytes())
+        state = client.get(f'{url}/tariff-profile').json()
+        draft = state['suggested_profile']
+        assert draft['rates']['retail_peak_c_per_kwh'] == 10
+        assert draft['additional_bill_adjustment_aud'] is None
+        assert any(b['code'] == 'tariff_bill_confirmation_required' for b in state['blockers'])
+        draft['additional_bill_adjustment_aud'] = 0
+        response = client.put(f'{url}/tariff-profile', json={'profile': draft, 'approve_for_calculation': True})
+        assert response.status_code == 422
+        assert response.json()['detail']['code'] == 'ci_project_tariff_evidence_required'
